@@ -95,6 +95,36 @@ if test "$(docker inspect --format '{{.State.ExitCode}}' "$init_container")" != 
   printf 'Bucket versioning initialization failed\n' >&2
   exit 1
 fi
+
+migration_ledger() {
+  "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -Atqc \
+    "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL"
+}
+if test "$(migration_ledger)" != f; then
+  printf 'Normal cloud startup must not create the migration ledger\n' >&2
+  exit 1
+fi
+"${compose[@]}" run --rm --no-deps cloud --migrate > "$test_dir/migration-a.log" 2>&1 &
+migration_a=$!
+"${compose[@]}" run --rm --no-deps cloud --migrate > "$test_dir/migration-b.log" 2>&1 &
+migration_b=$!
+migrations_ok=true
+if ! wait "$migration_a"; then
+  migrations_ok=false
+fi
+if ! wait "$migration_b"; then
+  migrations_ok=false
+fi
+if test "$migrations_ok" != true; then
+  cat "$test_dir/migration-a.log" "$test_dir/migration-b.log" >&2
+  printf 'Concurrent migration commands should serialize and succeed\n' >&2
+  exit 1
+fi
+if test "$(migration_ledger)" != t; then
+  printf 'Explicit migration command should create the SQLx migration ledger\n' >&2
+  exit 1
+fi
+
 gateway_container=$("${compose[@]}" ps --all --quiet gateway)
 test -n "$gateway_container"
 if test "$(docker inspect --format '{{.State.Running}}' "$gateway_container")" != true; then
@@ -150,4 +180,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1 smoke passed: all roles start from one image; Compose, web, API and WebSocket routes work; unsafe production config is rejected.\n'
+printf 'S1/S2 smoke passed: all roles start from one image; migration is explicit and concurrent runs serialize; Compose, web, API and WebSocket routes work; unsafe production config is rejected.\n'

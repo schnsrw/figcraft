@@ -43,6 +43,7 @@ proptest = "1"
 imbl = { version = "7", features = ["serde"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+tokio = { version = "1", features = ["net", "rt", "time"] }
 
 # rendering / formats
 tiny-skia = "0.12"

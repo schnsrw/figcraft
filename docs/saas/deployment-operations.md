@@ -144,7 +144,8 @@ idle timeouts longer than heartbeat intervals and bounded request headers.
 ## Startup sequence
 
 1. PostgreSQL becomes reachable.
-2. The explicit migration job acquires a migration lock and applies forward migrations.
+2. Run `figcraft-cloud --migrate` as an explicit one-shot release job. It applies embedded,
+   versioned SQL under a PostgreSQL advisory lock; application roles never migrate on startup.
 3. SeaweedFS creates the local bucket if absent; its initializer enables and verifies versioning.
    Lifecycle rules remain S3-014 work.
 4. Redis becomes reachable.
@@ -156,6 +157,12 @@ Application replicas do not race to run schema migrations during normal startup.
 closed when its database schema is outside the binary's supported range.
 
 ## Database migrations
+
+The cloud image's `--migrate` command uses SQLx's embedded migration set and holds PostgreSQL's
+advisory migration lock while applying pending migrations. It reads the database connection from
+the configured `DATABASE_URL` secret and reports fixed diagnostics without echoing credentials or
+driver errors. Migration application is deliberately separate from readiness and normal role
+startup. Schema compatibility and rollback policy are handled by later S2 tasks.
 
 - Every migration has a unique ordered version and checksum.
 - Migrations are forward-only in production.

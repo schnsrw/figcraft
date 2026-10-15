@@ -103,3 +103,8 @@ The API and WebSocket endpoints are diagnostic probes, not application workflows
 tool is forcibly stopped before cleanup completes, use the printed project name with `docker compose --project-name <name> --env-file
 deploy/saas/env.example --file deploy/saas/compose.yaml down --volumes --remove-orphans` to remove
 only that disposable project.
+
+Run `figcraft-cloud --migrate` as a one-shot release action after PostgreSQL is healthy and before
+rolling out application roles. It reads `DATABASE_URL` or `DATABASE_URL_FILE`, applies embedded
+versioned SQL under a PostgreSQL advisory lock, and emits only fixed, non-secret diagnostics. Normal
+role startup never applies migrations. The S2 schema migrations will be added in later tasks.

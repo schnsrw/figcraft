@@ -12,6 +12,7 @@ use std::process::ExitCode;
 enum Arguments {
     Help,
     CheckReady,
+    Migrate,
     Role(Option<CloudRole>),
 }
 
@@ -31,6 +32,13 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
                 Err("--check-ready cannot be combined with other arguments")
             };
         }
+        if argument == "--migrate" {
+            return if role.is_none() && args.next().is_none() {
+                Ok(Arguments::Migrate)
+            } else {
+                Err("--migrate cannot be combined with other arguments")
+            };
+        }
         let value = if argument == "--role" {
             args.next().ok_or("--role requires one of: all, api, relay, worker")?.into_string().map_err(|_| "arguments must be valid UTF-8")?
         } else if let Some(value) = argument.strip_prefix("--role=") {
@@ -48,7 +56,43 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
 }
 
 fn usage() {
-    println!("Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n\nDefaults to --role all.");
+    println!(
+        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n\nDefaults to --role all."
+    );
+}
+
+fn run_migrations() -> ExitCode {
+    let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
+    let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
+    let Ok(config) = CloudConfig::parse(settings) else {
+        eprintln!("figcraft-cloud: invalid cloud configuration");
+        return ExitCode::from(2);
+    };
+    let Some(database_url) = config.database_url() else {
+        eprintln!("figcraft-cloud: DATABASE_URL or DATABASE_URL_FILE is required for migration");
+        return ExitCode::from(2);
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            eprintln!("figcraft-cloud: unable to initialize migration runtime");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(figcraft_cloud_storage::migrate_database(database_url)) {
+        Ok(()) => {
+            println!("figcraft-cloud: migrations applied");
+            ExitCode::SUCCESS
+        }
+        Err(figcraft_cloud_storage::MigrationError::Connect) => {
+            eprintln!("figcraft-cloud: database connection failed");
+            ExitCode::FAILURE
+        }
+        Err(figcraft_cloud_storage::MigrationError::Apply) => {
+            eprintln!("figcraft-cloud: database migration failed");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -61,6 +105,7 @@ fn main() -> ExitCode {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) | Err(_) => ExitCode::FAILURE,
         },
+        Ok(Arguments::Migrate) => run_migrations(),
         Ok(Arguments::Role(cli_role)) => {
             let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
             let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
@@ -130,5 +175,12 @@ mod tests {
         assert_eq!(arguments(&["--check-ready"]), Ok(Arguments::CheckReady));
         assert!(arguments(&["--check-ready", "--role", "api"]).is_err());
         assert!(arguments(&["--role", "api", "--check-ready"]).is_err());
+    }
+
+    #[test]
+    fn migration_command_is_standalone() {
+        assert_eq!(arguments(&["--migrate"]), Ok(Arguments::Migrate));
+        assert!(arguments(&["--migrate", "--role", "api"]).is_err());
+        assert!(arguments(&["--role", "api", "--migrate"]).is_err());
     }
 }

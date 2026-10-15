@@ -8,9 +8,11 @@ description = "FigCraft's modular cloud application"
 
 [dependencies]
 figcraft-cloud-domain = { path = "../../crates/cloud-domain" }
+figcraft-cloud-storage = { path = "../../crates/cloud-storage" }
 base64 = { workspace = true }
 serde_json = { workspace = true }
 sha1 = "0.11"
+tokio = { workspace = true }
 
 [lints]
 workspace = true

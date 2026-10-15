@@ -12,10 +12,11 @@ and `tls-rustls-ring-webpki`. This avoids pulling in unrelated database drivers 
 TLS without requiring OpenSSL. SQLx 0.9 declares Rust 1.94 as its minimum toolchain and MIT OR
 Apache-2.0 licensing, compatible with this workspace's Rust 1.95 MSRV and distribution policy.
 The crate is confined to the cloud-storage adapter and is not part of the editor/WASM dependency
-graph. The adapter compile check uses Rust 1.96, the oldest toolchain installed in this environment;
-Rust 1.95 itself was unavailable. SQLx's declared MSRV is below the workspace floor. This checks
-dependency resolution and adapter compilation, but does not claim a direct Rust 1.95 CI run. No
-database schema or runtime behavior is introduced by S2-001.
+graph. The initial local adapter check used Rust 1.96, the oldest toolchain installed in the host
+environment. S2-002's release-like Docker build then compiled the cloud image with the repository's
+Rust 1.95 builder image, providing direct workspace-MSRV compatibility evidence. SQLx's declared
+MSRV remains below the workspace floor. No database schema or runtime behavior is introduced by
+S2-001.
 
 Alternatives considered: `tokio-postgres` is a focused async PostgreSQL protocol client with the
 same compatible license, but has no built-in migration system, so FigCraft would need to select and

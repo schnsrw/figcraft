@@ -56,9 +56,10 @@ the continuation point, a blocker or a major decision changes.
   `/api/v1/healthz` and diagnostic `/ws/v1/health` upgrades in the `api`, `relay` and `all` roles;
   `/readyz` means the transport listener is serving probes, not that database-backed operations
   work. A disposable Compose smoke starts every role from one image, checks web/API/WebSocket
-  routing and rejects unsafe production settings. S2 is now in progress: S2-001 selects SQLx 0.9
-  with embedded SQL migrations, PostgreSQL advisory locking and Rustls; the adapter compiles on Rust
-  1.96 (workspace MSRV 1.95; SQLx declares MSRV 1.94).
+  routing and rejects unsafe production settings. S2 is in progress: S2-001 selects SQLx 0.9 with
+  embedded SQL migrations, PostgreSQL advisory locking and Rustls; S2-002 adds explicit
+  `--migrate` execution, separate from normal service startup. The cloud image builds with the
+  workspace's Rust 1.95 toolchain (SQLx declares MSRV 1.94).
 - `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
   workspace, project, cloud-document, principal, object, job and request identifiers with strict
@@ -104,8 +105,8 @@ the continuation point, a blocker or a major decision changes.
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
    `docs/saas/dependency-images.md`. S1-018 and S1-GATE pass their transport and startup criteria.
-   S2-001 selected SQLx 0.9; see `docs/saas/postgres-client-decision.md`. Continue with S2-002:
-   add an explicit migration command using embedded, versioned SQL and a PostgreSQL advisory lock.
+   S2-001 and S2-002 are complete; see `docs/saas/postgres-client-decision.md` and the `--migrate`
+   command. Continue with S2-003: add schema-version range checks to cloud startup and readiness.
    Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
 3. Update task evidence and milestone counts in the same commit as each completed task.
 

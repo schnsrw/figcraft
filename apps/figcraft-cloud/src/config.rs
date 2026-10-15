@@ -152,6 +152,10 @@ impl CloudConfig {
         Ok(config)
     }
 
+    pub(super) fn database_url(&self) -> Option<&str> {
+        self.secrets.get("DATABASE_URL").map(|secret| secret.0.as_str())
+    }
+
     fn validate_production(&self) -> Result<(), &'static str> {
         if self.environment != Environment::Production {
             return Ok(());
