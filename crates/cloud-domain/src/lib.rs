@@ -300,6 +300,148 @@ impl TenantContext {
     }
 }
 
+/// A supplied public error code was not part of the stable code set.
+///
+/// The error deliberately does not retain or echo the rejected input.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ParseErrorCodeError;
+
+impl fmt::Display for ParseErrorCodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("unknown cloud error code")
+    }
+}
+
+impl std::error::Error for ParseErrorCodeError {}
+
+macro_rules! define_error_codes {
+    ($($variant:ident => ($code:literal, $message:literal)),+ $(,)?) => {
+        /// Stable machine-readable failures exposed by cloud APIs.
+        #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+        pub enum ErrorCode {
+            $($variant),+
+        }
+
+        impl ErrorCode {
+            /// The stable wire value. Existing values must never be repurposed.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $code),+
+                }
+            }
+
+            /// The fixed public message associated with this code.
+            #[must_use]
+            pub const fn public_message(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $message),+
+                }
+            }
+        }
+
+        impl FromStr for ErrorCode {
+            type Err = ParseErrorCodeError;
+
+            fn from_str(input: &str) -> Result<Self, Self::Err> {
+                match input {
+                    $($code => Ok(Self::$variant),)+
+                    _ => Err(ParseErrorCodeError),
+                }
+            }
+        }
+    };
+}
+
+define_error_codes! {
+    InvalidRequest => ("invalid_request", "The request is invalid."),
+    Unauthenticated => ("unauthenticated", "Authentication is required."),
+    Forbidden => ("forbidden", "This action is not allowed."),
+    NotFound => ("not_found", "The requested resource was not found."),
+    Conflict => ("conflict", "The request conflicts with the current state."),
+    PreconditionFailed => ("precondition_failed", "A required precondition was not met."),
+    ResourceInactive => ("resource_inactive", "The resource is not active."),
+    QuotaExceeded => ("quota_exceeded", "A usage limit has been reached."),
+    RateLimited => ("rate_limited", "Too many requests."),
+    TemporarilyUnavailable => ("temporarily_unavailable", "The service is temporarily unavailable."),
+    Internal => ("internal", "The request could not be completed."),
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl Serialize for ErrorCode {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+struct ErrorCodeVisitor;
+
+impl<'de> Visitor<'de> for ErrorCodeVisitor {
+    type Value = ErrorCode;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a stable cloud error code")
+    }
+
+    fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        value.parse().map_err(E::custom)
+    }
+}
+
+impl<'de> Deserialize<'de> for ErrorCode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_str(ErrorCodeVisitor)
+    }
+}
+
+/// The complete safe error body returned to a client.
+///
+/// Callers choose only a stable code and request identifier. The public message is fixed by the
+/// code, so internal causes, credentials, document content and rejected inputs cannot be inserted
+/// into this serialized value.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct PublicError {
+    code: ErrorCode,
+    message: &'static str,
+    request_id: RequestId,
+}
+
+impl PublicError {
+    #[must_use]
+    pub const fn new(code: ErrorCode, request_id: RequestId) -> Self {
+        Self { code, message: code.public_message(), request_id }
+    }
+
+    #[must_use]
+    pub const fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    #[must_use]
+    pub const fn message(&self) -> &'static str {
+        self.message
+    }
+
+    #[must_use]
+    pub const fn request_id(&self) -> RequestId {
+        self.request_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -364,5 +506,48 @@ mod tests {
         assert!(!QuotaLimit::Limited(QuotaValue::new(10)).allows(QuotaValue::new(7), QuotaValue::new(4)));
         assert!(!QuotaLimit::Limited(QuotaValue::new(u64::MAX)).allows(QuotaValue::new(u64::MAX), QuotaValue::new(1)));
         assert!(QuotaLimit::Unlimited.allows(QuotaValue::new(u64::MAX), QuotaValue::new(1)));
+    }
+
+    #[test]
+    fn public_errors_have_only_fixed_safe_fields() {
+        let request_id: RequestId = ID.parse().unwrap();
+        let error = PublicError::new(ErrorCode::Internal, request_id);
+        let json = serde_json::to_value(&error).unwrap();
+
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "code": "internal",
+                "message": "The request could not be completed.",
+                "request_id": ID,
+            })
+        );
+        assert_eq!(error.code(), ErrorCode::Internal);
+        assert_eq!(error.message(), ErrorCode::Internal.public_message());
+        assert_eq!(error.request_id(), request_id);
+    }
+
+    #[test]
+    fn error_codes_round_trip_without_echoing_unknown_input() {
+        for code in [
+            ErrorCode::InvalidRequest,
+            ErrorCode::Unauthenticated,
+            ErrorCode::Forbidden,
+            ErrorCode::NotFound,
+            ErrorCode::Conflict,
+            ErrorCode::PreconditionFailed,
+            ErrorCode::ResourceInactive,
+            ErrorCode::QuotaExceeded,
+            ErrorCode::RateLimited,
+            ErrorCode::TemporarilyUnavailable,
+            ErrorCode::Internal,
+        ] {
+            assert_eq!(code.as_str().parse::<ErrorCode>(), Ok(code));
+            assert!(!code.public_message().is_empty());
+        }
+
+        let rejected = "secret-token-that-must-not-be-echoed";
+        let error = rejected.parse::<ErrorCode>().unwrap_err().to_string();
+        assert!(!error.contains(rejected));
     }
 }
