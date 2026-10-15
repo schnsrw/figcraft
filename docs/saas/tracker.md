@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 10 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 11 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -95,8 +95,12 @@ the same commit as the completed task.
   Evidence: `crates/cloud-domain/tests/domain.rs` pins every identifier and policy wire shape,
   rejects nil, alternate, hostile and wrong-type values, and property-tests every non-nil UUID plus
   arbitrary input text. Patch-ledger entry FP-004 records the test-only property-test dependency.
-- [ ] **S1-006** Extend `cargo xtask layers` rules for cloud crates without changing existing layer
+- [x] **S1-006** Extend `cargo xtask layers` rules for cloud crates without changing existing layer
   permissions.
+  Evidence: `xtask/src/layers.rs` places cloud-domain at L7, cloud adapters at L8 and the cloud
+  application at L9, above existing L0–L6 editor crates. It keeps cloud-domain free of UI and
+  networking dependencies; `cargo xtask layers` passes without changing existing layer allowances.
+  Patch-ledger entry FP-005 records the upstream-owned checker extension.
 
 ### Application roles and configuration
 

@@ -23,6 +23,15 @@ const TABLE: &[(&str, u8)] = &[
     ("mcp", 6),
     // Live sessions over the network (WebSockets): above the engine, beside the UI.
     ("collab-net", 6),
+    // SaaS domain and adapters sit above the editor; the cloud binary composes them.
+    ("cloud-domain", 7),
+    ("cloud-auth", 8),
+    ("cloud-storage", 8),
+    ("cloud-relay", 8),
+    ("cloud-jobs", 8),
+    ("cloud-ai", 8),
+    ("cloud-wasm", 8),
+    ("cloud", 9),
 ];
 
 /// Networking crates: only L6 (`collab-net`) may use them.
@@ -51,6 +60,10 @@ pub fn check(root: &std::path::Path) -> bool {
             }
             if l < 6 && NETWORK.contains(&dn) {
                 eprintln!("layers: {name} (L{l}) depends on networking crate {dn}");
+                ok = false;
+            }
+            if name == "figcraft-cloud-domain" && (dn == "egui" || dn == "eframe" || dn == "rfd" || dn == "winit" || NETWORK.contains(&dn)) {
+                eprintln!("layers: {name} must remain infrastructure-independent (found {dn})");
                 ok = false;
             }
             if let Some(&dl) = layer.get(dn)
