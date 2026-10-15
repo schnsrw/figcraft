@@ -160,7 +160,8 @@ fn connection_limit_rejects_excess_clients_and_reuses_finished_slots() {
     assert_eq!(workers.len(), 1);
     client.write_all(b"invalid\n").unwrap();
     assert_eq!(reply(&mut BufReader::new(client.try_clone().unwrap()))["ok"], false);
-    client.shutdown(Shutdown::Both).unwrap();
+    // `serve` closes after invalid JSON; macOS may report NotConnected when the peer won the race.
+    let _ = client.shutdown(Shutdown::Both);
     workers.pop().unwrap().join().unwrap();
 }
 
