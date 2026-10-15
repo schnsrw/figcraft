@@ -1459,6 +1459,7 @@ version = "0.6.0"
 name = "figcraft-cloud-domain"
 version = "0.6.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
  "uuid",

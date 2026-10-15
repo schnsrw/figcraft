@@ -75,6 +75,7 @@ commit as the change.
 | FP-001 | Root `Cargo.lock` workspace package entries | Register the additive `figcraft-cloud` application and seven `figcraft-cloud-*` crates; no third-party dependencies added | Keep implementation under fork-only paths; regenerate these lock entries from the workspace manifests during upstream synchronization | active |
 | FP-002 | Root `Cargo.lock` dependency edge | Record `figcraft-cloud-domain` use of the already-resolved permissive `serde` and `uuid` packages, enabling UUIDv4 generation | Keep dependencies declared only in the fork-owned crate and regenerate the lockfile during upstream synchronization | active |
 | FP-003 | Root `Cargo.lock` test dependency edge | Record test-only `serde_json` use for pinning safe cloud error wire output; no new third-party package added | Keep the dependency in the fork-owned domain crate's dev dependencies and regenerate the lockfile during upstream synchronization | active |
+| FP-004 | Root `Cargo.lock` test dependency edge | Record test-only use of the workspace's existing `proptest` dependency for cloud identifier properties | Keep the dependency in the fork-owned domain crate's dev dependencies and regenerate the lockfile during upstream synchronization | active |
 
 Statuses are `active`, `submitted-upstream`, `accepted-upstream`, `reworked` or `removed`.
 

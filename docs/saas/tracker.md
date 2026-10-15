@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 9 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 10 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -91,7 +91,10 @@ the same commit as the completed task.
   messages and a `PublicError` envelope that can serialize only the code, allowlisted message and
   request ID. Tests pin the JSON shape, cover every code and prove rejected code text is not echoed.
   Patch-ledger entry FP-003 records the root lockfile's test-only dependency edge.
-- [ ] **S1-005** Add serialization, invalid-value and identifier property tests.
+- [x] **S1-005** Add serialization, invalid-value and identifier property tests.
+  Evidence: `crates/cloud-domain/tests/domain.rs` pins every identifier and policy wire shape,
+  rejects nil, alternate, hostile and wrong-type values, and property-tests every non-nil UUID plus
+  arbitrary input text. Patch-ledger entry FP-004 records the test-only property-test dependency.
 - [ ] **S1-006** Extend `cargo xtask layers` rules for cloud crates without changing existing layer
   permissions.
 
