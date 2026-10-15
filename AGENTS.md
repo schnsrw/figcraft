@@ -81,10 +81,33 @@ code.
   L6 depends on egui/eframe/rfd/winit. **The UI crate is swappable.**
 - **The UI is thin**: panels read engine state and act through `app.run(id, params)` /
   `app.set_props(ids, props)`. Colours come from `theme::Tokens`.
-- **Rust only** (no handwritten JS/TS). **Never break wasm** (`cargo xtask wasm`).
+- **Rust by default.** Handwritten JavaScript and TypeScript are allowed only under `webapp/` for
+  the fork-owned React SaaS shell, generated API client and typed browser-to-WASM bridge. The
+  editor engine, document model, rendering, command execution, collaboration semantics, storage,
+  native applications, AI/WASM workers and cloud services remain Rust. **Never break wasm**
+  (`cargo xtask wasm`).
+
+### Fork-owned web application
+- `webapp/` may own browser routing, authentication flows, workspace and administration screens,
+  HTTP calls and the lifecycle around the existing Rust/WASM editor.
+- TypeScript must treat document snapshots and collaboration batches as opaque bytes. It must not
+  implement a second document model, command registry, conflict resolver, undo history or realtime
+  protocol.
+- Browser networking uses `fetch` and WebSocket APIs. There must be exactly one owner of each live
+  collaboration connection; do not run competing Rust and TypeScript clients for one editor.
+- Use the npm version pinned by `webapp/package.json` and commit exactly one `package-lock.json`.
+  Dependency upgrades are deliberate; generated clients and lockfiles are never hand-edited.
+- Production dependencies must use licences compatible with MIT OR Apache-2.0 distribution. Never
+  add GPL/AGPL packages. CI checks advisories and production dependency licences.
+- Do not add third-party visual assets through npm packages. Images, icons, fonts and other assets
+  remain subject to the repository attribution rules above.
+- Generated output, dependency directories, coverage and local environment files are not committed.
+- Web changes run `npm ci --prefix webapp` and `npm run check --prefix webapp`. Rust/WASM bridge
+  changes also run `cargo xtask wasm`.
 
 ### Quality gates (before every commit)
-`cargo xtask ci` (fmt, clippy -D warnings, tests, layers, assets, wasm). One task per commit with a
+`cargo xtask ci` (fmt, clippy -D warnings, tests, layers, assets, wasm). When `webapp/` exists, also
+run `npm ci --prefix webapp` and `npm run check --prefix webapp`. One task per commit with a
 milestone id in the message (`M2.1: auto layout wrap`). Commit after every landed arc of work; push
 to `main`.
 
