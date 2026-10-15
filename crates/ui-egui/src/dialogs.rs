@@ -290,8 +290,10 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.set_width(280.0);
-                ui.add(egui::TextEdit::singleline(&mut find).hint_text(tr("Find")).desired_width(260.0));
-                ui.add(egui::TextEdit::singleline(&mut replace).hint_text(tr("Replace with")).desired_width(260.0));
+                let r = ui.add(egui::TextEdit::singleline(&mut find).hint_text(tr("Find")).desired_width(260.0));
+                crate::widgets::select_all_on_focus(ui, &r, &find);
+                let r = ui.add(egui::TextEdit::singleline(&mut replace).hint_text(tr("Replace with")).desired_width(260.0));
+                crate::widgets::select_all_on_focus(ui, &r, &replace);
                 ui.horizontal(|ui| {
                     if ui.button(tr("Find")).clicked() {
                         action = Some(false);
@@ -393,11 +395,13 @@ fn batch_rename_dialog(app: &mut FigApp, ctx: &Context) {
         ui.set_width(320.0);
         ui.label(RichText::new(trn("{n} layers", n, &[])).color(t.text_secondary));
         ui.add_space(6.0);
-        ui.add(egui::TextEdit::singleline(&mut b.find).hint_text(tr("Match (empty: the whole name)")).desired_width(300.0));
+        let r = ui.add(egui::TextEdit::singleline(&mut b.find).hint_text(tr("Match (empty: the whole name)")).desired_width(300.0));
+        crate::widgets::select_all_on_focus(ui, &r, &b.find);
         if crate::widgets::checkbox(ui, b.regex, tr("Regular expression")) {
             b.regex = !b.regex;
         }
         let to = ui.add(egui::TextEdit::singleline(&mut b.to).hint_text(tr("Rename to")).desired_width(300.0));
+        crate::widgets::select_all_on_focus(ui, &to, &b.to);
         ui.horizontal(|ui| {
             for (label, code) in [(tr("Current name"), "$&"), (tr("Number ↑"), "$n"), (tr("Number ↓"), "$N")] {
                 if ui.button(label).clicked() {

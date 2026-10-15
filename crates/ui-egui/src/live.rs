@@ -1002,6 +1002,7 @@ fn report_ui(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
             .id(egui::Id::new("live_report_reason")),
     );
     a11y::text(&resp, tr("Report"), &reason);
+    crate::widgets::select_all_on_focus(ui, &resp, &reason);
     if std::mem::take(&mut app.ui.live.focus_report) {
         resp.request_focus();
     }
@@ -1163,6 +1164,7 @@ pub fn publish_dialog(app: &mut FigApp, ctx: &egui::Context) {
         );
         // The address may carry the server key: it isn't read out.
         a11y::text(&resp, tr("Server address"), "");
+        crate::widgets::select_all_on_focus(ui, &resp, &form.server);
         if focus {
             resp.request_focus();
         }
@@ -1192,6 +1194,7 @@ pub fn publish_dialog(app: &mut FigApp, ctx: &egui::Context) {
         widgets::label(ui, tr("File name"), t.text_secondary);
         let nresp = ui.add(egui::TextEdit::singleline(&mut form.name).desired_width(380.0).id(egui::Id::new("live_publish_name")));
         a11y::text(&nresp, tr("File name"), &form.name);
+        crate::widgets::select_all_on_focus(ui, &nresp, &form.name);
         go |= nresp.lost_focus() && enter(ui) && (keyed || open_server);
         ui.add_space(4.0);
         ui.horizontal(|ui| {

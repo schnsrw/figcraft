@@ -675,11 +675,13 @@ impl TextData {
     /// Link chars `start..end` (all of them when the range is empty or the whole text) to text
     /// style `id`, defined as `def`.
     pub fn link_text_style(&mut self, start: usize, end: usize, def: &TextStyle, id: &str) {
+        let (start, end) = if start == end { (0, self.char_count()) } else { (start, end) };
         self.restyle(start, end, |s| s.take_text_style(def, id));
     }
 
     /// Unlink chars `start..end` (all when empty or whole) from their text styles; values stay.
     pub fn unlink_text_style(&mut self, start: usize, end: usize) {
+        let (start, end) = if start == end { (0, self.char_count()) } else { (start, end) };
         self.restyle(start, end, |s| s.style_id = None);
     }
 

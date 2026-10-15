@@ -538,13 +538,14 @@ fn table(app: &mut FigApp, ui: &mut Ui, view: &View, st: &mut Editor) {
     let mut child = ui.new_child(
         UiBuilder::new().max_rect(Rect::from_min_max(pos2(field.min.x + 24.0, field.min.y + 4.0), pos2(field.max.x - 4.0, field.max.y - 4.0))),
     );
-    child.add(
+    let r = child.add(
         egui::TextEdit::singleline(&mut st.query)
             .frame(egui::Frame::NONE)
             .hint_text(tr("Search"))
             .font(regular(11.0))
             .vertical_align(egui::Align::Center),
     );
+    crate::widgets::select_all_on_focus(ui, &r, &st.query);
     let note = Rect::from_min_max(pos2(field.max.x + 16.0, sr.min.y + 8.0), pos2(sr.max.x - 16.0, sr.max.y - 8.0));
     let mut bar = ui.new_child(UiBuilder::new().max_rect(note).layout(egui::Layout::right_to_left(egui::Align::Center)));
     let text = match (view.library, coll.extends.as_deref().and_then(|p| view.vars.collection(p))) {
@@ -833,10 +834,11 @@ fn value_cell(app: &mut FigApp, ui: &mut Ui, view: &View, v: &Variable, coll: &C
             }
             let hex_r = Rect::from_min_max(pos2(sw.max.x + 8.0, body.min.y + 4.0), pos2(body.max.x - 44.0, body.max.y - 4.0));
             if let Some(h) = widgets::text_field_inline(ui, id.with("hex"), &c.to_hex(), hex_r, regular(11.0))
-                && let Some(nc) = figcraft_color::Color::from_hex(&h)
+                && let Some(nc) = figcraft_color::Color::from_hex_or_name(&h)
             {
-                // Six digits keep the alpha; eight set it.
-                let nc = if h.trim().trim_start_matches('#').len() == 8 { nc } else { nc.with_alpha(c.a) };
+                // Six digits (or a colour name) keep the alpha; eight digits set it.
+                let digits = h.trim().trim_start_matches('#');
+                let nc = if digits.len() == 8 && digits.chars().all(|ch| ch.is_ascii_hexdigit()) { nc } else { nc.with_alpha(c.a) };
                 set(app, v, mode, json!(nc.to_css_hex()));
             }
             alpha_text(ui, c, body);

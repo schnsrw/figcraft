@@ -330,3 +330,28 @@ fn inner_shadow_reaches_every_edge() {
     assert!(px(&pix, 11, 25)[0] < 235, "{:?}", px(&pix, 11, 25));
     assert!(px(&pix, 35, 30)[0] > 245);
 }
+
+#[test]
+fn rect_clip_frame_matches_same_rect_fill_on_fractional_edges() {
+    let white = Options { background: Some(Color::WHITE), ..Default::default() };
+    for (x, y, w, h) in [(0.5, 0.5, 10.0, 10.0), (0.0, 0.0, 10.5, 10.5), (0.0, 0.0, 10.0, 10.0)] {
+        let mut clipped = figcraft_doc::Document::new("clipped");
+        let p = clipped.first_page().unwrap();
+        let f = clipped.create(p, NodeKind::Frame, "F", x, y, w, h).unwrap();
+        clipped.get_mut(f).unwrap().fills.clear();
+        clipped.get_mut(f).unwrap().clip = true;
+        let c = clipped.create(f, NodeKind::Rectangle, "C", -5.0, -5.0, w + 10.0, h + 10.0).unwrap();
+        clipped.get_mut(c).unwrap().fills = vec![Paint::solid(Color::BLACK)];
+
+        let mut direct = figcraft_doc::Document::new("direct");
+        let dp = direct.first_page().unwrap();
+        let r = direct.create(dp, NodeKind::Rectangle, "R", x, y, w, h).unwrap();
+        direct.get_mut(r).unwrap().fills = vec![Paint::solid(Color::BLACK)];
+
+        let a = render_view(&clipped, p, &view(12, 12), &white).unwrap();
+        let e = render_view(&direct, dp, &view(12, 12), &white).unwrap();
+        for (px_x, px_y) in [(0, 0), (0, 5), (5, 0), (5, 5), (10, 5), (5, 10), (10, 10), (11, 11)] {
+            assert_eq!(px(&a, px_x, px_y), px(&e, px_x, px_y), "frame {x},{y} {w}x{h} at ({px_x},{px_y})");
+        }
+    }
+}

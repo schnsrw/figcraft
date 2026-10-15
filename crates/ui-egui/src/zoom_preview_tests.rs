@@ -13,7 +13,7 @@ use figcraft_render::{View, Work};
 use serde_json::json;
 
 use super::{CanvasState, shows};
-use crate::render_worker::{Done, Inline, Job, PREVIEW_FACTOR, Renders, coarse_view, render_now};
+use crate::render_worker::{Done, Inline, Job, PREVIEW_AFTER_MS, PREVIEW_FACTOR, Renders, coarse_view, render_now};
 
 /// A page of ellipses with a rectangle on top; the session and the rectangle.
 fn document() -> (Session, NodeId) {
@@ -25,6 +25,35 @@ fn document() -> (Session, NodeId) {
     let made = s.execute("shape.rectangle", &json!({"x": 100, "y": 50, "width": 300, "height": 200})).unwrap();
     let rect = id_of(&made["id"]).unwrap();
     (s, rect)
+}
+
+/// A page whose renders from scratch of each of `views` take at least `ms`: the rectangle with glass
+/// and a background blur, and more and more blurred rectangles over the views until they do (a
+/// fixed scene would turn quick on a faster machine or renderer).
+fn slow_scene(views: &[View], ms: f64) -> Session {
+    let (mut s, rect) = document();
+    s.execute("effect.add", &json!({"ids": [rect], "type": "GLASS"})).unwrap();
+    s.execute("effect.add", &json!({"ids": [rect], "type": "BACKGROUND_BLUR"})).unwrap();
+    let area = views.iter().map(View::page_rect).reduce(|a, b| a.union(b)).unwrap();
+    let mut more = 8;
+    for _ in 0..12 {
+        let ds = s.ds().unwrap();
+        let quickest = views.iter().map(|v| render_now(&job(&ds.doc, ds.page, ds.uid, v.clone())).unwrap().ms).fold(f64::INFINITY, f64::min);
+        if quickest >= ms {
+            return s;
+        }
+        let (w, h) = (area.width() / 4.0, area.height() / 4.0);
+        let ids: Vec<NodeId> = (0..more)
+            .map(|k| {
+                let (fx, fy) = (f64::from(k * 37 % 101) / 101.0, f64::from(k * 59 % 103) / 103.0);
+                let p = json!({"x": area.x0 + fx * (area.width() - w), "y": area.y0 + fy * (area.height() - h), "width": w, "height": h});
+                id_of(&s.execute("shape.rectangle", &p).unwrap()["id"]).unwrap()
+            })
+            .collect();
+        s.execute("effect.add", &json!({"ids": ids, "type": "BACKGROUND_BLUR"})).unwrap();
+        more *= 2;
+    }
+    panic!("no scene renders slower than {ms} ms");
 }
 
 /// A `w` × `h` device-pixel view at `scale` centred on page point `c`.
@@ -254,18 +283,18 @@ fn a_preview_replaces_a_refined_image_of_the_same_zoom_elsewhere_on_the_page() {
 
 #[test]
 fn the_browser_worker_previews_by_measured_render_time_then_refines_the_next_frame() {
-    // Big enough that a render from scratch takes well over a frame: blurs and glass on 2400².
-    let (mut s, rect) = document();
-    s.execute("effect.add", &json!({"ids": [rect], "type": "GLASS"})).unwrap();
-    s.execute("effect.add", &json!({"ids": [rect], "type": "BACKGROUND_BLUR"})).unwrap();
+    // Renders from scratch at 200% and 100% (whose times decide the previews below) well over the
+    // threshold, wherever this runs.
+    let view = |scale| view_at((300.0, 200.0), scale, 1200, 1200);
+    let s = slow_scene(&[view(2.0), view(1.0)], 3.0 * PREVIEW_AFTER_MS);
     let ds = s.ds().unwrap();
-    let at = |scale| job(&ds.doc, ds.page, ds.uid, view_at((300.0, 200.0), scale, 2400, 2400));
+    let at = |scale| job(&ds.doc, ds.page, ds.uid, view(scale));
     // The production threshold, as the browser has it.
     let mut w = Inline::new(egui::Context::default());
     w.submit(at(2.0));
     let first = w.poll().expect("the first image");
     assert!(!first.coarse && !w.in_flight(), "the first render has no measure to preview by");
-    assert!(first.ms >= 12.0, "renders are timed in the browser worker too (and this one is slow): {} ms", first.ms);
+    assert!(first.ms >= PREVIEW_AFTER_MS, "renders are timed in the browser worker too (and this one is slow): {} ms", first.ms);
     // A new zoom: the preview this frame, the refined image the next.
     w.submit(at(1.0));
     let p = w.poll().expect("a preview");

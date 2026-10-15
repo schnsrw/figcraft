@@ -1236,8 +1236,8 @@ pub fn changed_nodes(doc: &Document, before: &Document) -> Vec<NodeId> {
 pub fn normalize(doc: &mut Document, before: &Document) {
     // Only what was touched since the last normalisation (edited, added or removed).
     let mut touched: BTreeSet<NodeId> = doc.take_dirty();
-    // A variable edit changes no layer directly, but bound layers must follow it.
-    if touched.is_empty() && doc.variables == before.variables {
+    // A variable or style edit changes no layer directly, but bound and linked layers must follow it.
+    if touched.is_empty() && doc.variables == before.variables && doc.styles == before.styles {
         return;
     }
     let m = measure::TextMeasure;
@@ -1558,6 +1558,8 @@ mod invite_links_tests;
 #[cfg(test)]
 mod keymap_tests;
 #[cfg(test)]
+mod library_range_styles_tests;
+#[cfg(test)]
 mod library_variables_tests;
 #[cfg(test)]
 mod live_access_tests;
@@ -1585,6 +1587,8 @@ mod online_tests;
 mod open_issues_tests;
 #[cfg(test)]
 mod outline_options_tests;
+#[cfg(test)]
+mod page_target_tests;
 #[cfg(test)]
 mod paint_reorder_tests;
 #[cfg(test)]

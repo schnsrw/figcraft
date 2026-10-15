@@ -591,6 +591,7 @@ fn search_field(app: &mut FigApp, ui: &mut Ui, t: &Tokens, w: f32, id: Id) {
             .vertical_align(egui::Align::Center)
             .desired_width(te_rect.width()),
     );
+    crate::widgets::select_all_on_focus(ui, &r, &app.ui.layer_filter);
     if r.has_focus() {
         ui.painter().rect_stroke(field, CornerRadius::same(5), Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
     }

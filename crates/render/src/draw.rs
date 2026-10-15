@@ -735,13 +735,17 @@ fn draw_children_clipped(ctx: &Ctx, pix: &mut Pixmap, n: &Node, xf: Affine, dept
     // layers behind the frame.
     let Some(mut layer) = pix.clone_rect(ir) else { return };
     let lxf = Affine::translate((-f64::from(lx), -f64::from(ly))) * xf;
-    let rect_clip = n.corners.uniform() == Some(0.0) && is_axis_aligned(xf);
-    // The clip (a rectangular one is the layer's own box) is known before the children draw, so
-    // their backdrops are clipped the way the layer will be.
+    let square_aligned = n.corners.uniform() == Some(0.0) && is_axis_aligned(xf);
+    let rect_clip = square_aligned && on_whole_pixels(dev);
+    // The clip (a rectangular one on whole pixels is the layer's own box) is known before the
+    // children draw, so their backdrops are clipped the way the layer will be. An axis-aligned
+    // square frame with fractional edges gets an anti-aliased mask of its box so its edge pixels
+    // are only partly covered.
     let mask = if rect_clip {
         None
     } else {
-        clip.and_then(ts_path).and_then(|cp| {
+        let own_box = (square_aligned && clip.is_none()).then(|| n.local_rect().to_path(0.1));
+        clip.or(own_box.as_ref()).and_then(ts_path).and_then(|cp| {
             let mut m = Mask::new(ir.width(), ir.height())?;
             m.fill_path(&cp, FillRule::Winding, true, ts_transform(lxf));
             Some(m)
@@ -781,4 +785,10 @@ fn is_axis_aligned(xf: Affine) -> bool {
 
 fn fract_ok(_v: f64) -> bool {
     true
+}
+
+/// Whether all four edges of the device rectangle `r` lie on whole pixels, up to the float noise
+/// `snap_px` forgives.
+fn on_whole_pixels(r: Rect) -> bool {
+    [r.x0, r.y0, r.x1, r.y1].into_iter().all(|v| (snap_px(v) - v.round()).abs() < 1e-9)
 }

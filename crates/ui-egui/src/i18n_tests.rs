@@ -322,8 +322,21 @@ fn system_languages_pick_the_first_one_with_a_catalog() {
     // An OS list: the first language there is a catalog for (English counts).
     assert_eq!(code("system", Some("nl-NL,de-DE,en-US")), "de");
     assert_eq!(code("system", Some("nl-NL, en-US,fr-FR")), "en");
-    assert_eq!(code("system", Some("nl,sv")), "en");
+    assert_eq!(code("system", Some("nl,da")), "en");
+    assert_eq!(code("system", Some("nl,sv")), "sv");
     assert_eq!(code("fr", Some("de-DE")), "fr", "a chosen language beats the system's");
+}
+
+#[test]
+fn swedish_is_picked_for_swedish_locales() {
+    let code = |pref: &str, system: Option<&str>| LANGS[resolve(pref, system)].code;
+    for tag in ["sv", "sv-SE", "sv-FI", "sv_SE.UTF-8"] {
+        assert_eq!(code("system", Some(tag)), "sv", "{tag}");
+    }
+    let sv = LANGS.iter().position(|l| l.code == "sv").unwrap();
+    assert_eq!(LANGS[sv].name, "Svenska");
+    assert!(!LANGS[sv].draft);
+    assert!(!plural_one(sv, 0) && plural_one(sv, 1) && !plural_one(sv, 2));
 }
 
 #[test]

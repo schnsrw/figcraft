@@ -73,9 +73,13 @@ mod async_dialog_tests;
 #[cfg(test)]
 mod branch_ui_tests;
 #[cfg(test)]
+mod canvas_double_click_tests;
+#[cfg(test)]
 mod canvas_drag_tests;
 #[cfg(test)]
 mod canvas_fixes_tests;
+#[cfg(test)]
+mod colorpicker_selection_tests;
 #[cfg(test)]
 mod comments_tests;
 #[cfg(test)]
@@ -92,6 +96,8 @@ mod frame_label_tests;
 mod gap_handle_tests;
 #[cfg(test)]
 mod gradient_shorthand_tests;
+#[cfg(test)]
+mod guide_release_tests;
 #[cfg(test)]
 mod home_recents_tests;
 #[cfg(test)]
@@ -127,6 +133,8 @@ mod online_tests;
 #[cfg(test)]
 mod open_issues_tests;
 #[cfg(test)]
+mod panel_remove_tests;
+#[cfg(test)]
 mod panel_reorder_tests;
 #[cfg(test)]
 mod panel_width_tests;
@@ -150,6 +158,8 @@ mod proto_editor_tests;
 mod proto_reorder_tests;
 #[cfg(test)]
 mod proto_responsive_tests;
+#[cfg(test)]
+mod select_all_tests;
 #[cfg(test)]
 mod shortcut_keys_tests;
 #[cfg(test)]
@@ -331,6 +341,17 @@ pub type AutoSaveEncoding = std::thread::JoinHandle<(figcraft_engine::cmd::file:
 /// How long a toast shows (seconds).
 const TOAST_SECS: f64 = 3.0;
 
+/// How long a toast has been showing ([`UiState::toast`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ToastClock {
+    /// Raised, not drawn yet.
+    Raised,
+    /// Drawn once; the next frame starts the clock.
+    Drawn,
+    /// Showing since this time (UI clock, seconds).
+    Since(f64),
+}
+
 /// Draw another frame `secs` from now (nothing else needs drawing until then: an idle window draws
 /// no frames).
 #[track_caller]
@@ -396,8 +417,8 @@ pub struct UiState {
     pub title_bar: TitleBar,
     /// Every icon on one screen, for reviewing the set (control channel `ui.set {iconGallery}`).
     pub icon_gallery: bool,
-    /// A message at the bottom of the window and when it first showed (UI clock, seconds).
-    pub toast: Option<(String, Option<f64>)>,
+    /// A message at the bottom of the window and how long it has been showing.
+    pub toast: Option<(String, ToastClock)>,
     pub present: Option<present::Presenter>,
     /// The full-window presenter's options (how it sizes the prototype), kept between
     /// presentations.
@@ -734,7 +755,7 @@ impl FigApp {
     }
 
     pub fn toast(&mut self, msg: impl Into<String>) {
-        self.ui.toast = Some((msg.into(), None));
+        self.ui.toast = Some((msg.into(), ToastClock::Raised));
     }
 
     /// Say that `n` documents left unsaved by a crash were opened again from recovery copies.
@@ -1061,6 +1082,9 @@ impl FigApp {
             self.language = Some(self.session.prefs.language.clone());
         }
         if !self.fonts_installed {
+            // Cmd/Ctrl+= / - / 0 zoom the canvas (view.zoomIn, view.zoomOut, view.zoom100): egui's
+            // own keyboard zoom would scale the whole interface on the same keys.
+            ctx.options_mut(|o| o.zoom_with_keyboard = false);
             theme::install_fonts(ctx, false, 0);
             self.fonts_installed = true;
         } else if figcraft_text::system_fonts_scanned() {
@@ -1373,16 +1397,32 @@ impl FigApp {
     }
 
     fn toast_ui(&mut self, ctx: &egui::Context) {
-        let Some((msg, shown)) = &mut self.ui.toast else { return };
+        let Some((msg, clock)) = &mut self.ui.toast else { return };
         let now = ctx.input(|i| i.time);
-        let left = TOAST_SECS - (now - *shown.get_or_insert(now));
+        // The clock starts on the frame after the one that first draws the toast: that frame's
+        // time was taken before whatever raised it ran (a file dialog, a long open), and would
+        // count that wait against it, so a failed open's message expired before it was seen.
+        let left = match *clock {
+            ToastClock::Raised => {
+                *clock = ToastClock::Drawn;
+                ctx.request_repaint();
+                TOAST_SECS
+            }
+            ToastClock::Drawn => {
+                *clock = ToastClock::Since(now);
+                TOAST_SECS
+            }
+            ToastClock::Since(t) => TOAST_SECS - (now - t),
+        };
         if left <= 0.0 {
             self.ui.toast = None;
             return;
         }
         let msg = msg.clone();
         // Nothing moves while it shows: the next frame it needs is the one that hides it.
-        repaint_in(ctx, left);
+        if matches!(clock, ToastClock::Since(_)) {
+            repaint_in(ctx, left);
+        }
         let screen = ctx.content_rect();
         egui::Area::new(egui::Id::new("toast"))
             .fixed_pos(egui::pos2(screen.center().x, screen.max.y - 96.0))
@@ -1466,3 +1506,6 @@ impl FigApp {
         })
     }
 }
+
+#[cfg(test)]
+mod typography_scrub_tests;

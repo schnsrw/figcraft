@@ -191,6 +191,25 @@ fn a_toast_wakes_the_ui_only_to_go_away() {
 }
 
 #[test]
+fn a_toast_raised_by_a_slow_frame_still_shows_for_3_s() {
+    let (mut h, _) = document();
+    h.settle();
+    // The Open dialog and a failed open block the frame that raises the error: the next frame
+    // comes 5 s after it started.
+    h.app.toast("can't open file.fig");
+    h.frame(vec![]);
+    h.time += 5.0;
+    h.frame(vec![]);
+    assert!(h.app.ui.toast.is_some(), "shown, not expired by the wait");
+    h.time += 2.0;
+    h.frame(vec![]);
+    assert!(h.app.ui.toast.is_some());
+    h.time += 1.5;
+    h.frame(vec![]);
+    assert!(h.app.ui.toast.is_none(), "gone after 3 s");
+}
+
+#[test]
 fn a_finished_background_render_wakes_the_ui() {
     let ctx = egui::Context::default();
     let wakes = Arc::new(AtomicUsize::new(0));

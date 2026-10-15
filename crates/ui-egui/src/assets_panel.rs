@@ -314,6 +314,7 @@ fn search_row(app: &mut FigApp, ui: &mut Ui, w: f32) -> String {
             .hint_text(tr("Search assets"))
             .desired_width(te_rect.width()),
     );
+    crate::widgets::select_all_on_focus(ui, &r, &filter);
     if r.has_focus() {
         ui.painter().rect_stroke(field, CornerRadius::same(5), Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {

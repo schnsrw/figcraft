@@ -37,6 +37,13 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
   other Latin American and US Spanish tags to es-419; zh, zh-CN, zh-SG and zh-Hans read zh-Hans,
   while Traditional Chinese (zh-Hant, zh-TW, zh-HK, zh-MO) has no catalog and reads English or the
   next OS language, never Simplified) or the browser's language on the web.
+  (Latinoamérica), Français, 日本語, 한국어, Português (Brasil), Svenska, 简体中文), applied at once without a
+  restart; System takes the first of the OS's preferred languages that has a catalog (Windows'
+  language list, macOS AppleLanguages, `LANGUAGE` then the locale variables on Linux and BSD; a regional tag
+  falls back to its language, pt-PT or pt to pt-BR, and es-419, es-MX, es-AR, es-CO and the other
+  Latin American and US Spanish tags to es-419; zh, zh-CN, zh-SG and zh-Hans read zh-Hans, while
+  Traditional Chinese (zh-Hant, zh-TW, zh-HK, zh-MO) has no catalog and reads English or the next OS
+  language, never Simplified) or the browser's language on the web.
   `pref.language {language}` sets it from the CLI, MCP and the control channel.
 - **Regional overlays:** a regional catalog whose language has a catalog lists only what differs
   (`es-419.toml` over `es.toml`); its UI strings, command labels and menu wordings read the
@@ -92,7 +99,9 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
 | Korean | ko | 2,076 / 2,076 (100%, draft) | yes | Hangul text and IME in documents; UI text in an installed Korean face (web: the `FIGCRAFT_EMBED_CJK` build) | no | draft | 1–2 (after native review) |
 | Vietnamese | vi | 0 (0%) | no | Latin with stacked diacritics | no | none | 3–5 |
 
-Other languages: none shipped (Figma ships none beyond the eight above).
+Other languages: Swedish (`sv`): every UI string translated, and 120 of the 588 command labels and
+menu wordings (the rest show in English); native review welcome. Figma ships none beyond the eight
+above.
 
 The layer is done. Per-language hours above are agent hours for a catalog of ~1,800 entries
 (a machine draft, then a pass over the panels for overflow), plus each language's plural rule where

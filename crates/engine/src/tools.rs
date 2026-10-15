@@ -1456,7 +1456,8 @@ impl Session {
             }
             Gesture::Vector(_) | Gesture::ShapeBuild { .. } | Gesture::Origin => Ok(()),
             Gesture::PenDrag { anchor } => {
-                let out = ev.p() - *anchor;
+                // A click's wobble pulls out no handle.
+                let out = if within_slop(ev, *anchor) { Vec2::ZERO } else { ev.p() - *anchor };
                 if let Some(pen) = self.tool.pen.as_mut()
                     && let Some(last) = pen.points.last_mut()
                 {
@@ -1856,9 +1857,10 @@ impl Session {
             self.widget_click(ev.p(), ev.tol() * 2.0)?;
             return Ok(());
         }
-        // The second press began a move or a resize: a double-click isn't one.
-        if matches!(self.tool.gesture, Gesture::Move { .. } | Gesture::Resize { .. }) {
+        // The second press began a move, a resize, a shape or a marquee: a double-click isn't one.
+        if matches!(self.tool.gesture, Gesture::Move { .. } | Gesture::Resize { .. } | Gesture::Draw { .. } | Gesture::Marquee { .. }) {
             self.tool.gesture = Gesture::None;
+            self.tool.overlay.marquee = None;
             self.cancel_interaction()?;
         }
         let Some(leaf) = self.hit(&doc, page, ev.p(), ev.tol() * 2.0) else { return Ok(()) };

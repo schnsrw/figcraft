@@ -540,6 +540,7 @@ fn listing(app: &FigApp, ui: &mut Ui, doc: &Document, p: &mut Picker, out: &mut 
     }
     ui.add_space(4.0);
     let r = ui.add(egui::TextEdit::singleline(&mut p.query).hint_text(tr("Search")).font(regular(11.0)).desired_width(W));
+    crate::widgets::select_all_on_focus(ui, &r, &p.query);
     if !r.has_focus() && !crate::a11y::field_focused(ui.ctx()) {
         r.request_focus();
     }
@@ -733,12 +734,13 @@ fn text_properties(ui: &mut Ui, id: &str, def: &TextStyle, out: &mut Frame) {
         });
         ui.horizontal(|ui| {
             if let Some(v) = widgets::text_field(ui, Id::new(("ts_lh", id)), &def.line_height.label(), half, tr("Line height"))
-                && let Some(lh) = crate::typography::parse_line_height(&v, Some(def.line_height)).and_then(|v| serde_json::from_value(v).ok())
+                && let Some(lh) = crate::typography::parse_line_height(&v, Some(def.line_height)).and_then(|v| crate::typography::line_height_of(&v))
             {
                 set(out, &|d| d.line_height = lh);
             }
             if let Some(v) = widgets::text_field(ui, Id::new(("ts_ls", id)), &def.letter_spacing.label(), half, tr("Letter spacing"))
-                && let Some(ls) = crate::typography::parse_letter_spacing(&v, Some(def.letter_spacing)).and_then(|v| serde_json::from_value(v).ok())
+                && let Some(ls) =
+                    crate::typography::parse_letter_spacing(&v, Some(def.letter_spacing)).and_then(|v| crate::typography::letter_spacing_of(&v))
             {
                 set(out, &|d| d.letter_spacing = ls);
             }
@@ -799,6 +801,7 @@ fn editor(ui: &mut Ui, doc: &Document, p: &mut Picker, out: &mut Frame) {
         egui::TextEdit::store_state(ui.ctx(), r.id, state);
         e.focus = false;
     }
+    crate::widgets::select_all_on_focus(ui, &r, &e.name);
     ui.add_space(6.0);
     caption(ui, tr("Description"));
     ui.add(egui::TextEdit::multiline(&mut e.description).font(regular(11.0)).desired_width(W).desired_rows(2));

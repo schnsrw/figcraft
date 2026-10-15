@@ -472,7 +472,14 @@ pub fn handle(app: &mut FigApp, ctx: &Context, method: &str, p: &Value) -> Resul
             // Comment thread popover: an id opens it, null closes it.
             if let Some(v) = p.get("commentOpen") {
                 match v.as_u64() {
-                    Some(id) => app.ui.comments.show(id),
+                    Some(id) => {
+                        // Pins are drawn for the current page only: reveal the thread's page first.
+                        let page = app.session.doc().ok().and_then(|d| d.comment(id)).map(|c| c.page);
+                        if let Some(page) = page.filter(|p| app.session.page().is_ok_and(|cur| cur != *p)) {
+                            app.session.execute("page.select", &json!({"id": page.0})).map_err(|e| e.to_string())?;
+                        }
+                        app.ui.comments.show(id);
+                    }
                     None => app.ui.comments.close(),
                 }
             }

@@ -665,8 +665,19 @@ fn screenshot(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult,
         let side = (x1 - x0).max(y1 - y0).max(1e-6);
         scale = scale.min(max / side);
     }
-    let bytes = b.render_png(&ids, scale)?;
-    let (w, h) = png_info(&bytes);
+    let mut bytes = b.render_png(&ids, scale)?;
+    let (mut w, mut h) = png_info(&bytes);
+    // Layer bounds leave out effects (shadows) and overflow of unclipped frames, but the render
+    // includes them: shrink to the measured image until it fits `maxSize` (rounding can add a pixel).
+    for _ in 0..4 {
+        let side = f64::from(w.max(h));
+        if side <= max {
+            break;
+        }
+        scale *= max / side;
+        bytes = b.render_png(&ids, scale)?;
+        (w, h) = png_info(&bytes);
+    }
     Ok(ToolResult::image(
         &bytes,
         "image/png",

@@ -20,6 +20,9 @@ Simplified Chinese (`zh-Hans`), Czech (`cs`) and Indonesian (`id`), machine-draf
 native speakers' review. Russian (`ru`, Русский) was reviewed and approved by VanTan; its catalog
 keeps Frame, Dev Mode and Smart animate as familiar tool names and uses « » quotes. Turkish (`tr`)
 was machine-drafted and reviewed by a native speaker.
+`es-419`), French (`fr`), German (`de`), Brazilian Portuguese (`pt-BR`), Japanese (`ja`), Korean (`ko`)
+and Simplified Chinese (`zh-Hans`), machine-drafted and waiting for native speakers' review, and
+Swedish (`sv`), which translates every UI string and some command labels.
 
 ## The catalogs
 

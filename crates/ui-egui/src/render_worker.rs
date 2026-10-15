@@ -20,7 +20,7 @@ use web_time::Instant;
 /// A preview has this many times fewer pixels each way than the view it stands in for.
 pub const PREVIEW_FACTOR: f64 = 4.0;
 /// Full renders quicker than this (about a frame) show without a preview first.
-const PREVIEW_AFTER_MS: f64 = 12.0;
+pub const PREVIEW_AFTER_MS: f64 = 12.0;
 
 #[derive(Clone)]
 pub struct Job {

@@ -824,12 +824,21 @@ pub fn export_bytes(doc: &Document, ids: &[NodeId], format: ExportFormat, scale:
 }
 
 /// The page area exporting `ids` with `setting` covers: what they paint (a clipping frame's own
-/// area), or their boxes with "include bounding box" and for slices.
+/// area), or their boxes with "include bounding box" and for slices. Hidden layers paint nothing,
+/// so they take no room next to visible ones (a hidden-only export keeps its own area).
 pub fn export_area(doc: &Document, ids: &[NodeId], setting: &ExportSetting) -> Option<figcraft_geom::Rect> {
+    let any_visible = ids.iter().any(|i| doc.node(*i).is_some_and(|n| n.visible));
     ids.iter()
         .filter_map(|i| {
-            let slice = doc.node(*i).is_some_and(|n| matches!(n.kind, NodeKind::Slice));
-            if setting.include_bounding_box || slice { doc.world_bounds(*i) } else { figcraft_render::export_bounds(doc, *i) }
+            let node = doc.node(*i);
+            let slice = node.is_some_and(|n| matches!(n.kind, NodeKind::Slice));
+            if setting.include_bounding_box || slice {
+                doc.world_bounds(*i)
+            } else if any_visible && node.is_some_and(|n| !n.visible) {
+                None
+            } else {
+                figcraft_render::export_bounds(doc, *i)
+            }
         })
         .reduce(|a, b| a.union(b))
 }

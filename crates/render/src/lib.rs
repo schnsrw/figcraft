@@ -440,6 +440,10 @@ mod effects_behaviour_tests;
 #[cfg(test)]
 mod gif_tests;
 #[cfg(test)]
+mod glass_bench_tests;
+#[cfg(test)]
+mod glass_cut_tests;
+#[cfg(test)]
 mod grain_tests;
 #[cfg(test)]
 mod group_effects_tests;

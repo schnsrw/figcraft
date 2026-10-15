@@ -643,13 +643,17 @@ impl<'a> Mapper<'a> {
         }
         let t = v.transform().unwrap_or_default();
         o.insert("relativeTransform".into(), rows(space * t));
-        // Paints, from the shared style when one is linked (the layer's own copy can be stale).
+        // Paints, from the shared style when one is linked (the layer's own copy can be stale),
+        // unless the layer's own paints are bound to variables: those bindings must not be lost.
         let mut styles = Obj::new();
+        let own = |k: &str| Some(v.list(k)).filter(|l| l.iter().any(paint_bound));
         let fill_style = self.style(v, "styleIdForFill", "inheritFillStyleID", "fill", &mut styles);
-        let fills = fill_style.map_or_else(|| v.list("fillPaints"), |s| s.get("fillPaints").map(Kv::list).unwrap_or_default());
+        let fills = own("fillPaints")
+            .unwrap_or_else(|| fill_style.map_or_else(|| v.list("fillPaints"), |s| s.get("fillPaints").map(Kv::list).unwrap_or_default()));
         o.insert("fills".into(), Value::Array(fills.iter().filter_map(paint).collect()));
         let stroke_style = self.style(v, "styleIdForStrokeFill", "inheritFillStyleIDForStroke", "stroke", &mut styles);
-        let strokes = stroke_style.map_or_else(|| v.list("strokePaints"), |s| s.get("fillPaints").map(Kv::list).unwrap_or_default());
+        let strokes = own("strokePaints")
+            .unwrap_or_else(|| stroke_style.map_or_else(|| v.list("strokePaints"), |s| s.get("fillPaints").map(Kv::list).unwrap_or_default()));
         o.insert("strokes".into(), Value::Array(strokes.iter().filter_map(paint).collect()));
         let effect_style = self.style(v, "styleIdForEffect", "inheritEffectStyleID", "effect", &mut styles);
         let effects = effect_style.map_or_else(|| v.list("effects"), |s| s.get("effects").map(Kv::list).unwrap_or_default());
@@ -1562,6 +1566,11 @@ fn child_layout(o: &mut Obj, v: &View, parent: Option<&View>) {
         copy_num(o, v, "gridColumnSpan", "gridColumnSpan");
         copy_num(o, v, "gridRowSpan", "gridRowSpan");
     }
+}
+
+/// Whether a paint's colour or one of its gradient stops is bound to a variable.
+fn paint_bound(p: &Kv) -> bool {
+    alias(p.get("colorVar")).is_some() || p.get("stopsVar").map(Kv::list).unwrap_or_default().iter().any(|s| alias(s.get("colorVar")).is_some())
 }
 
 fn paint(p: &Kv) -> Option<Value> {
