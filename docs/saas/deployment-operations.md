@@ -22,7 +22,7 @@ The SaaS extension will provide:
 The `deploy/saas/compose.yaml` scaffold has digest-pinned PostgreSQL, Redis and SeaweedFS images
 and a reviewed PostgreSQL volume target (see the [image review](dependency-images.md)). It defines
 named persistence volumes, health checks and readiness-gated startup. A one-shot migration job
-applies the S2-004 metadata schema before cloud startup. The gateway then serves diagnostic
+applies the S2-004 and S2-005 schemas before cloud startup. The gateway then serves diagnostic
 transport routes; product APIs and durable collaboration remain unfinished. Do not treat this as
 an operational SaaS deployment.
 
@@ -166,8 +166,8 @@ the configured `DATABASE_URL` secret and reports fixed diagnostics without echoi
 driver errors. Migration application is deliberately separate from readiness and normal role
 startup. At process startup, readiness checks the highest successfully applied migration version
 against the binary's supported inclusive range. A missing ledger or unsupported version keeps
-`/readyz` at 503 while liveness remains available. The S2-004 metadata migration has version
-`20261016000001`, which is the current supported version. Schema rollback policy is handled by
+`/readyz` at 503 while liveness remains available. The S2-005 event and operations migration has
+version `20261016000002`, which is the current supported version. Schema rollback policy is handled by
 later S2 tasks.
 
 - Every migration has a unique ordered version and checksum.

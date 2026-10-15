@@ -117,8 +117,8 @@ if test "$(migration_ledger)" != t; then
 fi
 schema_version=$("${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -Atqc \
   "SELECT MAX(version) FROM public._sqlx_migrations WHERE success = TRUE")
-if test "$schema_version" != 20261016000001; then
-  printf 'Expected the S2-004 metadata migration, got schema version %s\n' "$schema_version" >&2
+if test "$schema_version" != 20261016000002; then
+  printf 'Expected the S2-005 event and operations migration, got schema version %s\n' "$schema_version" >&2
   exit 1
 fi
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
@@ -199,4 +199,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: metadata migration and tenant constraints, concurrent migration serialization, all roles, Compose, web, API and WebSocket routes, and unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: metadata, event, snapshot and operations constraints; concurrent migration serialization; all roles and routes; unsafe-config rejection.\n'

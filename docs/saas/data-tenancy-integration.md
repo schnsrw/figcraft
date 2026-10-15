@@ -14,11 +14,17 @@
 ## PostgreSQL schema
 
 S2-004's first migration implements the core identity, tenant, team, workspace, project and
-document metadata tables below. Tenant-owned children use composite foreign keys so their parent
-identifiers cannot point into another tenant or workspace. Document event, snapshot and active
-snapshot-pointer records are S2-005 work; identity invitations, service accounts and external
-mappings are later task scope. Database roles and row-level security are S2-006/S2-007 work, so
-these schema constraints do not by themselves authorize access.
+document metadata tables below. S2-005 adds document events and snapshots, an active snapshot
+pointer, jobs, idempotency keys and audit events. Tenant-owned children use composite foreign keys
+so their parent identifiers cannot point into another tenant or workspace; the active snapshot
+pointer must belong to the same document. Snapshot `object_id` becomes a foreign key when object
+metadata lands in S3-002. Identity invitations, service accounts and external mappings are later
+task scope. Database roles and row-level security are S2-006/S2-007 work, so these schema
+constraints do not by themselves authorize access.
+
+Snapshot attempts may share a document sequence so a failed upload can be retried with a new
+immutable object. The active pointer chooses one snapshot record. Idempotency rows hold a bounded
+response envelope until expiry; the S2-011 repository will own reservation and replay semantics.
 
 ### Identity and tenancy
 
@@ -90,7 +96,7 @@ needs it.
 | `webhook_endpoints` | tenant, URL, encrypted signing secret, event filter, state |
 | `webhook_deliveries` | endpoint, event, attempt, response metadata, next attempt, state |
 | `audit_events` | tenant, actor, action, resource, request, IP metadata, outcome, timestamp |
-| `idempotency_keys` | tenant, principal, route, key hash, request hash, response reference, expiry |
+| `idempotency_keys` | tenant, principal, route, key hash, request hash, bounded response envelope, expiry |
 
 Provider secrets are referenced through encrypted secret storage. They do not appear in normal
 configuration responses, job inputs, logs or audit payloads.

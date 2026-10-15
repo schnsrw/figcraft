@@ -44,7 +44,7 @@ Compose waits for PostgreSQL and Redis health checks and for successful bucket i
 then runs a one-shot migration job before creating the cloud container. The gateway waits for both
 web health and cloud readiness. `figcraft-cloud --check-ready` probes `/readyz` with a bounded
 local HTTP request. At startup, `/readyz` is healthy only when the listener is bound and the SQLx
-migration ledger is at the supported S2-004 metadata schema version `20261016000001`. This does not imply
+migration ledger is at the supported S2-005 schema version `20261016000002`. This does not imply
 database-backed product operations work.
 The one-shot SeaweedFS initializer retries failures and fails closed if versioning cannot be
 confirmed. The edge `/healthz` is only liveness after the gateway starts.
@@ -98,8 +98,8 @@ WebSocket probes; it does not validate application workflows.
 
 The disposable `smoke-preflight.sh` exercises the Compose transport contract from synthetic,
 randomly generated secrets. Run `bash deploy/saas/smoke-preflight.sh` from any directory with Docker
-available. It builds the local images, checks service health, bucket initialization and the first
-metadata migration, runs tenant-scope constraint checks in a rolled-back transaction, starts each
+available. It builds the local images, checks service health, bucket initialization and both
+PostgreSQL migrations, runs tenant and document-scope constraint checks in a rolled-back transaction, starts each
 cloud role, and verifies web content, API and WebSocket routing plus rejection of unsafe production
 configuration. It removes its uniquely named containers, volumes and temporary secrets on exit.
 The API and WebSocket endpoints are diagnostic probes, not application workflows. If a machine or
@@ -111,5 +111,5 @@ Run `figcraft-cloud --migrate` as a one-shot release action after PostgreSQL is 
 rolling out application roles. Compose models this as a dedicated job that gates cloud startup. It
 reads `DATABASE_URL` or `DATABASE_URL_FILE`, applies embedded
 versioned SQL under a PostgreSQL advisory lock, and emits only fixed, non-secret diagnostics. Normal
-role startup never applies migrations. Event, snapshot, job, idempotency and audit migrations are
-S2-005 work; the metadata schema alone cannot serve document operations.
+role startup never applies migrations. The S2-005 event, snapshot, job, idempotency and audit
+schema is present, but repositories and durable collaboration behavior remain future S2 tasks.

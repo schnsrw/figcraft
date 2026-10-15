@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (4/21) · **Last updated:** 2026-10-16
+> **Status:** S1 complete (22/22); S2 in progress (5/21) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 4 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 5 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -242,8 +242,15 @@ the same commit as the completed task.
   grants. Composite foreign keys enforce tenant and parent scope; checks bound names, states,
   roles and sequence values. The disposable PostgreSQL smoke applies the embedded migration,
   verifies its version and rejects synthetic cross-tenant and invalid-row inserts in a rolled-back
-  transaction (`deploy/saas/schema-preflight.sql`). Cloud readiness now requires this version.
-- [ ] **S2-005** Create document-event, snapshot-pointer, job, idempotency and audit migrations.
+  transaction (`deploy/saas/schema-preflight.sql`). Cloud readiness advanced to this version at
+  S2-004; S2-005 advances it again.
+- [x] **S2-005** Create document-event, snapshot-pointer, job, idempotency and audit migrations.
+  Evidence: `20261016000002_events_jobs_audit.sql` adds ordered document events, snapshot
+  metadata and a same-document active pointer, plus tenant-scoped jobs, idempotency keys and audit
+  events. The PostgreSQL smoke checks valid records and rejects duplicate sequences, cross-tenant
+  references, wrong-document snapshot pointers, malformed checksums and invalid operational rows
+  in a rolled-back synthetic transaction. Cloud readiness now requires schema version
+  `20261016000002`. Event commit, lease, replay and repository behavior remain later S2 tasks.
 - [ ] **S2-006** Add constrained database roles for migration and runtime access.
 - [ ] **S2-007** Add transaction helper that sets tenant context for row-level security.
 
@@ -678,3 +685,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S2-002: added the explicit `--migrate` release command with SQLx PostgreSQL advisory locking; disposable Compose concurrency verification recorded. |
 | 2026-10-16 | S2-003: gated startup readiness on the supported SQLx schema range and ordered the one-shot Compose migration job before cloud roles; empty baseline 0 is supported pending S2-004. |
 | 2026-10-16 | S2-004: added the first tenant-scoped identity and document metadata migration, checked its constraints against PostgreSQL, and advanced cloud schema readiness to version 20261016000001. |
+| 2026-10-16 | S2-005: added event, snapshot-pointer, job, idempotency and audit schema with synthetic PostgreSQL constraint checks; advanced readiness to version 20261016000002. |
