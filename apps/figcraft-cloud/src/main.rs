@@ -11,6 +11,7 @@ use std::process::ExitCode;
 #[derive(Debug, Eq, PartialEq)]
 enum Arguments {
     Help,
+    CheckReady,
     Role(Option<CloudRole>),
 }
 
@@ -22,6 +23,13 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
         let argument = argument.into_string().map_err(|_| "arguments must be valid UTF-8")?;
         if argument == "--help" || argument == "-h" {
             return Ok(Arguments::Help);
+        }
+        if argument == "--check-ready" {
+            return if role.is_none() && args.next().is_none() {
+                Ok(Arguments::CheckReady)
+            } else {
+                Err("--check-ready cannot be combined with other arguments")
+            };
         }
         let value = if argument == "--role" {
             args.next().ok_or("--role requires one of: all, api, relay, worker")?.into_string().map_err(|_| "arguments must be valid UTF-8")?
@@ -40,7 +48,7 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
 }
 
 fn usage() {
-    println!("Usage: figcraft-cloud [--role <all|api|relay|worker>]\n\nDefaults to --role all.");
+    println!("Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n\nDefaults to --role all.");
 }
 
 fn main() -> ExitCode {
@@ -49,6 +57,10 @@ fn main() -> ExitCode {
             usage();
             ExitCode::SUCCESS
         }
+        Ok(Arguments::CheckReady) => match health::probe_ready() {
+            Ok(true) => ExitCode::SUCCESS,
+            Ok(false) | Err(_) => ExitCode::FAILURE,
+        },
         Ok(Arguments::Role(cli_role)) => {
             let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
             let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
@@ -111,5 +123,12 @@ mod tests {
     fn help_is_recognized() {
         assert_eq!(arguments(&["--help"]), Ok(Arguments::Help));
         assert_eq!(arguments(&["-h"]), Ok(Arguments::Help));
+    }
+
+    #[test]
+    fn readiness_probe_is_standalone() {
+        assert_eq!(arguments(&["--check-ready"]), Ok(Arguments::CheckReady));
+        assert!(arguments(&["--check-ready", "--role", "api"]).is_err());
+        assert!(arguments(&["--role", "api", "--check-ready"]).is_err());
     }
 }

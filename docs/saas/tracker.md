@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 cloud foundation in progress (20/22) · **Last updated:** 2026-10-16
+> **Status:** S1 cloud foundation in progress (21/22) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 20 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 21 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -152,13 +152,22 @@ the same commit as the completed task.
   inputs refuse unreviewed PostgreSQL, Redis, MinIO and client release defaults under D-001;
   `docker compose config` validated all service definitions with synthetic image references and
   rejected missing references. The Caddy gateway configuration and static web image build passed.
-  This is topology evidence, not a healthy stack: S1-016 and S1-018 retain persistence, health,
-  dependency and end-to-end acceptance work.
+  This is topology evidence, not a healthy stack: S1-016 adds persistence and health ordering, while
+  S1-018 retains end-to-end acceptance work.
 - [x] **S1-015** Add `deploy/saas/env.example` containing no working production secret.
   Evidence: `deploy/saas/env.example` contains only loopback or reserved-host development values
   and mounted-secret paths; the adjacent ignore rules and README keep `.env` and `secrets/` out of
   Git and state that no runnable stack exists yet.
-- [ ] **S1-016** Add container health checks, dependency ordering and named volumes.
+- [x] **S1-016** Add container health checks, dependency ordering and named volumes.
+  Evidence: Compose defines PostgreSQL, Redis and MinIO named data volumes; PostgreSQL's mount
+  target is a required D-001 input because the official image changed its volume layout. Web,
+  gateway, PostgreSQL, Redis and cloud have health checks, with Redis auth read from a mounted
+  secret on stdin. The cloud image's shell-free readiness probe has success/failure regression
+  tests and returns failure against the current `/readyz` 503 in the built distroless image.
+  PostgreSQL and Redis health plus completed MinIO initialization gate cloud creation; web health
+  and cloud readiness gate the gateway. Synthetic-image Compose rendering verifies those edges.
+  CI renders Compose with deliberately non-deployable image fixtures; actual data-image health and
+  persistence remain unverified until D-001 and the S1-018 stack test.
 - [x] **S1-017** Add cloud formatting, lint, unit and image-build CI without weakening `cargo xtask
   ci`.
   Evidence: the dedicated `cloud` CI job checks formatting, clippy and unit tests for
@@ -619,3 +628,4 @@ Add one row per preview, beta, release candidate and production release.
 |---|---|
 | 2026-10-16 | S1-017: verified cloud quality and image-build CI; S1 advanced to 19/22. |
 | 2026-10-16 | S1-014: added a guarded seven-service Compose topology and static web image; S1 advanced to 20/22. |
+| 2026-10-16 | S1-016: added named data volumes, health probes and fail-closed startup ordering; S1 advanced to 21/22. |

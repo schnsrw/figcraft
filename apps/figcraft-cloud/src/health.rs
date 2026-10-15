@@ -1,5 +1,5 @@
 use std::io::{self, Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use figcraft_cloud_domain::RequestId;
@@ -8,6 +8,20 @@ use crate::config::CloudRole;
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const HEALTH_ADDR: &str = "0.0.0.0:8081";
+
+pub(super) fn probe_ready() -> io::Result<bool> {
+    probe_ready_at(SocketAddr::from(([127, 0, 0, 1], 8081)))
+}
+
+fn probe_ready_at(address: SocketAddr) -> io::Result<bool> {
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    stream.write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")?;
+    let mut status = [0; 17];
+    stream.read_exact(&mut status)?;
+    Ok(&status == b"HTTP/1.1 200 OK\r\n")
+}
 
 pub(super) fn serve(role: CloudRole) -> io::Result<()> {
     let listener = TcpListener::bind(HEALTH_ADDR)?;
@@ -170,7 +184,7 @@ mod tests {
 
     use figcraft_cloud_domain::RequestId;
 
-    use super::{handle_connection, parse_traceparent, response_for};
+    use super::{handle_connection, parse_traceparent, probe_ready_at, response_for};
     use crate::config::CloudRole;
 
     #[test]
@@ -227,5 +241,24 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(response.contains("\"role\":\"relay\""));
         assert!(response.contains("X-Request-Id: "));
+    }
+
+    #[test]
+    fn readiness_probe_accepts_only_http_200() {
+        for (reply, expected) in
+            [("HTTP/1.1 200 OK\r\n\r\n", true), ("HTTP/1.1 503 Service Unavailable\r\n\r\n", false), ("HTTP/1.1 200 NO\r\n\r\n", false)]
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind test socket");
+            let address = listener.local_addr().expect("test socket address");
+            let server = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept probe");
+                let mut request = [0; 128];
+                let count = stream.read(&mut request).expect("read probe");
+                assert!(std::str::from_utf8(&request[..count]).expect("UTF-8 probe").starts_with("GET /readyz HTTP/1.1"));
+                stream.write_all(reply.as_bytes()).expect("write probe response");
+            });
+            assert_eq!(probe_ready_at(address).expect("probe response"), expected);
+            server.join().expect("probe server thread");
+        }
     }
 }

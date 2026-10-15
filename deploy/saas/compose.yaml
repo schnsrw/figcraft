@@ -11,8 +11,15 @@ services:
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
     depends_on:
-      - web
-      - cloud
+      web:
+        condition: service_healthy
+      cloud:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   web:
     image: figcraft-web:local
@@ -21,6 +28,11 @@ services:
       dockerfile: deploy/saas/web.Dockerfile
       args:
         CADDY_IMAGE: ${CADDY_IMAGE:?set a reviewed Caddy image reference}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   cloud:
     image: figcraft-cloud:local
@@ -56,9 +68,17 @@ services:
       - oidc_client_secret
       - session_signing_key
     depends_on:
-      - postgres
-      - redis
-      - minio
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/figcraft-cloud", "--check-ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
 
   postgres:
     image: ${POSTGRES_IMAGE:?D-001 requires a reviewed PostgreSQL image reference}
@@ -68,12 +88,31 @@ services:
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     secrets:
       - postgres_password
+    volumes:
+      # PostgreSQL 18 changed the official image's volume target; D-001 selects this path.
+      - postgres_data:${POSTGRES_DATA_DIR:?D-001 requires the selected PostgreSQL image volume path}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U figcraft -d figcraft"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
 
   redis:
     image: ${REDIS_IMAGE:?D-001 requires a reviewed Redis image reference}
-    command: ["redis-server", "/run/secrets/redis_conf"]
+    command: ["redis-server", "/run/secrets/redis_conf", "--dir", "/data", "--appendonly", "yes"]
     secrets:
       - redis_conf
+      - redis_password
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      # `-x` reads the password on stdin; no secret enters argv or the healthcheck output.
+      test: ["CMD-SHELL", "redis-cli -e -x AUTH < /run/secrets/redis_password >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
 
   minio:
     image: ${MINIO_IMAGE:?D-001 requires a reviewed MinIO image reference}
@@ -82,6 +121,8 @@ services:
       MINIO_CONFIG_ENV_FILE: /run/secrets/minio_env
     secrets:
       - minio_env
+    volumes:
+      - minio_data:/data
 
   minio-init:
     image: ${MINIO_MC_IMAGE:?D-001 requires a release-matched MinIO client image reference}
@@ -92,7 +133,12 @@ services:
         target: config.json
     depends_on:
       - minio
-    restart: "no"
+    restart: "on-failure:10"
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
 
 secrets:
   database_url:
@@ -111,6 +157,8 @@ secrets:
     file: ./secrets/postgres_password
   redis_conf:
     file: ./secrets/redis.conf
+  redis_password:
+    file: ./secrets/redis_password
   minio_env:
     file: ./secrets/minio.env
   minio_mc_config:

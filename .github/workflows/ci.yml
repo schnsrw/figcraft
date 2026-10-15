@@ -76,6 +76,16 @@ jobs:
       - name: Test cloud application
         run: cargo test --package figcraft-cloud --locked
 
+      - name: Validate Compose topology with non-deployable image fixtures
+        env:
+          CADDY_IMAGE: caddy:2.10.2-alpine
+          POSTGRES_IMAGE: example.invalid/postgres:fixture
+          POSTGRES_DATA_DIR: /var/lib/postgresql/data
+          REDIS_IMAGE: example.invalid/redis:fixture
+          MINIO_IMAGE: example.invalid/minio:fixture
+          MINIO_MC_IMAGE: example.invalid/mc:fixture
+        run: docker compose --file deploy/saas/compose.yaml config --quiet
+
       - name: Build cloud runtime image
         run: docker build --file deploy/saas/cloud.Dockerfile --tag figcraft-cloud:ci .
 

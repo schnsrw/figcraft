@@ -19,10 +19,11 @@ The SaaS extension will provide:
 
 ### Core profile
 
-The first `deploy/saas/compose.yaml` is a topology scaffold. It requires reviewed data-service
-image references under D-001 and does not yet provide named persistence volumes, readiness-based
-startup or healthy API/WebSocket routes. Do not treat a successful Compose render as an operational
-deployment.
+The `deploy/saas/compose.yaml` scaffold requires reviewed data-service image references and a
+PostgreSQL volume target under D-001. It defines named persistence volumes, health checks and
+readiness-gated startup, but the cloud role runtime still reports not ready, so the gateway stays
+closed. The data-service images have not been selected or runtime-smoke-tested; do not treat a
+successful Compose render as an operational deployment.
 
 | Service | Image or role | Persistence | Exposure |
 |---|---|---|---|
@@ -112,8 +113,9 @@ resource limits.
 
 The current cloud scaffold exposes `/healthz`, `/readyz` and `/startupz` on port 8081. Liveness and
 startup indicate that the process health server is running; readiness remains HTTP 503 until the
-selected role's application services are initialized. Do not use this scaffold as a healthy SaaS
-deployment yet.
+selected role's application services are initialized. Its shell-free `--check-ready` command probes
+the local readiness endpoint for the distroless container health check. Do not use this scaffold as
+a healthy SaaS deployment yet.
 
 Health responses carry a generated `X-Request-Id`; each request emits a structured JSON stdout
 record. Valid W3C version-00 `traceparent` context is forwarded and included in logs, while malformed

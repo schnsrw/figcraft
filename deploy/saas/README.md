@@ -28,13 +28,30 @@ The image uses the Rust 1.95 Bookworm builder and the Debian 12 distroless runti
 versioned but not digest-pinned; production digest pinning, SBOM and provenance are release work.
 The D-001 decision still blocks selecting PostgreSQL, Redis and MinIO service image versions.
 
+## Startup and persistence
+
+`postgres_data`, `redis_data` and `minio_data` are named Docker volumes. The PostgreSQL target is
+required as `POSTGRES_DATA_DIR` because the [official PostgreSQL image](https://hub.docker.com/_/postgres)
+changed its declared volume location in major version 18. Set that path from the reviewed image's
+documentation; do not carry a volume path across a major upgrade without a migration plan. Redis
+enables append-only persistence under `/data`, even though cloud correctness must treat Redis as
+replaceable state.
+
+Compose waits for PostgreSQL and Redis health checks and for successful MinIO bucket initialization
+before creating the cloud container. The gateway waits for both web health and cloud readiness.
+`figcraft-cloud --check-ready` probes `/readyz` with a bounded local HTTP request and returns failure
+while the role runtime is unfinished; consequently the gateway correctly remains unstarted today.
+The one-shot MinIO initializer retries failures, but the selected client release and its credentials
+still need D-001 validation. The edge `/healthz` is only liveness after the gateway starts.
+
 ## Configuration template
 
 Copy `env.example` to `.env` only when preparing a local stack. Fill in reviewed image references
-for `POSTGRES_IMAGE`, `REDIS_IMAGE`, `MINIO_IMAGE` and `MINIO_MC_IMAGE` after D-001 is resolved;
-Compose refuses to render without them. The checked-in template contains only non-secret local
-values, reserved `.invalid` hostnames and paths where containers receive mounted secrets. `.env`
-and the whole `secrets/` directory are ignored by Git. With image references supplied, validate
+for `POSTGRES_IMAGE`, `REDIS_IMAGE`, `MINIO_IMAGE` and `MINIO_MC_IMAGE`, plus the matching
+`POSTGRES_DATA_DIR`, after D-001 is resolved; Compose refuses to render without them. The checked-in
+template contains only non-secret local values, reserved `.invalid` hostnames and paths where
+containers receive mounted secrets. `.env` and the whole `secrets/` directory are ignored by Git.
+With image references supplied, validate
 the topology without starting containers using `docker compose -f deploy/saas/compose.yaml config
 --quiet` from the repository root.
 
@@ -58,7 +75,8 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
   an orchestrator secret store or dedicated secret manager.
 - Supply `database_url`, `redis_url`, `s3_access_key`, `s3_secret_key`, `oidc_client_secret` and
   `session_signing_key` for the cloud service. The PostgreSQL `postgres_password` must agree with
-  `database_url`; the Redis `redis.conf` must agree with `redis_url`.
+  `database_url`; the Redis `redis.conf` and newline-free `redis_password` must agree with
+  `redis_url`. The Redis health probe reads its password on stdin, never in argv.
 - Supply a MinIO server environment file at `secrets/minio.env` and a MinIO Client `config.json`
   at `secrets/minio-mc-config.json`. The client config must contain an alias named `local` for
   `http://minio:9000`, using credentials authorized to create the configured bucket. Keep the
@@ -71,6 +89,7 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
   before starting the health server (S1-009 and S1-010).
 
 The dependency image release policy is still awaiting owner decision D-001. This Compose file
-requires those image references rather than guessing production versions. Named data volumes,
-container health checks and readiness-based ordering are S1-016; a healthy API/web/WebSocket smoke
-test is S1-018, after the cloud application routes exist.
+requires those image references and the PostgreSQL mount target rather than guessing production
+versions. S1-016 adds named volumes, health checks and fail-closed ordering; it does not claim
+runtime validation of the unselected data-service images. A healthy API/web/WebSocket smoke test
+is S1-018, after the cloud application routes exist.
