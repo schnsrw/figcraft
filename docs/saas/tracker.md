@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 11 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 12 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -104,7 +104,11 @@ the same commit as the completed task.
 
 ### Application roles and configuration
 
-- [ ] **S1-007** Create `figcraft-cloud` with `all`, `api`, `relay` and `worker` role selection.
+- [x] **S1-007** Create `figcraft-cloud` with `all`, `api`, `relay` and `worker` role selection.
+  Evidence: `apps/figcraft-cloud` defaults to `all`, accepts each role through `--role value` or
+  `--role=value`, supports help, and rejects unknown, missing and duplicate arguments. Its current
+  diagnostic explicitly states that the runtime is not implemented yet; tests cover all parsing
+  branches without claiming that a service endpoint is available.
 - [ ] **S1-008** Implement strict configuration parsing with unknown-key rejection.
 - [ ] **S1-009** Support mounted secret files and redact secret values from debug and errors.
 - [ ] **S1-010** Reject insecure development defaults when production mode is selected.
