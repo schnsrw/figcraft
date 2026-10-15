@@ -1,4 +1,6 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::fs;
 
 use figcraft_cloud_domain::DeploymentMode;
 
@@ -31,24 +33,51 @@ impl CloudRole {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(super) struct CloudConfig {
     pub(super) role: CloudRole,
     pub(super) deployment: DeploymentMode,
+    pub(super) secrets: BTreeMap<&'static str, Secret>,
 }
 
 impl Default for CloudConfig {
     fn default() -> Self {
-        Self { role: CloudRole::All, deployment: DeploymentMode::SingleTenant }
+        Self { role: CloudRole::All, deployment: DeploymentMode::SingleTenant, secrets: BTreeMap::new() }
+    }
+}
+
+#[derive(Clone, Eq, PartialEq)]
+pub(super) struct Secret(String);
+
+impl Secret {
+    fn from_file(path: &str) -> Result<Self, &'static str> {
+        const MAX_SECRET_FILE_BYTES: usize = 64 * 1024;
+        let contents = fs::read(path).map_err(|_| "unable to read configured secret file")?;
+        if contents.len() > MAX_SECRET_FILE_BYTES {
+            return Err("configured secret file exceeds the size limit");
+        }
+        let value = String::from_utf8(contents).map_err(|_| "configured secret file is not UTF-8")?;
+        let value = value.trim_end_matches(['\r', '\n']);
+        if value.trim().is_empty() {
+            return Err("configured secret file is empty");
+        }
+        Ok(Self(value.to_string()))
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("[REDACTED]")
     }
 }
 
 impl CloudConfig {
     /// Parse cloud-specific settings. Unrelated process environment is intentionally ignored.
-    /// Values for settings whose implementation is pending are validated but never retained.
+    /// Secret file contents are held only in a redacted wrapper.
     pub(super) fn parse<'a>(settings: impl IntoIterator<Item = (&'a str, &'a str)>) -> Result<Self, &'static str> {
         let mut config = Self::default();
         let mut seen = BTreeSet::new();
+        let mut seen_secrets = BTreeSet::new();
 
         for (key, value) in settings {
             if !is_cloud_setting(key) {
@@ -78,11 +107,36 @@ impl CloudConfig {
                         }
                     };
                 }
+                _ if let Some((name, from_file)) = secret_setting(key) => {
+                    if !seen_secrets.insert(name) {
+                        return Err("secret may be configured only once");
+                    }
+                    let secret = if from_file { Secret::from_file(value)? } else { Secret(value.to_string()) };
+                    config.secrets.insert(name, secret);
+                }
                 _ => {}
             }
         }
 
         Ok(config)
+    }
+}
+
+fn secret_setting(key: &str) -> Option<(&'static str, bool)> {
+    match key {
+        "DATABASE_URL" => Some(("DATABASE_URL", false)),
+        "DATABASE_URL_FILE" => Some(("DATABASE_URL", true)),
+        "REDIS_URL" => Some(("REDIS_URL", false)),
+        "REDIS_URL_FILE" => Some(("REDIS_URL", true)),
+        "S3_ACCESS_KEY" => Some(("S3_ACCESS_KEY", false)),
+        "S3_ACCESS_KEY_FILE" => Some(("S3_ACCESS_KEY", true)),
+        "S3_SECRET_KEY" => Some(("S3_SECRET_KEY", false)),
+        "S3_SECRET_KEY_FILE" => Some(("S3_SECRET_KEY", true)),
+        "OIDC_CLIENT_SECRET" => Some(("OIDC_CLIENT_SECRET", false)),
+        "OIDC_CLIENT_SECRET_FILE" => Some(("OIDC_CLIENT_SECRET", true)),
+        "SESSION_SIGNING_KEY" => Some(("SESSION_SIGNING_KEY", false)),
+        "SESSION_SIGNING_KEY_FILE" => Some(("SESSION_SIGNING_KEY", true)),
+        _ => None,
     }
 }
 
@@ -125,6 +179,9 @@ fn is_known_setting(key: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use figcraft_cloud_domain::DeploymentMode;
 
     use super::{CloudConfig, CloudRole};
@@ -158,10 +215,36 @@ mod tests {
         assert!(CloudConfig::parse([("FIGCRAFT_DEPLOYMENT", "local")]).is_err());
         assert!(CloudConfig::parse([("S3_BUCKET", " ")]).is_err());
         assert!(CloudConfig::parse([("FIGCRAFT_ROLE", "api"), ("FIGCRAFT_ROLE", "worker")]).is_err());
+        assert!(CloudConfig::parse([("DATABASE_URL", "inline"), ("DATABASE_URL_FILE", "/missing")]).is_err());
     }
 
     #[test]
     fn ignores_unrelated_process_environment() {
         assert_eq!(CloudConfig::parse([("PATH", "/usr/bin"), ("RUST_LOG", "info")]), Ok(CloudConfig::default()));
+    }
+
+    #[test]
+    fn loads_secret_files_and_redacts_debug_output() {
+        static NEXT_FILE: AtomicUsize = AtomicUsize::new(0);
+        let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("figcraft-cloud-secret-{}-{sequence}", std::process::id()));
+        let result = (|| {
+            fs::write(&path, "very-private-value\n").map_err(|_| "test setup failed")?;
+            let path_text = path.to_str().ok_or("test path is not UTF-8")?;
+            let config = CloudConfig::parse([("OIDC_CLIENT_SECRET_FILE", path_text)])?;
+            let debug = format!("{config:?}");
+            assert!(debug.contains("[REDACTED]"));
+            assert!(!debug.contains("very-private-value"));
+            assert_eq!(config.secrets.get("OIDC_CLIENT_SECRET"), Some(&super::Secret("very-private-value".to_string())));
+            Ok::<(), &'static str>(())
+        })();
+        let _ = fs::remove_file(path);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn secret_file_errors_are_non_echoing() {
+        let path = "/no/such/figcraft-cloud-secret-file";
+        assert_eq!(CloudConfig::parse([("DATABASE_URL_FILE", path)]), Err("unable to read configured secret file"));
     }
 }
