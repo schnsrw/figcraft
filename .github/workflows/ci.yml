@@ -50,6 +50,35 @@ jobs:
       - name: Audit web dependencies
         run: npm run advisories:check --prefix webapp
 
+  cloud:
+    timeout-minutes: 45
+    name: cloud quality and image (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cloud
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
+
+      - name: Format cloud application
+        run: cargo fmt --package figcraft-cloud -- --check
+
+      - name: Lint cloud application
+        run: cargo clippy --package figcraft-cloud --all-targets --locked -- -D warnings
+
+      - name: Test cloud application
+        run: cargo test --package figcraft-cloud --locked
+
+      - name: Build cloud runtime image
+        run: docker build --file deploy/saas/cloud.Dockerfile --tag figcraft-cloud:ci .
+
   test:
     timeout-minutes: 35
     name: test (ubuntu-latest)

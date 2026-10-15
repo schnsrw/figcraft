@@ -52,7 +52,7 @@ the continuation point, a blocker or a major decision changes.
   SAAS-ADR-001 through SAAS-ADR-016 as written for `S0-014`. `S0-015` verified
   `storytold/figcraft` from GitHub fork metadata, configured the local `upstream` remote and passed
   the first synchronization rehearsal with no incoming commits.
-- S1 is in progress at 18/22 tasks. `S1-001` adds compileable workspace members for the modular
+- S1 is in progress at 19/22 tasks. `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
   workspace, project, cloud-document, principal, object, job and request identifiers with strict
   parsing and UUIDv4 generation. `S1-003` adds infrastructure-neutral deployment, role, explicit
@@ -72,6 +72,8 @@ the continuation point, a blocker or a major decision changes.
   typecheck, lint, unit-test and production-build gate locally and in CI. `S1-022` enforces browser
   advisories, production dependency licenses and generated API-client drift. `S1-015` adds the safe
   deployment environment contract without claiming that the not-yet-built Compose stack runs.
+  `S1-017` adds a dedicated cloud format, lint, unit-test and image-build CI job without replacing
+  the full Rust, WASM and web gates.
 - Commit `d2f244f` makes the pulled control-server cleanup test tolerate the expected macOS socket
   close race. Commit `f3856c5` records the scoped SaaS web policy.
 - The full `cargo xtask ci` gate passed after the pull and test stabilization, including tests,
@@ -86,9 +88,9 @@ the continuation point, a blocker or a major decision changes.
 
 1. Assign real architecture, security and operations reviewers (`S0-013`) only when their
    identities are provided; never invent approvals.
-2. Continue the requested `deploy/saas/` Docker and Compose foundation in dependency order with the
-   cloud role/configuration tasks; do not claim a healthy SaaS application before its binary exists
-   or select dependency image versions before D-001 is resolved.
+2. Continue the requested `deploy/saas/` Docker and Compose foundation. `S1-014` needs the D-001
+   dependency image release policy and release-matched MinIO initialization; do not claim a healthy
+   SaaS application before its API/relay/worker runtime exists or guess those image versions.
 3. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
    each completed task.
 

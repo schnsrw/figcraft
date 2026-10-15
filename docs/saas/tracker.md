@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S0 documentation baseline drafted · **Last updated:** 2026-10-16
+> **Status:** S1 cloud foundation in progress (19/22) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 18 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 19 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -152,8 +152,11 @@ the same commit as the completed task.
   and mounted-secret paths; the adjacent ignore rules and README keep `.env` and `secrets/` out of
   Git and state that no runnable stack exists yet.
 - [ ] **S1-016** Add container health checks, dependency ordering and named volumes.
-- [ ] **S1-017** Add cloud formatting, lint, unit and image-build CI without weakening `cargo xtask
+- [x] **S1-017** Add cloud formatting, lint, unit and image-build CI without weakening `cargo xtask
   ci`.
+  Evidence: the dedicated `cloud` CI job checks formatting, clippy and unit tests for
+  `figcraft-cloud`, then builds `deploy/saas/cloud.Dockerfile`; the existing full Rust, WASM and
+  web jobs remain unchanged. The same cloud checks and image build passed locally.
 - [ ] **S1-018** Add a Compose smoke test that reaches healthy state and verifies API, web and
   WebSocket upgrade routing from an empty environment.
 - [x] **S1-019** Initialize `webapp/` with React, TypeScript, Vite, a pinned package-manager version
@@ -602,3 +605,9 @@ Add one row per preview, beta, release candidate and production release.
 | Release | Source commit | Upstream commit | Schema | Protocol | Evidence |
 |---|---|---|---|---|---|
 | Documentation baseline | current working tree | `9dcfe4ecbcf2892702b2db72a05b3511a58a0b7d` | not created | existing upstream protocol | `docs/saas/` |
+
+## Revision history
+
+| Date | Change |
+|---|---|
+| 2026-10-16 | S1-017: verified cloud quality and image-build CI; S1 advanced to 19/22. |
