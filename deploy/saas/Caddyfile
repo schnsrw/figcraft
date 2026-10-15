@@ -1,0 +1,19 @@
+:8080 {
+	@api path /api/v1 /api/v1/*
+	handle @api {
+		reverse_proxy cloud:8081
+	}
+
+	@realtime path /ws/v1 /ws/v1/*
+	handle @realtime {
+		reverse_proxy cloud:8081
+	}
+
+	handle /healthz {
+		respond "ok" 200
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
+}

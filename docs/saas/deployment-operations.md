@@ -19,6 +19,11 @@ The SaaS extension will provide:
 
 ### Core profile
 
+The first `deploy/saas/compose.yaml` is a topology scaffold. It requires reviewed data-service
+image references under D-001 and does not yet provide named persistence volumes, readiness-based
+startup or healthy API/WebSocket routes. Do not treat a successful Compose render as an operational
+deployment.
+
 | Service | Image or role | Persistence | Exposure |
 |---|---|---|---|
 | `gateway` | Caddy | certificates and configuration | 80 and 443 |

@@ -1,0 +1,14 @@
+.git
+target
+target-*
+plan
+plans
+corpus
+log
+dist
+webapp/node_modules
+webapp/dist
+webapp/saas/dist
+webapp/packages/editor-bridge/dist
+deploy/saas/.env
+deploy/saas/secrets

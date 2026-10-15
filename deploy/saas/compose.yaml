@@ -1,0 +1,117 @@
+name: figcraft-saas
+
+# D-001: supply reviewed, immutable image references in the local .env before deployment.
+# This topology is not yet a healthy SaaS stack: the cloud API/relay/worker runtime is pending.
+services:
+  gateway:
+    image: ${CADDY_IMAGE:?set a reviewed Caddy image reference}
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
+      - cloud
+
+  web:
+    image: figcraft-web:local
+    build:
+      context: ../..
+      dockerfile: deploy/saas/web.Dockerfile
+      args:
+        CADDY_IMAGE: ${CADDY_IMAGE:?set a reviewed Caddy image reference}
+
+  cloud:
+    image: figcraft-cloud:local
+    build:
+      context: ../..
+      dockerfile: deploy/saas/cloud.Dockerfile
+    environment:
+      FIGCRAFT_ENV: ${FIGCRAFT_ENV:-development}
+      FIGCRAFT_DEPLOYMENT: ${FIGCRAFT_DEPLOYMENT:-single}
+      FIGCRAFT_ROLE: ${FIGCRAFT_ROLE:-all}
+      FIGCRAFT_PUBLIC_URL: ${FIGCRAFT_PUBLIC_URL:-http://127.0.0.1:8080}
+      FIGCRAFT_SINGLE_TENANT_ID: ${FIGCRAFT_SINGLE_TENANT_ID:-00000000-0000-0000-0000-000000000001}
+      DATABASE_URL_FILE: /run/secrets/database_url
+      REDIS_URL_FILE: /run/secrets/redis_url
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_REGION: ${S3_REGION:-local}
+      S3_BUCKET: ${S3_BUCKET:-figcraft}
+      S3_ACCESS_KEY_FILE: /run/secrets/s3_access_key
+      S3_SECRET_KEY_FILE: /run/secrets/s3_secret_key
+      S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+      OIDC_ISSUER: ${OIDC_ISSUER:-https://identity.invalid}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-figcraft-local}
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+      OIDC_AUDIENCE: ${OIDC_AUDIENCE:-figcraft-local}
+      SESSION_SIGNING_KEY_FILE: /run/secrets/session_signing_key
+      EMBED_ISSUER_CONFIG_FILE: ${EMBED_ISSUER_CONFIG_FILE:-/etc/figcraft/embed-issuers.toml}
+      RUST_LOG: ${RUST_LOG:-info}
+    secrets:
+      - database_url
+      - redis_url
+      - s3_access_key
+      - s3_secret_key
+      - oidc_client_secret
+      - session_signing_key
+    depends_on:
+      - postgres
+      - redis
+      - minio
+
+  postgres:
+    image: ${POSTGRES_IMAGE:?D-001 requires a reviewed PostgreSQL image reference}
+    environment:
+      POSTGRES_USER: figcraft
+      POSTGRES_DB: figcraft
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    secrets:
+      - postgres_password
+
+  redis:
+    image: ${REDIS_IMAGE:?D-001 requires a reviewed Redis image reference}
+    command: ["redis-server", "/run/secrets/redis_conf"]
+    secrets:
+      - redis_conf
+
+  minio:
+    image: ${MINIO_IMAGE:?D-001 requires a reviewed MinIO image reference}
+    command: ["server", "/data", "--address", ":9000"]
+    environment:
+      MINIO_CONFIG_ENV_FILE: /run/secrets/minio_env
+    secrets:
+      - minio_env
+
+  minio-init:
+    image: ${MINIO_MC_IMAGE:?D-001 requires a release-matched MinIO client image reference}
+    entrypoint: ["mc", "--config-dir", "/run/secrets", "mb", "--ignore-existing", "--with-versioning"]
+    command: ["local/${S3_BUCKET:-figcraft}"]
+    secrets:
+      - source: minio_mc_config
+        target: config.json
+    depends_on:
+      - minio
+    restart: "no"
+
+secrets:
+  database_url:
+    file: ./secrets/database_url
+  redis_url:
+    file: ./secrets/redis_url
+  s3_access_key:
+    file: ./secrets/s3_access_key
+  s3_secret_key:
+    file: ./secrets/s3_secret_key
+  oidc_client_secret:
+    file: ./secrets/oidc_client_secret
+  session_signing_key:
+    file: ./secrets/session_signing_key
+  postgres_password:
+    file: ./secrets/postgres_password
+  redis_conf:
+    file: ./secrets/redis.conf
+  minio_env:
+    file: ./secrets/minio.env
+  minio_mc_config:
+    file: ./secrets/minio-mc-config.json

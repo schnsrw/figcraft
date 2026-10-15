@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 cloud foundation in progress (19/22) · **Last updated:** 2026-10-16
+> **Status:** S1 cloud foundation in progress (20/22) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 19 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 20 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -145,8 +145,15 @@ the same commit as the completed task.
   The image built successfully and served `/healthz` (200) and `/readyz` (503, as intended) with
   `--read-only --user 65532:65532`. Base tags are versioned but not digest-pinned; release pinning,
   SBOM and provenance remain follow-up hardening.
-- [ ] **S1-014** Add `deploy/saas/compose.yaml` with gateway, web, cloud, PostgreSQL, Redis, MinIO and
+- [x] **S1-014** Add `deploy/saas/compose.yaml` with gateway, web, cloud, PostgreSQL, Redis, MinIO and
   MinIO initialization.
+  Evidence: the seven-service Compose topology includes an HTTP gateway, built static web image,
+  cloud image, private data services and a one-shot versioned-bucket initializer. Required image
+  inputs refuse unreviewed PostgreSQL, Redis, MinIO and client release defaults under D-001;
+  `docker compose config` validated all service definitions with synthetic image references and
+  rejected missing references. The Caddy gateway configuration and static web image build passed.
+  This is topology evidence, not a healthy stack: S1-016 and S1-018 retain persistence, health,
+  dependency and end-to-end acceptance work.
 - [x] **S1-015** Add `deploy/saas/env.example` containing no working production secret.
   Evidence: `deploy/saas/env.example` contains only loopback or reserved-host development values
   and mounted-secret paths; the adjacent ignore rules and README keep `.env` and `secrets/` out of
@@ -587,7 +594,7 @@ items.
 
 | ID | Decision | Blocks |
 |---|---|---|
-| D-001 | Select supported PostgreSQL, Redis and MinIO release policy | S1 container pinning |
+| D-001 | Select supported PostgreSQL, Redis and MinIO release policy | S1 container pinning and stack validation |
 | D-002 | Select HTTP framework and async PostgreSQL client after a compatibility spike | S2 implementation |
 | D-003 | Select initial OIDC provider used for end-to-end testing | S4 acceptance journey |
 | D-004 | Select first external AI provider and whether BYOK ships in the first AI beta | S7 external adapter |
@@ -611,3 +618,4 @@ Add one row per preview, beta, release candidate and production release.
 | Date | Change |
 |---|---|
 | 2026-10-16 | S1-017: verified cloud quality and image-build CI; S1 advanced to 19/22. |
+| 2026-10-16 | S1-014: added a guarded seven-service Compose topology and static web image; S1 advanced to 20/22. |
