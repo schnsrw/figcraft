@@ -156,6 +156,12 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
   cargo test --locked -p figcraft-cloud-storage --test tenant_transaction -- --nocapture
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   -c 'DROP TABLE public.tenant_context_probe' > "$test_dir/tenant-context-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/metadata-repository-preflight.sql" > "$test_dir/metadata-repository-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test metadata_repositories -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/metadata-repository-cleanup.sql" > "$test_dir/metadata-repository-cleanup.log"
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-a.log" 2>&1 &
 migration_a=$!
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-b.log" 2>&1 &
@@ -232,4 +238,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context RLS isolation; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context and metadata repository isolation; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'

@@ -17,19 +17,21 @@ async fn tenant_context_is_transaction_local_on_a_reused_connection() -> Result<
     assert!(visible_probe_rows(&pool).await?.is_empty());
 
     let mut first = begin_tenant_transaction(&pool, tenant_a).await.map_err(|error| format!("tenant transaction setup failed: {error:?}"))?;
-    let first_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *first).await?;
+    let first_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(first.connection()).await?;
     assert_eq!(first_backend, initial_backend);
     assert_eq!(tenant_setting(&mut first).await?, Some(tenant_a.to_string()));
-    let first_rows: Vec<String> = sqlx::query_scalar("SELECT label FROM public.tenant_context_probe ORDER BY label").fetch_all(&mut *first).await?;
+    let first_rows: Vec<String> =
+        sqlx::query_scalar("SELECT label FROM public.tenant_context_probe ORDER BY label").fetch_all(first.connection()).await?;
     assert_eq!(first_rows, ["tenant-a".to_owned()]);
     first.commit().await?;
     assert!(visible_probe_rows(&pool).await?.is_empty());
 
     let mut second = begin_tenant_transaction(&pool, tenant_b).await.map_err(|error| format!("tenant transaction setup failed: {error:?}"))?;
-    let second_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(&mut *second).await?;
+    let second_backend: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(second.connection()).await?;
     assert_eq!(second_backend, initial_backend);
     assert_eq!(tenant_setting(&mut second).await?, Some(tenant_b.to_string()));
-    let second_rows: Vec<String> = sqlx::query_scalar("SELECT label FROM public.tenant_context_probe ORDER BY label").fetch_all(&mut *second).await?;
+    let second_rows: Vec<String> =
+        sqlx::query_scalar("SELECT label FROM public.tenant_context_probe ORDER BY label").fetch_all(second.connection()).await?;
     assert_eq!(second_rows, ["tenant-b".to_owned()]);
     second.rollback().await?;
     assert!(visible_probe_rows(&pool).await?.is_empty());
@@ -47,6 +49,6 @@ async fn visible_probe_rows(pool: &sqlx::PgPool) -> Result<Vec<String>, sqlx::Er
     sqlx::query_scalar("SELECT label FROM public.tenant_context_probe ORDER BY label").fetch_all(pool).await
 }
 
-async fn tenant_setting(transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar("SELECT NULLIF(current_setting('figcraft.tenant_id', true), '')").fetch_one(&mut **transaction).await
+async fn tenant_setting(transaction: &mut figcraft_cloud_storage::TenantTransaction<'_>) -> Result<Option<String>, sqlx::Error> {
+    sqlx::query_scalar("SELECT NULLIF(current_setting('figcraft.tenant_id', true), '')").fetch_one(transaction.connection()).await
 }

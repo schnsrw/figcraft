@@ -1,7 +1,38 @@
 //! Durable metadata and object storage adapters for FigCraft Cloud.
 
 use figcraft_cloud_domain::TenantId;
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{PgConnection, PgPool, Postgres, Transaction};
+
+pub mod metadata;
+
+/// A SQLx transaction bound to one trusted tenant identifier.
+///
+/// The tenant identifier is carried alongside the SQL transaction so repository methods can
+/// derive their SQL predicates from the same value used for the transaction-local RLS setting.
+pub struct TenantTransaction<'a> {
+    tenant_id: TenantId,
+    inner: Transaction<'a, Postgres>,
+}
+
+impl TenantTransaction<'_> {
+    #[must_use]
+    pub const fn tenant_id(&self) -> TenantId {
+        self.tenant_id
+    }
+
+    /// Access the scoped connection for queries inside this transaction.
+    pub fn connection(&mut self) -> &mut PgConnection {
+        &mut self.inner
+    }
+
+    pub async fn commit(self) -> Result<(), sqlx::Error> {
+        self.inner.commit().await
+    }
+
+    pub async fn rollback(self) -> Result<(), sqlx::Error> {
+        self.inner.rollback().await
+    }
+}
 
 /// Safe categories for tenant-scoped transaction setup failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -16,14 +47,14 @@ pub enum TenantTransactionError {
 /// not authorize a tenant. Repository operations should use the returned transaction, never the
 /// pool, so future RLS policies can read `figcraft.tenant_id`. PostgreSQL resets the setting on
 /// commit or rollback, including when a dropped transaction is returned to the pool.
-pub async fn begin_tenant_transaction(pool: &PgPool, tenant_id: TenantId) -> Result<Transaction<'_, Postgres>, TenantTransactionError> {
+pub async fn begin_tenant_transaction(pool: &PgPool, tenant_id: TenantId) -> Result<TenantTransaction<'_>, TenantTransactionError> {
     let mut transaction = pool.begin().await.map_err(|_| TenantTransactionError::Begin)?;
     sqlx::query("SELECT set_config('figcraft.tenant_id', $1, true)")
         .bind(tenant_id.to_string())
         .execute(&mut *transaction)
         .await
         .map_err(|_| TenantTransactionError::SetContext)?;
-    Ok(transaction)
+    Ok(TenantTransaction { tenant_id, inner: transaction })
 }
 
 /// Safe categories for database migration failures. Driver details are intentionally not exposed,

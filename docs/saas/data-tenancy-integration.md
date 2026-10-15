@@ -49,6 +49,18 @@ membership. A team never spans tenants. Team-manager permission controls its ros
 grant tenant administration; resource access comes from explicit team ownership or grants.
 External mappings are unique by tenant, registered system, resource kind and external identifier.
 
+S2-008's `figcraft-cloud-storage::metadata` repository adds typed create/get operations for
+tenants, workspaces and projects. Tenant-owned queries derive their tenant predicate from the
+`TenantTransaction` wrapper, and project reads and lists also require the parent workspace ID.
+Tenant discovery is the deliberate pre-selection exception: a trusted principal ID can list only
+tenants with an active membership. Authentication, tenant creation authorization and owner
+membership provisioning remain S4 work, so these functions are not yet exposed as product routes.
+Lists use keyset ordering by UUID, a typed continuation ID, and a strict 1–100 row page size; the
+query fetches at most one extra row to detect continuation. HTTP-opaque cursors are S4-020 work.
+The disposable PostgreSQL test covers two tenants, a suspended membership, a wrong-tenant parent,
+and more than 100 workspaces and projects without unbounded results or cross-tenant rows. Future
+RLS policy work must account for membership-based tenant discovery before a tenant is selected.
+
 ### Projects and documents
 
 | Table | Required fields |
@@ -105,7 +117,8 @@ configuration responses, job inputs, logs or audit payloads.
 ## Row-level security
 
 `figcraft-cloud-storage::begin_tenant_transaction` takes a trusted `TenantId`, starts a SQLx
-transaction and sets `figcraft.tenant_id` through a bound, transaction-local PostgreSQL setting.
+transaction and returns a `TenantTransaction` that carries the same ID used to set
+`figcraft.tenant_id` through a bound, transaction-local PostgreSQL setting.
 Callers must resolve the tenant from authenticated request or trusted job context, and must run all
 tenant-owned repository queries through the returned transaction. Commit, rollback and dropped
 transactions clear the setting before the pooled connection is reused. A disposable PostgreSQL

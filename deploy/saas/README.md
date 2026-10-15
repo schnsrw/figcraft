@@ -105,9 +105,10 @@ randomly generated secrets. Run `bash deploy/saas/smoke-preflight.sh` from any d
 available. It builds the local images, checks service health, bucket initialization and both
 PostgreSQL migrations, verifies database role privileges and tenant/document-scope constraints in
 rolled-back transactions, checks transaction-local tenant context against a synthetic RLS policy
-using the runtime role, starts each cloud role, and verifies web content, API and WebSocket routing
-plus rejection of unsafe production configuration. It removes its uniquely named containers,
-volumes and temporary secrets on exit.
+and tenant/workspace/project repositories against bounded, cross-tenant fixtures using the runtime
+role, starts each cloud role, and verifies web content, API and WebSocket routing plus rejection of
+unsafe production configuration. It removes its uniquely named containers, volumes and temporary
+secrets on exit.
 The API and WebSocket endpoints are diagnostic probes, not application workflows. If a machine or
 tool is forcibly stopped before cleanup completes, use the printed project name with `docker compose --project-name <name> --env-file
 deploy/saas/env.example --file deploy/saas/compose.yaml down --volumes --remove-orphans` to remove
