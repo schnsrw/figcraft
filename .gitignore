@@ -4,6 +4,12 @@ plans/
 /target/
 /target-*/
 /dist/
+/webapp/node_modules/
+/webapp/**/node_modules/
+/webapp/**/dist/
+/webapp/coverage/
+/webapp/.env*
+!/webapp/.env.example
 /corpus/
 /log/
 .DS_Store

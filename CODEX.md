@@ -46,6 +46,8 @@ the continuation point, a blocker or a major decision changes.
 - The SaaS documentation baseline and 237-task tracker are committed under `docs/saas/`.
 - S0 is at 12/15 tasks. `S0-012` is complete: `AGENTS.md` now permits narrowly scoped web tooling
   and defines its quality and licensing boundaries.
+- S1 is in progress at 1/22 tasks. `S1-019` is complete: `webapp/` contains an npm-pinned React,
+  TypeScript and Vite workspace with one lockfile, strict type checking and a production build.
 - Commit `d2f244f` makes the pulled control-server cleanup test tolerate the expected macOS socket
   close race. Commit `f3856c5` records the scoped SaaS web policy.
 - The full `cargo xtask ci` gate passed after the pull and test stabilization, including tests,
@@ -61,11 +63,9 @@ the continuation point, a blocker or a major decision changes.
    explicit, including any amendments.
 2. Complete the upstream synchronization rehearsal (`S0-015`) once the canonical upstream remote
    is known.
-3. Start `S1-019`: create the npm-pinned React + TypeScript + Vite workspace under `webapp/` with
-   one lockfile and a production build.
-4. Complete `S1-020` (opaque, versioned editor bridge), then `S1-021` (web quality pipeline) and
+3. Complete `S1-020` (opaque, versioned editor bridge), then `S1-021` (web quality pipeline) and
    `S1-022` (advisory, licence and generated-drift checks).
-5. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
+4. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
    each completed task.
 
 ## Local environment notes

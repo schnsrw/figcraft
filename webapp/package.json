@@ -1,0 +1,20 @@
+{
+  "name": "figcraft-webapp",
+  "version": "0.0.0",
+  "private": true,
+  "packageManager": "npm@10.9.3",
+  "engines": {
+    "node": ">=22 <23",
+    "npm": ">=10.9 <11"
+  },
+  "workspaces": [
+    "saas",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace=@figcraft/saas",
+    "build": "npm run build --workspace=@figcraft/saas",
+    "typecheck": "npm run typecheck --workspace=@figcraft/saas",
+    "check": "npm run typecheck && npm run build"
+  }
+}
