@@ -1,6 +1,7 @@
 //! Process entry point for FigCraft's cloud application.
 
 mod config;
+mod health;
 
 use config::{CloudConfig, CloudRole};
 use std::env;
@@ -58,8 +59,13 @@ fn main() -> ExitCode {
             if let Some(role) = cli_role {
                 config.role = role;
             }
-            eprintln!("figcraft-cloud: role '{}' selected, but the runtime is not implemented yet", config.role.as_str());
-            ExitCode::FAILURE
+            match health::serve(config.role) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => {
+                    eprintln!("figcraft-cloud: unable to start the health endpoint server");
+                    ExitCode::FAILURE
+                }
+            }
         }
         Err(error) => {
             eprintln!("figcraft-cloud: {error}");

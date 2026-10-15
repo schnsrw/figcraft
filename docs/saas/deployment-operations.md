@@ -105,6 +105,11 @@ initial bootstrap administrator, but bootstrap credentials expire or are removed
 The API, relay and worker images share the same binary but may use different network policies and
 resource limits.
 
+The current cloud scaffold exposes `/healthz`, `/readyz` and `/startupz` on port 8081. Liveness and
+startup indicate that the process health server is running; readiness remains HTTP 503 until the
+selected role's application services are initialized. Do not use this scaffold as a healthy SaaS
+deployment yet.
+
 ## Routing
 
 The edge routes:
