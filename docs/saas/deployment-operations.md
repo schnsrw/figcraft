@@ -110,6 +110,10 @@ startup indicate that the process health server is running; readiness remains HT
 selected role's application services are initialized. Do not use this scaffold as a healthy SaaS
 deployment yet.
 
+Health responses carry a generated `X-Request-Id`; each request emits a structured JSON stdout
+record. Valid W3C version-00 `traceparent` context is forwarded and included in logs, while malformed
+context is discarded. An OTLP exporter is not configured yet.
+
 ## Routing
 
 The edge routes:

@@ -8,6 +8,7 @@ description = "FigCraft's modular cloud application"
 
 [dependencies]
 figcraft-cloud-domain = { path = "../../crates/cloud-domain" }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

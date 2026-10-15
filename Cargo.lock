@@ -1448,6 +1448,7 @@ name = "figcraft-cloud"
 version = "0.6.0"
 dependencies = [
  "figcraft-cloud-domain",
+ "serde_json",
 ]
 
 [[package]]

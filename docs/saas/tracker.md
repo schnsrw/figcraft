@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 16 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 17 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -130,7 +130,12 @@ the same commit as the completed task.
   port 8081 and includes the selected runtime role. Readiness returns 503 because role services are
   not initialized yet; liveness/startup do not claim readiness. Tests exercise all roles, route
   errors and a real local TCP request.
-- [ ] **S1-012** Add request IDs, structured logs and OpenTelemetry context propagation foundation.
+- [x] **S1-012** Add request IDs, structured logs and OpenTelemetry context propagation foundation.
+  Evidence: health responses receive generated UUID request IDs; each request emits one JSON stdout
+  record with timestamp, level, event, role, status and request ID. Valid W3C version-00
+  `traceparent` headers are forwarded and their trace/span IDs are logged; malformed context is
+  dropped. This is propagation only, not an OTLP exporter. Patch-ledger entry FP-007 records the
+  cloud binary's additive `serde_json` lockfile edge.
 
 ### Containers and CI
 
