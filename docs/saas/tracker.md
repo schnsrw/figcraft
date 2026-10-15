@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 7 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 8 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -80,8 +80,12 @@ the same commit as the completed task.
   types with random UUIDv4 generation, canonical non-nil parsing, safe non-echoing parse errors,
   stable display and validated string serialization; focused tests cover every identifier kind and
   generated UUID version. Patch-ledger entry FP-002 records the root lockfile dependency edge.
-- [ ] **S1-003** Define `TenantContext`, deployment mode, role, permission, resource state and quota
+- [x] **S1-003** Define `TenantContext`, deployment mode, role, permission, resource state and quota
   value types without infrastructure dependencies.
+  Evidence: `figcraft-cloud-domain` defines the three deployment modes, non-hierarchical access
+  roles, explicit sensitive permissions, lifecycle states, checked quota values and limits, and an
+  immutable `TenantContext`; focused tests cover permission separation, state gating, quota
+  boundaries and overflow without adding database, HTTP, Redis, object-storage or UI dependencies.
 - [ ] **S1-004** Define stable cloud error codes and safe public error serialization.
 - [ ] **S1-005** Add serialization, invalid-value and identifier property tests.
 - [ ] **S1-006** Extend `cargo xtask layers` rules for cloud crates without changing existing layer
