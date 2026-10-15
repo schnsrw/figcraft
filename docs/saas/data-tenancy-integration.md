@@ -19,8 +19,9 @@ pointer, jobs, idempotency keys and audit events. Tenant-owned children use comp
 so their parent identifiers cannot point into another tenant or workspace; the active snapshot
 pointer must belong to the same document. Snapshot `object_id` becomes a foreign key when object
 metadata lands in S3-002. Identity invitations, service accounts and external mappings are later
-task scope. Database roles and row-level security are S2-006/S2-007 work, so these schema
-constraints do not by themselves authorize access.
+task scope. S2-006 adds separate migration/runtime database roles and S2-007 adds a tenant-scoped
+transaction helper. Production row-level security policies remain S4-014 work, so these schema
+constraints and transaction context do not by themselves authorize access.
 
 Snapshot attempts may share a document sequence so a failed upload can be retried with a new
 immutable object. The active pointer chooses one snapshot record. Idempotency rows hold a bounded
@@ -103,9 +104,17 @@ configuration responses, job inputs, logs or audit payloads.
 
 ## Row-level security
 
-Each request transaction sets a database-local tenant variable after authentication. Row-level
-security policies require tenant equality for reads and writes. Operator maintenance uses a
-separate database role and explicit audited workflows.
+`figcraft-cloud-storage::begin_tenant_transaction` takes a trusted `TenantId`, starts a SQLx
+transaction and sets `figcraft.tenant_id` through a bound, transaction-local PostgreSQL setting.
+Callers must resolve the tenant from authenticated request or trusted job context, and must run all
+tenant-owned repository queries through the returned transaction. Commit, rollback and dropped
+transactions clear the setting before the pooled connection is reused. A disposable PostgreSQL
+probe uses a synthetic RLS policy to verify tenant A and B see only their own rows on the same
+connection, including after commit, rollback and drop. This is a helper contract, not production RLS:
+S4-014 must enable policies on every tenant-owned table and verify both read and write isolation.
+Policies should compare `tenant_id` with
+`NULLIF(current_setting('figcraft.tenant_id', true), '')::uuid`, so an unset context denies access.
+Operator maintenance uses a separate database role and explicit audited workflows.
 
 Repository methods still include tenant predicates. Row-level security is defense in depth, not a
 replacement for application authorization.

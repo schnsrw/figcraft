@@ -50,6 +50,7 @@ printf '{"identities":[{"name":"smoke","credentials":[{"accessKey":"%s","secretK
 
 {
   printf 'services:\n  gateway:\n    ports:\n      - "127.0.0.1::8080"\n'
+  printf '  postgres:\n    ports:\n      - "127.0.0.1::5432"\n'
   printf 'secrets:\n'
   for secret in admin_database_url migration_database_url database_url migrator_password runtime_password redis_url postgres_password redis_password redis_conf s3_access_key s3_secret_key oidc_client_secret session_signing_key seaweedfs_s3_config; do
     filename=$secret
@@ -142,6 +143,19 @@ fi
 "${compose[@]}" run --rm --no-deps role-grants > "$test_dir/reconcile-grants.log" 2>&1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/role-preflight.sql" > "$test_dir/role-preflight.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/tenant-context-preflight.sql" > "$test_dir/tenant-context-preflight.log"
+postgres_binding=$("${compose[@]}" port postgres 5432)
+postgres_port=${postgres_binding##*:}
+if [[ ! "$postgres_port" =~ ^[0-9]+$ ]]; then
+  printf 'Expected a disposable loopback PostgreSQL port\n' >&2
+  exit 1
+fi
+printf 'postgres://figcraft_runtime:%s@127.0.0.1:%s/figcraft\n' "$runtime_password" "$postgres_port" > "$test_dir/host_database_url"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test tenant_transaction -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  -c 'DROP TABLE public.tenant_context_probe' > "$test_dir/tenant-context-cleanup.log"
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-a.log" 2>&1 &
 migration_a=$!
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-b.log" 2>&1 &
@@ -218,4 +232,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: separate database roles and grants; schema constraints; concurrent migration serialization; all cloud roles and routes; unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context RLS isolation; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'

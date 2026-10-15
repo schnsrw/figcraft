@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (6/21) · **Last updated:** 2026-10-16
+> **Status:** S1 complete (22/22); S2 in progress (7/21) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 6 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 7 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -259,7 +259,11 @@ the same commit as the completed task.
   event and audit tables, and read-only access to `_sqlx_migrations`; it cannot create or alter
   schema objects. The disposable PostgreSQL role preflight exercises both roles, denied DDL and
   reconciliation of deliberately stale runtime grants.
-- [ ] **S2-007** Add transaction helper that sets tenant context for row-level security.
+- [x] **S2-007** Add transaction helper that sets tenant context for row-level security.
+  Evidence: `figcraft-cloud-storage::begin_tenant_transaction` accepts a typed `TenantId`, begins
+  a SQLx transaction and binds `figcraft.tenant_id` as a transaction-local setting. Its PostgreSQL
+  integration probe uses a synthetic RLS table to verify same-connection tenant isolation and
+  cleanup after commit, rollback and drop. Authentication and production RLS policies remain later tasks.
 
 ### Metadata behavior
 
@@ -694,3 +698,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S2-004: added the first tenant-scoped identity and document metadata migration, checked its constraints against PostgreSQL, and advanced cloud schema readiness to version 20261016000001. |
 | 2026-10-16 | S2-005: added event, snapshot-pointer, job, idempotency and audit schema with synthetic PostgreSQL constraint checks; advanced readiness to version 20261016000002. |
 | 2026-10-16 | S2-006: provisioned separate migration/runtime PostgreSQL logins, transferred existing schema ownership, reconciled least-privilege grants and verified runtime DDL denial in Compose. |
+| 2026-10-16 | S2-007: added a typed tenant-scoped SQLx transaction helper and verified transaction-local context against a synthetic PostgreSQL RLS policy on a reused pooled connection. |

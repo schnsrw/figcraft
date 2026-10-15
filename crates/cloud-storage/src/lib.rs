@@ -1,5 +1,31 @@
 //! Durable metadata and object storage adapters for FigCraft Cloud.
 
+use figcraft_cloud_domain::TenantId;
+use sqlx::{PgPool, Postgres, Transaction};
+
+/// Safe categories for tenant-scoped transaction setup failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TenantTransactionError {
+    Begin,
+    SetContext,
+}
+
+/// Begin a transaction with a tenant ID local to that transaction only.
+///
+/// Callers must resolve `tenant_id` from authenticated or trusted job context; this helper does
+/// not authorize a tenant. Repository operations should use the returned transaction, never the
+/// pool, so future RLS policies can read `figcraft.tenant_id`. PostgreSQL resets the setting on
+/// commit or rollback, including when a dropped transaction is returned to the pool.
+pub async fn begin_tenant_transaction(pool: &PgPool, tenant_id: TenantId) -> Result<Transaction<'_, Postgres>, TenantTransactionError> {
+    let mut transaction = pool.begin().await.map_err(|_| TenantTransactionError::Begin)?;
+    sqlx::query("SELECT set_config('figcraft.tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| TenantTransactionError::SetContext)?;
+    Ok(transaction)
+}
+
 /// Safe categories for database migration failures. Driver details are intentionally not exposed,
 /// because they can contain connection metadata.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
