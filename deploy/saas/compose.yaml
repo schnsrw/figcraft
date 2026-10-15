@@ -1,6 +1,6 @@
 name: figcraft-saas
 
-# D-001: supply reviewed, immutable image references in the local .env before deployment.
+# D-001: PostgreSQL and Redis are reviewed in env.example; object storage remains undecided.
 # This topology is not yet a healthy SaaS stack: the cloud API/relay/worker runtime is pending.
 services:
   gateway:
@@ -89,7 +89,7 @@ services:
     secrets:
       - postgres_password
     volumes:
-      # PostgreSQL 18 changed the official image's volume target; D-001 selects this path.
+      # PostgreSQL 18 uses /var/lib/postgresql; keep the target tied to the image major.
       - postgres_data:${POSTGRES_DATA_DIR:?D-001 requires the selected PostgreSQL image volume path}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U figcraft -d figcraft"]

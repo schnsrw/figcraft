@@ -74,10 +74,11 @@ the continuation point, a blocker or a major decision changes.
   deployment environment contract without claiming that the not-yet-built Compose stack runs.
   `S1-017` adds a dedicated cloud format, lint, unit-test and image-build CI job without replacing
   the full Rust, WASM and web gates. `S1-014` adds a seven-service Compose topology, gateway route
-  configuration and static web image. Dependency image references remain required inputs under
-  D-001. `S1-016` adds named PostgreSQL, Redis and MinIO volumes, health checks and fail-closed
-  startup ordering. The cloud container remains unready until its application roles exist, and
-  the data-service images cannot be runtime-validated before D-001.
+  configuration and static web image. `S1-016` adds named PostgreSQL, Redis and MinIO volumes,
+  health checks and fail-closed startup ordering. The cloud container remains unready until its
+  application roles exist. D-001 now pins PostgreSQL 18.6 and BSD-licensed Redis 7.2.16 by OCI
+  digest and confirms the PostgreSQL 18 volume target. Their runtime health and persistence remain
+  unverified; the object-storage image choice remains open because MinIO upstreams are archived.
 - Commit `d2f244f` makes the pulled control-server cleanup test tolerate the expected macOS socket
   close race. Commit `f3856c5` records the scoped SaaS web policy.
 - The full `cargo xtask ci` gate passed after the pull and test stabilization, including tests,
@@ -92,10 +93,11 @@ the continuation point, a blocker or a major decision changes.
 
 1. Assign real architecture, security and operations reviewers (`S0-013`) only when their
    identities are provided; never invent approvals.
-2. Obtain the owner decision D-001 on PostgreSQL, Redis, MinIO and a compatible client release,
-   then validate their data volume path and health checks in a local stack. `S1-018` additionally
-   needs live cloud API and relay routes before a healthy end-to-end smoke test can pass. Do not
-   claim a healthy SaaS application or guess dependency image versions.
+2. Resolve the remaining D-001 object-storage choice with a maintained, license-compatible
+   S3-compatible service and initializer; see `docs/saas/dependency-images.md`. Then validate
+   PostgreSQL, Redis and object-storage health and persistence in a local stack. `S1-018`
+   additionally needs live cloud API and relay routes before a healthy end-to-end smoke test can
+   pass. Do not claim a healthy SaaS application from image metadata or Compose rendering.
 3. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
    each completed task.
 

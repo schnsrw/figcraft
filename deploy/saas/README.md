@@ -1,9 +1,10 @@
 # FigCraft SaaS deployment
 
 This directory contains the cloud image, static web image and single-node Compose topology. The
-topology is a development scaffold, **not a runnable or healthy SaaS deployment**: D-001 has not
-selected the PostgreSQL, Redis, MinIO and matching MinIO-client image releases; cloud API, relay
-and worker services have not been implemented; health and dependency ordering are follow-up work.
+topology is a development scaffold, **not a runnable or healthy SaaS deployment**: PostgreSQL and
+Redis are pinned, but D-001 still lacks a supported object-storage and initializer image choice;
+cloud API, relay and worker services have not been implemented. The image review is in
+[`docs/saas/dependency-images.md`](../../docs/saas/dependency-images.md).
 Build the cloud image from the repository root with:
 
 ```sh
@@ -26,29 +27,28 @@ bucket's versioning are future work.
 
 The image uses the Rust 1.95 Bookworm builder and the Debian 12 distroless runtime. These tags are
 versioned but not digest-pinned; production digest pinning, SBOM and provenance are release work.
-The D-001 decision still blocks selecting PostgreSQL, Redis and MinIO service image versions.
+PostgreSQL and Redis are digest-pinned in `env.example`; object storage remains the D-001 blocker.
 
 ## Startup and persistence
 
-`postgres_data`, `redis_data` and `minio_data` are named Docker volumes. The PostgreSQL target is
-required as `POSTGRES_DATA_DIR` because the [official PostgreSQL image](https://hub.docker.com/_/postgres)
-changed its declared volume location in major version 18. Set that path from the reviewed image's
-documentation; do not carry a volume path across a major upgrade without a migration plan. Redis
-enables append-only persistence under `/data`, even though cloud correctness must treat Redis as
-replaceable state.
+`postgres_data`, `redis_data` and `minio_data` are named Docker volumes. The selected PostgreSQL
+18 image uses `/var/lib/postgresql` as the volume target, matching its
+[official image documentation](https://hub.docker.com/_/postgres). Do not carry that path across a
+major upgrade without a migration plan. Redis enables append-only persistence under `/data`, even
+though cloud correctness must treat Redis as replaceable state.
 
 Compose waits for PostgreSQL and Redis health checks and for successful MinIO bucket initialization
 before creating the cloud container. The gateway waits for both web health and cloud readiness.
 `figcraft-cloud --check-ready` probes `/readyz` with a bounded local HTTP request and returns failure
 while the role runtime is unfinished; consequently the gateway correctly remains unstarted today.
-The one-shot MinIO initializer retries failures, but the selected client release and its credentials
+The one-shot MinIO initializer retries failures, but its supported replacement and credentials
 still need D-001 validation. The edge `/healthz` is only liveness after the gateway starts.
 
 ## Configuration template
 
-Copy `env.example` to `.env` only when preparing a local stack. Fill in reviewed image references
-for `POSTGRES_IMAGE`, `REDIS_IMAGE`, `MINIO_IMAGE` and `MINIO_MC_IMAGE`, plus the matching
-`POSTGRES_DATA_DIR`, after D-001 is resolved; Compose refuses to render without them. The checked-in
+Copy `env.example` to `.env` only when preparing a local stack. PostgreSQL, Redis and the PostgreSQL
+volume path are reviewed defaults; `MINIO_IMAGE` and `MINIO_MC_IMAGE` remain unset until the
+object-storage choice is resolved. Compose refuses to render without them. The checked-in
 template contains only non-secret local values, reserved `.invalid` hostnames and paths where
 containers receive mounted secrets. `.env` and the whole `secrets/` directory are ignored by Git.
 With image references supplied, validate
@@ -88,8 +88,7 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
 - The cloud configuration rejects unreadable secret files and development defaults in production
   before starting the health server (S1-009 and S1-010).
 
-The dependency image release policy is still awaiting owner decision D-001. This Compose file
-requires those image references and the PostgreSQL mount target rather than guessing production
-versions. S1-016 adds named volumes, health checks and fail-closed ordering; it does not claim
-runtime validation of the unselected data-service images. A healthy API/web/WebSocket smoke test
-is S1-018, after the cloud application routes exist.
+D-001 remains open for object storage. S1-016 adds named volumes, health checks and fail-closed
+ordering; the pinned PostgreSQL and Redis images were inspected but their Compose runtime health
+and persistence have not yet been verified. A healthy API/web/WebSocket smoke test is S1-018,
+after the cloud application routes exist.

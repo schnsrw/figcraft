@@ -19,11 +19,12 @@ The SaaS extension will provide:
 
 ### Core profile
 
-The `deploy/saas/compose.yaml` scaffold requires reviewed data-service image references and a
-PostgreSQL volume target under D-001. It defines named persistence volumes, health checks and
+The `deploy/saas/compose.yaml` scaffold has digest-pinned PostgreSQL and Redis images and a
+reviewed PostgreSQL volume target; D-001 remains open for object storage (see the
+[image review](dependency-images.md)). It defines named persistence volumes, health checks and
 readiness-gated startup, but the cloud role runtime still reports not ready, so the gateway stays
-closed. The data-service images have not been selected or runtime-smoke-tested; do not treat a
-successful Compose render as an operational deployment.
+closed. The data services have not been runtime-smoke-tested; do not treat a successful Compose
+render as an operational deployment.
 
 | Service | Image or role | Persistence | Exposure |
 |---|---|---|---|
@@ -32,8 +33,8 @@ successful Compose render as an operational deployment.
 | `cloud` | `figcraft-cloud`, role `all` | none local | internal HTTP and WebSocket |
 | `postgres` | supported PostgreSQL release | database volume | private network only |
 | `redis` | supported Redis release | optional append-only volume | private network only |
-| `minio` | supported MinIO release | object volumes | private network only |
-| `minio-init` | release-matched MinIO client | none | one-shot initialization |
+| `minio` | unresolved supported S3-compatible release | object volumes | private network only |
+| `minio-init` | unresolved compatible client | none | one-shot initialization |
 
 ### Scale profile
 

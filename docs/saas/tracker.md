@@ -167,7 +167,10 @@ the same commit as the completed task.
   PostgreSQL and Redis health plus completed MinIO initialization gate cloud creation; web health
   and cloud readiness gate the gateway. Synthetic-image Compose rendering verifies those edges.
   CI renders Compose with deliberately non-deployable image fixtures; actual data-image health and
-  persistence remain unverified until D-001 and the S1-018 stack test.
+  persistence remain unverified until D-001 and the S1-018 stack test. The 2026-10-16
+  [image review](dependency-images.md) pins supported PostgreSQL 18.6 and BSD-licensed Redis
+  7.2.16 with OCI digests, and confirms PostgreSQL 18's `/var/lib/postgresql` target from image
+  metadata. Runtime validation and an object-storage choice remain open.
 - [x] **S1-017** Add cloud formatting, lint, unit and image-build CI without weakening `cargo xtask
   ci`.
   Evidence: the dedicated `cloud` CI job checks formatting, clippy and unit tests for
@@ -603,7 +606,7 @@ items.
 
 | ID | Decision | Blocks |
 |---|---|---|
-| D-001 | Select supported PostgreSQL, Redis and MinIO release policy | S1 container pinning and stack validation |
+| D-001 | PostgreSQL 18.6 and Redis 7.2.16 pinned; choose a maintained, license-compatible S3-compatible service and initializer (archived MinIO releases do not qualify) | S1 object-storage pinning and stack validation; [evidence](dependency-images.md) |
 | D-002 | Select HTTP framework and async PostgreSQL client after a compatibility spike | S2 implementation |
 | D-003 | Select initial OIDC provider used for end-to-end testing | S4 acceptance journey |
 | D-004 | Select first external AI provider and whether BYOK ships in the first AI beta | S7 external adapter |
@@ -629,3 +632,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S1-017: verified cloud quality and image-build CI; S1 advanced to 19/22. |
 | 2026-10-16 | S1-014: added a guarded seven-service Compose topology and static web image; S1 advanced to 20/22. |
 | 2026-10-16 | S1-016: added named data volumes, health probes and fail-closed startup ordering; S1 advanced to 21/22. |
+| 2026-10-16 | D-001: pinned and inspected supported PostgreSQL and Redis image digests and PostgreSQL volume target; documented archived MinIO blocker. S1 stays 21/22. |
