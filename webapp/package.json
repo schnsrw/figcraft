@@ -13,8 +13,8 @@
   ],
   "scripts": {
     "dev": "npm run dev --workspace=@figcraft/saas",
-    "build": "npm run build --workspace=@figcraft/saas",
-    "typecheck": "npm run typecheck --workspace=@figcraft/saas",
+    "build": "npm run build --workspace=@figcraft/editor-bridge && npm run build --workspace=@figcraft/saas",
+    "typecheck": "npm run typecheck --workspace=@figcraft/editor-bridge && npm run typecheck --workspace=@figcraft/saas",
     "check": "npm run typecheck && npm run build"
   }
 }

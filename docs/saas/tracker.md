@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 12 / 15 | Architecture and reviewer approval |
-| S1 Cloud foundation | in progress | 1 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 2 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -98,8 +98,10 @@ the same commit as the completed task.
   and one committed lockfile. Depends on S0-012.
   Evidence: `webapp/package.json`, `webapp/package-lock.json`, `webapp/saas/`; verified with
   `npm ci --prefix webapp`, `npm run check --prefix webapp` and a browser screenshot.
-- [ ] **S1-020** Define the versioned TypeScript-to-Rust/WASM editor bridge contract without
+- [x] **S1-020** Define the versioned TypeScript-to-Rust/WASM editor bridge contract without
   duplicating document or collaboration types.
+  Evidence: `webapp/packages/editor-bridge`; Rust/WASM is the single WebSocket owner and binary
+  document, selection and export payloads remain opaque to TypeScript.
 - [ ] **S1-021** Add TypeScript formatting, typecheck, lint, unit-test and production-build CI.
 - [ ] **S1-022** Add browser dependency advisory, license and generated-client drift checks.
 

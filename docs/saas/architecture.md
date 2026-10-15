@@ -64,9 +64,10 @@ The browser product deliberately combines two runtimes:
 | Rust cloud service | Authorization, WebSocket authority, PostgreSQL transactions, object storage and jobs |
 
 Browser WASM cannot open native TCP sockets. It uses browser-provided networking through bindings.
-The existing `crates/collab-net/src/web.rs` already wraps `web_sys::WebSocket`; the SaaS bridge may
-continue using that Rust client or pass an authenticated socket adapter from TypeScript. Choose one
-owner for connection lifecycle and do not run competing collaboration clients in both runtimes.
+The existing `crates/collab-net/src/web.rs` already wraps `web_sys::WebSocket`. The initial SaaS
+bridge keeps that Rust client as the single owner of the collaboration connection. TypeScript
+obtains a short-lived document ticket over authenticated HTTP and passes the ticket and `wss:`
+endpoint when opening the editor. Do not run a competing TypeScript collaboration client.
 
 The bridge carries opaque serialized snapshots and collaboration messages plus small lifecycle
 events. TypeScript does not interpret document changes, resolve conflicts, replay commands or own
