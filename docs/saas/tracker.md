@@ -215,8 +215,13 @@ the same commit as the completed task.
 
 ### Migration and repository foundation
 
-- [ ] **S2-001** Select an async PostgreSQL client and migration approach compatible with the Rust
+- [x] **S2-001** Select an async PostgreSQL client and migration approach compatible with the Rust
   toolchain and workspace policies. Depends on S1-GATE.
+  Evidence: [`postgres-client-decision.md`](postgres-client-decision.md) selects SQLx 0.9 with
+  PostgreSQL-only, Tokio and Rustls features; versioned SQL migrations will be embedded and run by
+  an explicit command. SQLx is isolated to `figcraft-cloud-storage`; its declared MSRV is 1.94 and
+  the adapter compile check runs on Rust 1.96. S2-002 owns the actual migration command and lock
+  tests.
 - [ ] **S2-002** Add explicit migration command and advisory migration lock.
 - [ ] **S2-003** Add schema-version range checks to cloud startup and readiness.
 - [ ] **S2-004** Create identity, tenant, workspace, project and document metadata migrations.
@@ -651,3 +656,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | D-001: replaced archived MinIO with pinned SeaweedFS 4.48; validated data health, versioning, signed S3 writes and restart persistence in a disposable Compose project. S1 stays 21/22. |
 | 2026-10-16 | S1-018 preparation: added a disposable fail-closed Compose preflight; API/web/WebSocket acceptance remains pending. S1 stays 21/22. |
 | 2026-10-16 | S1-018 and S1-GATE: implemented diagnostic API/WebSocket transport probes and validated healthy Compose routing, all roles and unsafe-config rejection. S1 complete at 22/22. |
+| 2026-10-16 | S2-001: selected SQLx 0.9 with embedded SQL migrations and PostgreSQL advisory locking; SQLx declares Rust 1.94 MSRV and the adapter passed on Rust 1.96. |
