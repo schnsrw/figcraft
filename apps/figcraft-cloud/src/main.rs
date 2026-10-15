@@ -8,6 +8,9 @@ use std::env;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
+const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 0;
+const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 0;
+
 #[derive(Debug, Eq, PartialEq)]
 enum Arguments {
     Help,
@@ -95,6 +98,16 @@ fn run_migrations() -> ExitCode {
     }
 }
 
+fn schema_is_ready(database_url: Option<&str>) -> bool {
+    let Some(database_url) = database_url else {
+        return false;
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return false;
+    };
+    runtime.block_on(figcraft_cloud_storage::check_schema_version(database_url, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION)).is_ok()
+}
+
 fn main() -> ExitCode {
     match parse_arguments(env::args_os().skip(1)) {
         Ok(Arguments::Help) => {
@@ -116,7 +129,11 @@ fn main() -> ExitCode {
             if let Some(role) = cli_role {
                 config.role = role;
             }
-            match health::serve(config.role) {
+            let ready = schema_is_ready(config.database_url());
+            if !ready {
+                eprintln!("figcraft-cloud: database schema is unavailable or unsupported; readiness will fail");
+            }
+            match health::serve(config.role, ready) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => {
                     eprintln!("figcraft-cloud: unable to start the health endpoint server");

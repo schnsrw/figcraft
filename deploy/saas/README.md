@@ -14,14 +14,14 @@ docker build -f deploy/saas/cloud.Dockerfile -t figcraft-cloud:dev .
 The image uses a Rust builder stage and a non-root distroless runtime. Run it with a read-only root
 filesystem (`--read-only`) and mount secret files read-only. The transport server listens on port
 8081. `/api/v1/healthz` returns a transport probe for `api` and `all`; `/ws/v1/health` validates a
-WebSocket upgrade for `relay` and `all`, then closes normally. `/readyz` becomes healthy after the
-listener starts. These probes do not verify database schema, authentication, document operations
-or durable collaboration; those product services remain future milestones. The edge `/healthz` is
-only gateway liveness.
+WebSocket upgrade for `relay` and `all`, then closes normally. `/readyz` requires the listener and
+the supported database schema version to be ready. These probes do not verify authentication,
+document operations or durable collaboration; those product services remain future milestones. The
+edge `/healthz` is only gateway liveness.
 
 `web.Dockerfile` builds the existing npm workspace with Node 22.18.0, then copies the static build
 into Caddy. `compose.yaml` defines the gateway, web, cloud, PostgreSQL, Redis, SeaweedFS and a
-one-shot bucket-versioning initializer. The gateway publishes HTTP on loopback port 8080 only. It
+one-shot database migration and bucket-versioning jobs. The gateway publishes HTTP on loopback port 8080 only. It
 does not configure production TLS or expose the data services. SeaweedFS `mini` creates the
 configured bucket if absent; the initializer enables versioning and verifies it on every startup.
 No object-store credentials appear in environment variables or command arguments. Lifecycle rules
@@ -40,10 +40,13 @@ an operator's explicit review and re-pin task.
 major upgrade without a migration plan. Redis enables append-only persistence under `/data`, even
 though cloud correctness must treat Redis as replaceable state.
 
-Compose waits for PostgreSQL and Redis health checks and for successful bucket initialization
-before creating the cloud container. The gateway waits for both web health and cloud transport
-readiness. `figcraft-cloud --check-ready` probes `/readyz` with a bounded local HTTP request.
-Database and product-service readiness checks will extend this probe as those services are built.
+Compose waits for PostgreSQL and Redis health checks and for successful bucket initialization,
+then runs a one-shot migration job before creating the cloud container. The gateway waits for both
+web health and cloud readiness. `figcraft-cloud --check-ready` probes `/readyz` with a bounded
+local HTTP request. At startup, `/readyz` is healthy only when the listener is bound and the SQLx
+migration ledger is within the binary's supported schema range. This currently accepts version 0
+(the empty baseline); S2-004 will add the first application migration. This does not imply
+database-backed product operations work.
 The one-shot SeaweedFS initializer retries failures and fails closed if versioning cannot be
 confirmed. The edge `/healthz` is only liveness after the gateway starts.
 
@@ -105,6 +108,7 @@ deploy/saas/env.example --file deploy/saas/compose.yaml down --volumes --remove-
 only that disposable project.
 
 Run `figcraft-cloud --migrate` as a one-shot release action after PostgreSQL is healthy and before
-rolling out application roles. It reads `DATABASE_URL` or `DATABASE_URL_FILE`, applies embedded
+rolling out application roles. Compose models this as a dedicated job that gates cloud startup. It
+reads `DATABASE_URL` or `DATABASE_URL_FILE`, applies embedded
 versioned SQL under a PostgreSQL advisory lock, and emits only fixed, non-secret diagnostics. Normal
 role startup never applies migrations. The S2 schema migrations will be added in later tasks.

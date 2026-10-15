@@ -26,12 +26,12 @@ fn probe_ready_at(address: SocketAddr) -> io::Result<bool> {
     Ok(&status == b"HTTP/1.1 200 OK\r\n")
 }
 
-pub(super) fn serve(role: CloudRole) -> io::Result<()> {
+pub(super) fn serve(role: CloudRole, ready: bool) -> io::Result<()> {
     let listener = TcpListener::bind(HEALTH_ADDR)?;
-    eprintln!("figcraft-cloud: health endpoints listening on {HEALTH_ADDR} for role '{}'", role.as_str());
+    eprintln!("figcraft-cloud: health endpoints listening on {HEALTH_ADDR} for role '{}' (schema_ready={ready})", role.as_str());
     for stream in listener.incoming() {
         let mut stream = stream?;
-        handle_connection(&mut stream, role, true)?;
+        handle_connection(&mut stream, role, ready)?;
     }
     Ok(())
 }

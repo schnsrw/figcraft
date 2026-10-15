@@ -162,7 +162,11 @@ The cloud image's `--migrate` command uses SQLx's embedded migration set and hol
 advisory migration lock while applying pending migrations. It reads the database connection from
 the configured `DATABASE_URL` secret and reports fixed diagnostics without echoing credentials or
 driver errors. Migration application is deliberately separate from readiness and normal role
-startup. Schema compatibility and rollback policy are handled by later S2 tasks.
+startup. At process startup, readiness checks the highest successfully applied migration version
+against the binary's supported inclusive range. A missing ledger or unsupported version keeps
+`/readyz` at 503 while liveness remains available. The current empty baseline accepts version 0;
+the first application migration will advance it in S2-004. Schema rollback policy is handled by
+later S2 tasks.
 
 - Every migration has a unique ordered version and checksum.
 - Migrations are forward-only in production.

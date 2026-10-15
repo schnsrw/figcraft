@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 2 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 3 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -107,8 +107,8 @@ the same commit as the completed task.
 - [x] **S1-007** Create `figcraft-cloud` with `all`, `api`, `relay` and `worker` role selection.
   Evidence: `apps/figcraft-cloud` defaults to `all`, accepts each role through `--role value` or
   `--role=value`, supports help, and rejects unknown, missing and duplicate arguments. The health
-  server reports the selected role and becomes ready after binding its listener; product services
-  remain explicit future work.
+  server reports the selected role; readiness now requires both a bound listener and the schema
+  range check added in S2-003. Product services remain explicit future work.
 - [x] **S1-008** Implement strict configuration parsing with unknown-key rejection.
   Evidence: `apps/figcraft-cloud/src/config.rs` parses the shared deployment modes and runtime
   roles, recognizes the documented cloud setting names, rejects unknown cloud-namespaced keys,
@@ -149,9 +149,9 @@ the same commit as the completed task.
   digest-pinned; release pinning, SBOM and provenance remain follow-up hardening.
 - [x] **S1-014** Add `deploy/saas/compose.yaml` with gateway, web, cloud, PostgreSQL, Redis,
   S3-compatible storage and bucket initialization.
-  Evidence: the seven-service Compose topology includes an HTTP gateway, built static web image,
-  cloud image, private data services and a one-shot versioned-bucket initializer. The initial
-  topology refused unreviewed image inputs under D-001; the selected PostgreSQL, Redis and
+  Evidence: the eight-service Compose topology includes an HTTP gateway, built static web image,
+  cloud image, private data services, a one-shot migration job and a versioned-bucket initializer.
+  The original S1 topology refused unreviewed image inputs under D-001; the selected PostgreSQL, Redis and
   SeaweedFS digests are now recorded in `deploy/saas/env.example`. `docker compose config`
   validates all service definitions. The Caddy gateway configuration and static web image build
   passed. S1-016 added persistence and health ordering; S1-018 verifies the routed transport probes.
@@ -164,7 +164,8 @@ the same commit as the completed task.
   mount target is `/var/lib/postgresql`. Web, gateway, PostgreSQL, Redis, SeaweedFS and cloud have
   health checks, with Redis auth read from a mounted secret on stdin. The cloud image's shell-free
   readiness probe has success/failure regression tests and returns success after the transport
-  listener binds. PostgreSQL and Redis health plus completed SeaweedFS bucket-versioning
+  listener binds and the schema range is supported (S2-003). PostgreSQL and Redis health plus
+  completed SeaweedFS bucket-versioning
   initialization gate cloud creation; web health and cloud readiness gate the
   gateway. CI renders Compose with deliberately non-deployable image fixtures. The 2026-10-16
   [image review](dependency-images.md) records pinned OCI digests and a disposable Compose run:
@@ -220,14 +221,21 @@ the same commit as the completed task.
   Evidence: [`postgres-client-decision.md`](postgres-client-decision.md) selects SQLx 0.9 with
   PostgreSQL-only, Tokio and Rustls features; versioned SQL migrations will be embedded and run by
   an explicit command. SQLx is isolated to `figcraft-cloud-storage`; its declared MSRV is 1.94 and
-  the cloud image compiles on the workspace's Rust 1.95 builder. S2-002 owns the actual migration
-  command and lock tests.
+  the cloud image compiles on the workspace's Rust 1.95 builder. S2-002 owns the explicit migration
+  command and lock tests; S2-003 adds startup range validation.
 - [x] **S2-002** Add explicit migration command and advisory migration lock.
   Evidence: `figcraft-cloud --migrate` applies embedded SQL through `figcraft-cloud-storage`, sets
   SQLx PostgreSQL advisory locking on, reads the mounted database secret, and emits no connection
-  error details. The disposable Compose smoke checks normal startup leaves `_sqlx_migrations`
-  absent and concurrent migration commands both complete and create the ledger.
-- [ ] **S2-003** Add schema-version range checks to cloud startup and readiness.
+  error details. Before S2-003 made the Compose migration job an explicit cloud dependency, the
+  disposable smoke verified ordinary service startup did not create `_sqlx_migrations`; concurrent
+  explicit migration commands both completed successfully.
+- [x] **S2-003** Add schema-version range checks to cloud startup and readiness.
+  Evidence: `figcraft-cloud-storage::check_schema_version` reads the highest successful SQLx
+  migration, rejects missing ledgers and out-of-range versions with safe error categories, and
+  accepts the empty baseline as version 0. Cloud readiness checks this range at startup. Compose
+  now runs the `migrate` service after PostgreSQL health and gates cloud startup on its successful
+  completion. Unit tests cover inclusive range boundaries; the disposable Compose smoke confirms
+  the migrated baseline permits cloud and gateway readiness.
 - [ ] **S2-004** Create identity, tenant, workspace, project and document metadata migrations.
 - [ ] **S2-005** Create document-event, snapshot-pointer, job, idempotency and audit migrations.
 - [ ] **S2-006** Add constrained database roles for migration and runtime access.
@@ -662,3 +670,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S1-018 and S1-GATE: implemented diagnostic API/WebSocket transport probes and validated healthy Compose routing, all roles and unsafe-config rejection. S1 complete at 22/22. |
 | 2026-10-16 | S2-001: selected SQLx 0.9 with embedded SQL migrations and PostgreSQL advisory locking; SQLx declares Rust 1.94 MSRV and the image built with workspace Rust 1.95. |
 | 2026-10-16 | S2-002: added the explicit `--migrate` release command with SQLx PostgreSQL advisory locking; disposable Compose concurrency verification recorded. |
+| 2026-10-16 | S2-003: gated startup readiness on the supported SQLx schema range and ordered the one-shot Compose migration job before cloud roles; empty baseline 0 is supported pending S2-004. |

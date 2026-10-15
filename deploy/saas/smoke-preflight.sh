@@ -96,12 +96,23 @@ if test "$(docker inspect --format '{{.State.ExitCode}}' "$init_container")" != 
   exit 1
 fi
 
+migration_container=$("${compose[@]}" ps --all --quiet migrate)
+if test -z "$migration_container"; then
+  printf 'Compose migration job should exist\n' >&2
+  exit 1
+fi
+if test "$(docker inspect --format '{{.State.ExitCode}}' "$migration_container")" != 0; then
+  printf 'Compose migration job should complete successfully before cloud startup\n' >&2
+  docker logs "$migration_container" >&2 || true
+  exit 1
+fi
+
 migration_ledger() {
   "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -Atqc \
     "SELECT to_regclass('public._sqlx_migrations') IS NOT NULL"
 }
-if test "$(migration_ledger)" != f; then
-  printf 'Normal cloud startup must not create the migration ledger\n' >&2
+if test "$(migration_ledger)" != t; then
+  printf 'Explicit Compose migration should create the SQLx migration ledger\n' >&2
   exit 1
 fi
 "${compose[@]}" run --rm --no-deps cloud --migrate > "$test_dir/migration-a.log" 2>&1 &
