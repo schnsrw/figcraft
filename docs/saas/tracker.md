@@ -208,8 +208,10 @@ the same commit as the completed task.
 
 - [ ] **S4-007** Implement tenant creation, suspension and plan assignment.
 - [ ] **S4-008** Implement tenant membership and owner/admin roles.
-- [ ] **S4-009** Implement workspace membership and workspace-admin role.
-- [ ] **S4-010** Implement document membership and editor/commenter/viewer roles.
+- [ ] **S4-009** Implement teams, invitations, team membership, team-manager role and team ownership
+  or grants for workspaces, projects and libraries.
+- [ ] **S4-010** Implement direct workspace/document membership, inherited team grants and
+  workspace-admin/editor/commenter/viewer roles.
 - [ ] **S4-011** Implement explicit sensitive permissions for billing, provider keys, support,
   export and deletion.
 - [ ] **S4-012** Implement effective-role resolution and deny-by-default authorization checks.
@@ -220,17 +222,19 @@ the same commit as the completed task.
 - [ ] **S4-014** Enable row-level security on every tenant-owned table.
 - [ ] **S4-015** Add tenant to every object, cache, lease and job key.
 - [ ] **S4-016** Normalize forbidden and not-found behavior according to disclosure policy.
-- [ ] **S4-017** Close active sessions after membership, share-link or tenant revocation.
+- [ ] **S4-017** Close active sessions after direct membership, team membership, team grant,
+  share-link or tenant revocation.
 - [ ] **S4-018** Add support-access grants with reason, expiry and audit.
 
 ### API and testing
 
-- [ ] **S4-019** Implement tenant, workspace, project, document and member APIs.
+- [ ] **S4-019** Implement tenant, team, invitation, workspace, project, document and member APIs.
 - [ ] **S4-020** Implement bounded search and opaque pagination cursors.
 - [ ] **S4-021** Add permission-matrix unit tests for every route and relay action.
 - [ ] **S4-022** Add cross-tenant API, repository, object, cache, job and realtime tests.
 - [ ] **S4-023** Add revocation race tests for active HTTP, job and WebSocket access.
-- [ ] **S4-024** Define external identity, organization, domain and group-claim mapping policy.
+- [ ] **S4-024** Define external identity, organization, domain and group-claim-to-team mapping
+  policy.
 - [ ] **S4-025** Validate enterprise SAML federation through the selected OIDC identity broker,
   including login, logout, key rotation and revocation.
 

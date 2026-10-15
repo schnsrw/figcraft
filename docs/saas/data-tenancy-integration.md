@@ -21,22 +21,28 @@
 | `identity_links` | `principal_id`, `issuer`, `subject`, verified metadata |
 | `tenants` | `id`, `slug`, `name`, `state`, `plan_id`, `home_region`, timestamps |
 | `tenant_members` | `tenant_id`, `principal_id`, `role`, `state`, timestamps |
-| `workspaces` | `id`, `tenant_id`, `name`, `state`, timestamps |
+| `teams` | `id`, `tenant_id`, `slug`, `name`, `state`, timestamps |
+| `team_members` | `tenant_id`, `team_id`, `principal_id`, `role`, `state`, timestamps |
+| `team_invitations` | `id`, `tenant_id`, `team_id`, invitee, token hash, role, expiry, state, timestamps |
+| `workspaces` | `id`, `tenant_id`, optional owning `team_id`, `name`, `state`, timestamps |
 | `workspace_members` | `tenant_id`, `workspace_id`, `principal_id`, `role`, timestamps |
+| `workspace_team_grants` | `tenant_id`, `workspace_id`, `team_id`, `role`, timestamps |
 | `service_accounts` | `id`, `tenant_id`, `name`, `state`, credential metadata |
 | `external_mappings` | `tenant_id`, `system_id`, `resource_kind`, `external_id`, `internal_id` |
 
 `identity_links` permits one principal to use several OIDC issuers without duplicating tenant
-membership. External mappings are unique by tenant, registered system, resource kind and external
-identifier.
+membership. A team never spans tenants. Team-manager permission controls its roster but does not
+grant tenant administration; resource access comes from explicit team ownership or grants.
+External mappings are unique by tenant, registered system, resource kind and external identifier.
 
 ### Projects and documents
 
 | Table | Required fields |
 |---|---|
-| `projects` | `id`, `tenant_id`, `workspace_id`, `name`, `state`, timestamps |
+| `projects` | `id`, `tenant_id`, `workspace_id`, optional owning `team_id`, `name`, `state`, timestamps |
 | `documents` | `id`, `tenant_id`, `workspace_id`, `project_id`, `name`, `state`, `current_seq`, `fencing_token`, snapshot pointer, timestamps |
 | `document_members` | `tenant_id`, `document_id`, `principal_id`, `role`, timestamps |
+| `document_team_grants` | `tenant_id`, `document_id`, `team_id`, `role`, timestamps |
 | `share_links` | `id`, `tenant_id`, `document_id`, `token_hash`, `role`, expiry, revocation, timestamps |
 | `document_events` | `tenant_id`, `document_id`, `seq`, `fencing_token`, payload, checksum, actor, timestamp |
 | `document_snapshots` | `id`, `tenant_id`, `document_id`, `seq`, `object_id`, checksum, size, state, timestamp |
@@ -54,7 +60,8 @@ sequence updates and one active snapshot pointer belonging to the same document 
 | `object_references` | `tenant_id`, `object_id`, `owner_kind`, `owner_id`, timestamps |
 | `upload_reservations` | `id`, `tenant_id`, expected hash/size/type, staging key, expiry, state |
 | `exports` | `id`, `tenant_id`, `document_id`, requested sequence/options, job, result object, state |
-| `libraries` | `id`, `tenant_id`, source document, name, state |
+| `libraries` | `id`, `tenant_id`, optional owning `team_id`, source document, name, state |
+| `library_team_grants` | `tenant_id`, `library_id`, `team_id`, role, timestamps |
 | `library_versions` | `id`, `tenant_id`, `library_id`, version, object, checksum, timestamp |
 | `plugins` | `id`, `tenant_id` when private, publisher, name, state |
 | `plugin_versions` | `id`, plugin, version, object, checksum, manifest, state |
@@ -177,13 +184,16 @@ The raw embed token is not retained in browser storage or sent on subsequent req
 
 ## Authorization model
 
-Effective access is the highest permitted role from tenant membership, workspace membership,
-document membership or the active share grant, constrained by tenant and document state.
+Effective access is the highest permitted resource role from tenant membership, direct workspace
+or document membership, an active team grant, or the active share grant, constrained by tenant,
+team and resource state. Team-manager status controls team administration; it does not silently
+upgrade a person's document role.
 
 | Role | Core abilities |
 |---|---|
 | Tenant owner | Billing, tenant policy, administrators, export and deletion |
 | Tenant admin | Members, workspaces, projects, provider policy and audit views |
+| Team manager | Team roster, invitations and team-owned resource administration within policy |
 | Workspace admin | Workspace members, projects and workspace documents |
 | Editor | Read and mutate document content, create versions and exports |
 | Commenter | Read, presence and comment operations; no design mutations |
@@ -204,6 +214,14 @@ GET    /v1/me
 GET    /v1/tenants
 GET    /v1/tenants/${TENANT_ID}
 GET    /v1/tenants/${TENANT_ID}/usage
+
+GET    /v1/teams
+POST   /v1/teams
+GET    /v1/teams/${TEAM_ID}
+PATCH  /v1/teams/${TEAM_ID}
+GET    /v1/teams/${TEAM_ID}/members
+POST   /v1/teams/${TEAM_ID}/invitations
+DELETE /v1/teams/${TEAM_ID}/members/${PRINCIPAL_ID}
 
 GET    /v1/workspaces
 POST   /v1/workspaces

@@ -53,10 +53,12 @@
 ## Authorization controls
 
 - Deny by default.
-- Check resource state, tenant state, membership state and requested action.
+- Check resource state, tenant state, direct and team membership state, inherited team grants and
+  requested action.
 - Enforce permissions in API and relay code, not only client controls.
 - Recheck long-running job authorization before committing its result.
-- Revoke active WebSocket sessions when their grant is revoked.
+- Revoke active WebSocket sessions when their direct grant, team membership or team grant is
+  revoked.
 - Use a separate explicit permission for billing, provider keys, tenant export, tenant deletion and
   support access.
 - Record actor, effective grant and outcome for sensitive operations.

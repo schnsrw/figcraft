@@ -14,6 +14,7 @@ protocols, tenant-aware schema and container image.
 |---|---|
 | Designer | Create, edit, share and present documents with low latency and offline recovery |
 | Reviewer | View, comment and inspect without receiving edit permission |
+| Team manager | Manage a team roster and the projects, documents and libraries granted to it |
 | Workspace administrator | Manage members, roles, projects, retention, provider policy and usage |
 | SaaS operator | Provision tenants, enforce quotas, diagnose incidents, bill usage and restore data |
 | Host-product developer | Create documents, embed the editor, map permissions and receive lifecycle events |
@@ -33,7 +34,7 @@ protocols, tenant-aware schema and container image.
 
 ### Multi-tenant SaaS
 
-- Users may belong to several tenants and workspaces.
+- Users may belong to several tenants, teams and workspaces.
 - Tenant selection is explicit and validated on every request.
 - PostgreSQL row-level security backs application authorization.
 - Object keys and cache keys include the tenant identifier.
@@ -60,13 +61,22 @@ protocols, tenant-aware schema and container image.
 - Support SCIM 2.0 user and group provisioning in the enterprise phase.
 - Support service accounts for backend integrations.
 - Support short-lived embed tokens from registered issuers.
-- Support roles: tenant owner, tenant admin, workspace admin, editor, commenter and viewer.
+- Support roles: tenant owner, tenant admin, team manager, workspace admin, editor, commenter and
+  viewer.
+- Support teams as first-class tenant-scoped groups with their own membership, invitations and
+  resource grants.
+- Permit teams to own or receive access to workspaces, projects, documents and shared libraries;
+  direct user grants remain available for exceptional access.
 - Support document-specific grants and revocable share links.
 - Record security-relevant actions in an immutable audit trail.
 - Revoke sessions after membership removal or tenant suspension.
 
 ### Workspaces and documents
 
+- Create, rename, archive and restore teams within one tenant.
+- Add, remove and invite team members without duplicating their user identities.
+- Make effective access inherit from team grants and revoke that inherited access when a person
+  leaves or is removed from the team.
 - Create, list, rename, archive, restore and delete projects and documents.
 - Move, duplicate, favorite, search and trash documents without changing their cloud identity.
 - Persist current document state, ordered events and immutable snapshots.

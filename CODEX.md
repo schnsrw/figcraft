@@ -37,6 +37,9 @@ the continuation point, a blocker or a major decision changes.
   WASM runs only in isolated workers with explicit capabilities and resource budgets.
 - Support private single-tenant deployments, shared multi-tenant SaaS and embedding in another
   product's workspace from the same tenant-aware model.
+- Teams are first-class groups inside a tenant: they have members, managers and invitations, and
+  can own or receive access to workspaces, projects, documents and shared libraries. Authorization
+  must revoke inherited access when team membership or a team grant changes.
 - Keep fork additions in additive crates/directories and narrow adapters so upstream FigCraft can
   be merged regularly.
 
