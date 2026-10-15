@@ -88,6 +88,25 @@ control-plane behavior remains fork-owned.
 - Integrate before every fork release candidate.
 - Do not combine an upstream merge with unrelated SaaS feature work.
 
+## Rehearsal history
+
+### 2026-10-16 — initial remote configuration
+
+- GitHub's repository metadata identified `storytold/figcraft` as both the parent and source of the
+  `schnsrw/figcraft` fork. The local `upstream` remote was configured as
+  `https://github.com/storytold/figcraft.git` and fetched with tags.
+- The rehearsal branch `upstream-sync/2026-10-16` started from fork commit
+  `5bbce05ba9e6e784485d8637f23a12dd630731ac`. Upstream `main` was
+  `eb741a362d2da36ab466991825b2c09c846496c8`, which was also the merge base.
+- The fork was 11 commits ahead and upstream was 0 commits ahead. Incoming log, stat and file lists
+  were empty. `git merge --no-ff upstream/main` therefore reported `Already up to date`; no empty
+  merge commit was created and no conflict resolution was needed.
+- With no incoming files, there was no collaboration protocol, stored-format, migration,
+  dependency, licensing or asset-attribution impact to carry forward.
+- `cargo xtask ci`, `npm ci --prefix webapp`, `npm run check --prefix webapp` and
+  `npm run advisories:check --prefix webapp` passed on the temporary branch. The branch and worktree
+  were deleted after verification.
+
 ## Synchronization procedure
 
 ### 1. Prepare

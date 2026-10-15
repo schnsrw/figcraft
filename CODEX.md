@@ -47,8 +47,10 @@ the continuation point, a blocker or a major decision changes.
 
 - `main` was fast-forwarded from `origin/main` on 2026-10-16 before SaaS implementation resumed.
 - The SaaS documentation baseline and 237-task tracker are committed under `docs/saas/`.
-- S0 is at 12/15 tasks. `S0-012` is complete: `AGENTS.md` now permits narrowly scoped web tooling
-  and defines its quality and licensing boundaries.
+- S0 is at 13/15 tasks. `S0-012` is complete: `AGENTS.md` now permits narrowly scoped web tooling
+  and defines its quality and licensing boundaries. `S0-015` verified `storytold/figcraft` from
+  GitHub fork metadata, configured the local `upstream` remote and passed the first synchronization
+  rehearsal with no incoming commits.
 - S1 is in progress at 5/22 tasks. `S1-019` established the npm-pinned React, TypeScript and Vite
   workspace. `S1-020` defines the versioned opaque editor bridge with Rust/WASM as the sole owner
   of the browser collaboration WebSocket. `S1-021` adds the shared formatting, typecheck, lint,
@@ -59,17 +61,18 @@ the continuation point, a blocker or a major decision changes.
   close race. Commit `f3856c5` records the scoped SaaS web policy.
 - The full `cargo xtask ci` gate passed after the pull and test stabilization, including tests,
   layers, asset checks, WASM checks and plugin builds.
-- No `upstream` Git remote is configured yet. Do not guess its URL; obtain or verify the canonical
-  original repository before completing `S0-015`.
+- The local `upstream` remote is `https://github.com/storytold/figcraft.git`, verified from GitHub's
+  parent and source metadata. The 2026-10-16 rehearsal found upstream at `eb741a3`, already the
+  fork's merge base, with no incoming commits.
 - Architecture, security and operations reviewer identities remain intentionally unassigned in
   `S0-013`; never invent people or approvals.
 
 ## Continuation order
 
-1. Record product-owner review of SAAS-ADR-001 through SAAS-ADR-016 (`S0-014`) if acceptance is
+1. Assign real architecture, security and operations reviewers (`S0-013`) only when their
+   identities are provided; never invent approvals.
+2. Record product-owner review of SAAS-ADR-001 through SAAS-ADR-016 (`S0-014`) if acceptance is
    explicit, including any amendments.
-2. Complete the upstream synchronization rehearsal (`S0-015`) once the canonical upstream remote
-   is known.
 3. Continue the requested `deploy/saas/` Docker and Compose foundation in dependency order with the
    cloud role/configuration tasks; do not claim a healthy SaaS application before its binary exists
    or select dependency image versions before D-001 is resolved.
