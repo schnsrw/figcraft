@@ -55,13 +55,13 @@ the continuation point, a blocker or a major decision changes.
 - S1 is complete at 22/22 tasks and its cloud foundation gate passes. The cloud binary now serves
   `/api/v1/healthz` and diagnostic `/ws/v1/health` upgrades in the `api`, `relay` and `all` roles;
   `/readyz` checks transport startup and the SQLx schema-version range, not database-backed product
-  operations. S2-003 accepts the empty baseline version 0 and Compose runs the one-shot migration
-  job before cloud roles. A disposable smoke starts each role from one image and checks web/API/WebSocket
-  routing and rejects unsafe production settings. S2 is in progress: S2-001 selects SQLx 0.9 with
+  operations. S2-004 requires metadata schema version `20261016000001`; Compose runs the one-shot
+  migration job before cloud roles. A disposable smoke starts each role from one image, checks
+  web/API/WebSocket routing and rejects unsafe production settings. S2 is in progress: S2-001 selects SQLx 0.9 with
   embedded SQL migrations, PostgreSQL advisory locking and Rustls; S2-002 adds explicit
   `--migrate` execution, separate from normal service startup; S2-003 checks the migration ledger
-  at startup and currently accepts empty baseline version 0. The cloud image builds with workspace
-  Rust 1.95 (SQLx declares MSRV 1.94).
+  at startup; S2-004 adds 13 tenant-scoped identity and document metadata tables with cross-tenant
+  foreign-key checks. The cloud image builds with workspace Rust 1.95 (SQLx declares MSRV 1.94).
 - `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
   workspace, project, cloud-document, principal, object, job and request identifiers with strict
@@ -107,9 +107,9 @@ the continuation point, a blocker or a major decision changes.
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
    `docs/saas/dependency-images.md`. S1-018 and S1-GATE pass their transport and startup criteria.
-   S2-001 through S2-003 are complete; see `docs/saas/postgres-client-decision.md` and the
-   `--migrate` command. Continue with S2-004: add the first identity, tenancy and document metadata
-   migration, then advance the supported schema-version range.
+   S2-001 through S2-004 are complete; see `docs/saas/postgres-client-decision.md`, the
+   `--migrate` command and `20261016000001_initial_metadata.sql`. Continue with S2-005: add
+   document events, snapshot pointers, jobs, idempotency and audit migrations.
    Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
 3. Update task evidence and milestone counts in the same commit as each completed task.
 

@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 cloud foundation complete (22/22) · **Last updated:** 2026-10-16
+> **Status:** S1 complete (22/22); S2 in progress (4/21) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 3 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 4 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -236,7 +236,13 @@ the same commit as the completed task.
   now runs the `migrate` service after PostgreSQL health and gates cloud startup on its successful
   completion. Unit tests cover inclusive range boundaries; the disposable Compose smoke confirms
   the migrated baseline permits cloud and gateway readiness.
-- [ ] **S2-004** Create identity, tenant, workspace, project and document metadata migrations.
+- [x] **S2-004** Create identity, tenant, workspace, project and document metadata migrations.
+  Evidence: `20261016000001_initial_metadata.sql` creates 13 tables for principals, identity
+  links, tenants, membership and teams, workspace/project/document metadata, and direct/team
+  grants. Composite foreign keys enforce tenant and parent scope; checks bound names, states,
+  roles and sequence values. The disposable PostgreSQL smoke applies the embedded migration,
+  verifies its version and rejects synthetic cross-tenant and invalid-row inserts in a rolled-back
+  transaction (`deploy/saas/schema-preflight.sql`). Cloud readiness now requires this version.
 - [ ] **S2-005** Create document-event, snapshot-pointer, job, idempotency and audit migrations.
 - [ ] **S2-006** Add constrained database roles for migration and runtime access.
 - [ ] **S2-007** Add transaction helper that sets tenant context for row-level security.
@@ -671,3 +677,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S2-001: selected SQLx 0.9 with embedded SQL migrations and PostgreSQL advisory locking; SQLx declares Rust 1.94 MSRV and the image built with workspace Rust 1.95. |
 | 2026-10-16 | S2-002: added the explicit `--migrate` release command with SQLx PostgreSQL advisory locking; disposable Compose concurrency verification recorded. |
 | 2026-10-16 | S2-003: gated startup readiness on the supported SQLx schema range and ordered the one-shot Compose migration job before cloud roles; empty baseline 0 is supported pending S2-004. |
+| 2026-10-16 | S2-004: added the first tenant-scoped identity and document metadata migration, checked its constraints against PostgreSQL, and advanced cloud schema readiness to version 20261016000001. |

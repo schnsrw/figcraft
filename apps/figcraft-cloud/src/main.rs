@@ -8,8 +8,8 @@ use std::env;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 0;
-const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 0;
+const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 20261016000001;
+const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 20261016000001;
 
 #[derive(Debug, Eq, PartialEq)]
 enum Arguments {

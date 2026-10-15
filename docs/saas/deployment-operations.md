@@ -21,15 +21,17 @@ The SaaS extension will provide:
 
 The `deploy/saas/compose.yaml` scaffold has digest-pinned PostgreSQL, Redis and SeaweedFS images
 and a reviewed PostgreSQL volume target (see the [image review](dependency-images.md)). It defines
-named persistence volumes, health checks and readiness-gated startup. The data services and
-versioned bucket passed a local restart smoke test, but the cloud role runtime still reports not
-ready, so the gateway stays closed. Do not treat this as an operational SaaS deployment.
+named persistence volumes, health checks and readiness-gated startup. A one-shot migration job
+applies the S2-004 metadata schema before cloud startup. The gateway then serves diagnostic
+transport routes; product APIs and durable collaboration remain unfinished. Do not treat this as
+an operational SaaS deployment.
 
 | Service | Image or role | Persistence | Exposure |
 |---|---|---|---|
 | `gateway` | Caddy | certificates and configuration | 80 and 443 |
 | `web` | static FigCraft WASM | none | internal HTTP |
 | `cloud` | `figcraft-cloud`, role `all` | none local | internal HTTP and WebSocket |
+| `migrate` | `figcraft-cloud --migrate` | PostgreSQL schema | one-shot, private network |
 | `postgres` | supported PostgreSQL release | database volume | private network only |
 | `redis` | supported Redis release | optional append-only volume | private network only |
 | `seaweedfs` | pinned SeaweedFS `mini` | object volume | private network only |
@@ -114,10 +116,10 @@ resource limits.
 The current cloud scaffold exposes `/healthz`, `/readyz` and `/startupz` on port 8081, plus
 diagnostic `/api/v1/healthz` and `/ws/v1/health` transport routes. Liveness and startup indicate
 that the process health server is running; readiness becomes HTTP 200 when its listener is bound
-and these transport probes can be served. It does not yet report database schema, authorization or
-document-operation readiness. Its shell-free `--check-ready` command probes the local readiness
-endpoint for the distroless container health check. Do not treat transport readiness as a healthy
-SaaS product deployment.
+and the SQLx migration ledger has the supported schema version. It does not yet report
+authorization or document-operation readiness. Its shell-free `--check-ready` command probes the
+local readiness endpoint for the distroless container health check. Do not treat transport
+readiness as a healthy SaaS product deployment.
 
 Health responses carry a generated `X-Request-Id`; each request emits a structured JSON stdout
 record. Valid W3C version-00 `traceparent` context is forwarded and included in logs, while malformed
@@ -164,8 +166,8 @@ the configured `DATABASE_URL` secret and reports fixed diagnostics without echoi
 driver errors. Migration application is deliberately separate from readiness and normal role
 startup. At process startup, readiness checks the highest successfully applied migration version
 against the binary's supported inclusive range. A missing ledger or unsupported version keeps
-`/readyz` at 503 while liveness remains available. The current empty baseline accepts version 0;
-the first application migration will advance it in S2-004. Schema rollback policy is handled by
+`/readyz` at 503 while liveness remains available. The S2-004 metadata migration has version
+`20261016000001`, which is the current supported version. Schema rollback policy is handled by
 later S2 tasks.
 
 - Every migration has a unique ordered version and checksum.

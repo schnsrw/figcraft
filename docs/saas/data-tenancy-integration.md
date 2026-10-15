@@ -13,6 +13,13 @@
 
 ## PostgreSQL schema
 
+S2-004's first migration implements the core identity, tenant, team, workspace, project and
+document metadata tables below. Tenant-owned children use composite foreign keys so their parent
+identifiers cannot point into another tenant or workspace. Document event, snapshot and active
+snapshot-pointer records are S2-005 work; identity invitations, service accounts and external
+mappings are later task scope. Database roles and row-level security are S2-006/S2-007 work, so
+these schema constraints do not by themselves authorize access.
+
 ### Identity and tenancy
 
 | Table | Required fields |
