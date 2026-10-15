@@ -20,7 +20,7 @@ the same commit as the completed task.
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | in progress | 21 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
-| S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
+| S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -145,32 +145,30 @@ the same commit as the completed task.
   The image built successfully and served `/healthz` (200) and `/readyz` (503, as intended) with
   `--read-only --user 65532:65532`. Base tags are versioned but not digest-pinned; release pinning,
   SBOM and provenance remain follow-up hardening.
-- [x] **S1-014** Add `deploy/saas/compose.yaml` with gateway, web, cloud, PostgreSQL, Redis, MinIO and
-  MinIO initialization.
+- [x] **S1-014** Add `deploy/saas/compose.yaml` with gateway, web, cloud, PostgreSQL, Redis,
+  S3-compatible storage and bucket initialization.
   Evidence: the seven-service Compose topology includes an HTTP gateway, built static web image,
-  cloud image, private data services and a one-shot versioned-bucket initializer. Required image
-  inputs refuse unreviewed PostgreSQL, Redis, MinIO and client release defaults under D-001;
-  `docker compose config` validated all service definitions with synthetic image references and
-  rejected missing references. The Caddy gateway configuration and static web image build passed.
-  This is topology evidence, not a healthy stack: S1-016 adds persistence and health ordering, while
-  S1-018 retains end-to-end acceptance work.
+  cloud image, private data services and a one-shot versioned-bucket initializer. The initial
+  topology refused unreviewed image inputs under D-001; the selected PostgreSQL, Redis and
+  SeaweedFS digests are now recorded in `deploy/saas/env.example`. `docker compose config`
+  validates all service definitions. The Caddy gateway configuration and static web image build
+  passed. S1-016 added persistence and health ordering; S1-018 retains end-to-end acceptance work.
 - [x] **S1-015** Add `deploy/saas/env.example` containing no working production secret.
   Evidence: `deploy/saas/env.example` contains only loopback or reserved-host development values
   and mounted-secret paths; the adjacent ignore rules and README keep `.env` and `secrets/` out of
-  Git and state that no runnable stack exists yet.
+  Git and state that no healthy SaaS application stack exists yet.
 - [x] **S1-016** Add container health checks, dependency ordering and named volumes.
-  Evidence: Compose defines PostgreSQL, Redis and MinIO named data volumes; PostgreSQL's mount
-  target is a required D-001 input because the official image changed its volume layout. Web,
-  gateway, PostgreSQL, Redis and cloud have health checks, with Redis auth read from a mounted
-  secret on stdin. The cloud image's shell-free readiness probe has success/failure regression
-  tests and returns failure against the current `/readyz` 503 in the built distroless image.
-  PostgreSQL and Redis health plus completed MinIO initialization gate cloud creation; web health
-  and cloud readiness gate the gateway. Synthetic-image Compose rendering verifies those edges.
-  CI renders Compose with deliberately non-deployable image fixtures; actual data-image health and
-  persistence remain unverified until D-001 and the S1-018 stack test. The 2026-10-16
-  [image review](dependency-images.md) pins supported PostgreSQL 18.6 and BSD-licensed Redis
-  7.2.16 with OCI digests, and confirms PostgreSQL 18's `/var/lib/postgresql` target from image
-  metadata. Runtime validation and an object-storage choice remain open.
+  Evidence: Compose defines PostgreSQL, Redis and SeaweedFS named data volumes; the PostgreSQL 18
+  mount target is `/var/lib/postgresql`. Web, gateway, PostgreSQL, Redis, SeaweedFS and cloud have
+  health checks, with Redis auth read from a mounted secret on stdin. The cloud image's shell-free
+  readiness probe has success/failure regression tests and returns failure against the current
+  `/readyz` 503 in the built distroless image. PostgreSQL and Redis health plus completed SeaweedFS
+  bucket-versioning initialization gate cloud creation; web health and cloud readiness gate the
+  gateway. CI renders Compose with deliberately non-deployable image fixtures. The 2026-10-16
+  [image review](dependency-images.md) records pinned OCI digests and a disposable Compose run:
+  all three data services became healthy; PostgreSQL and Redis markers and the versioned bucket
+  survived restarts; signed S3 `PutObject` returned a version ID and `HeadObject` found it after
+  restart. This is data-service evidence, not an S1-018 healthy application smoke test.
 - [x] **S1-017** Add cloud formatting, lint, unit and image-build CI without weakening `cargo xtask
   ci`.
   Evidence: the dedicated `cloud` CI job checks formatting, clippy and unit tests for
@@ -244,7 +242,7 @@ the same commit as the completed task.
 - [ ] **S2-GATE** Create, edit, restart and restore a document using PostgreSQL metadata/events;
   prove a failed commit is never confirmed and replay reaches the accepted state.
 
-## S3 — MinIO objects and migration
+## S3 — S3-compatible objects and migration
 
 ### Object repository
 
@@ -268,11 +266,11 @@ the same commit as the completed task.
 
 ### Lifecycle and migration
 
-- [ ] **S3-014** Add idempotent MinIO bucket, versioning and lifecycle initialization.
+- [ ] **S3-014** Add idempotent S3-compatible bucket, versioning and lifecycle initialization.
 - [ ] **S3-015** Add garbage-collection jobs with dry-run and minimum-age protection.
 - [ ] **S3-016** Add database-to-bucket reconciliation report.
 - [ ] **S3-017** Extend the filesystem scanner into a dry-run migration planner.
-- [ ] **S3-018** Implement repeatable filesystem-to-PostgreSQL/MinIO migration with per-resource
+- [ ] **S3-018** Implement repeatable filesystem-to-PostgreSQL/S3 migration with per-resource
   checkpoints.
 - [ ] **S3-019** Verify migrated snapshots, logs, links, libraries and plugins before cutover.
 - [ ] **S3-020** Add backup/restore integration test covering database and bucket versions.
@@ -535,7 +533,7 @@ the same commit as the completed task.
 - [ ] **S8-025** Add Kubernetes or Helm deployment after Compose contracts stabilize.
 - [ ] **S8-026** Apply network policies and external secret integration.
 - [ ] **S8-027** Write every runbook listed in `deployment-operations.md`.
-- [ ] **S8-028** Exercise database, Redis, MinIO, relay, provider and migration incident runbooks.
+- [ ] **S8-028** Exercise database, Redis, object-store, relay, provider and migration incident runbooks.
 - [ ] **S8-029** Load and soak test weighted tenant scheduling and quota enforcement.
 - [ ] **S8-030** Verify upstream synchronization and emergency-security process on a release branch.
 - [ ] **S8-031** Implement SCIM 2.0 user and group provisioning with idempotent deprovisioning.
@@ -606,7 +604,6 @@ items.
 
 | ID | Decision | Blocks |
 |---|---|---|
-| D-001 | PostgreSQL 18.6 and Redis 7.2.16 pinned; choose a maintained, license-compatible S3-compatible service and initializer (archived MinIO releases do not qualify) | S1 object-storage pinning and stack validation; [evidence](dependency-images.md) |
 | D-002 | Select HTTP framework and async PostgreSQL client after a compatibility spike | S2 implementation |
 | D-003 | Select initial OIDC provider used for end-to-end testing | S4 acceptance journey |
 | D-004 | Select first external AI provider and whether BYOK ships in the first AI beta | S7 external adapter |
@@ -616,6 +613,11 @@ items.
 
 These decisions do not block documentation or infrastructure-neutral domain work. They must be
 resolved before the tasks named in the third column pass their gates.
+
+Resolved decision: **D-001** selects digest-pinned PostgreSQL 18.6, BSD-licensed Redis 7.2.16 and
+Apache-2.0 SeaweedFS 4.48 for the local stack; the same SeaweedFS image runs the one-shot
+bucket-versioning initializer. [Review and runtime evidence](dependency-images.md). This does
+not approve the single-node topology for production or complete the S1-018 application smoke test.
 
 ## Release evidence index
 
@@ -633,3 +635,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S1-014: added a guarded seven-service Compose topology and static web image; S1 advanced to 20/22. |
 | 2026-10-16 | S1-016: added named data volumes, health probes and fail-closed startup ordering; S1 advanced to 21/22. |
 | 2026-10-16 | D-001: pinned and inspected supported PostgreSQL and Redis image digests and PostgreSQL volume target; documented archived MinIO blocker. S1 stays 21/22. |
+| 2026-10-16 | D-001: replaced archived MinIO with pinned SeaweedFS 4.48; validated data health, versioning, signed S3 writes and restart persistence in a disposable Compose project. S1 stays 21/22. |

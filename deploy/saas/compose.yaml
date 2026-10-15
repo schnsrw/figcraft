@@ -1,6 +1,6 @@
 name: figcraft-saas
 
-# D-001: PostgreSQL and Redis are reviewed in env.example; object storage remains undecided.
+# D-001: PostgreSQL, Redis and SeaweedFS are digest-pinned in env.example.
 # This topology is not yet a healthy SaaS stack: the cloud API/relay/worker runtime is pending.
 services:
   gateway:
@@ -47,8 +47,8 @@ services:
       FIGCRAFT_SINGLE_TENANT_ID: ${FIGCRAFT_SINGLE_TENANT_ID:-00000000-0000-0000-0000-000000000001}
       DATABASE_URL_FILE: /run/secrets/database_url
       REDIS_URL_FILE: /run/secrets/redis_url
-      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
-      S3_REGION: ${S3_REGION:-local}
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs:8333}
+      S3_REGION: ${S3_REGION:-us-east-1}
       S3_BUCKET: ${S3_BUCKET:-figcraft}
       S3_ACCESS_KEY_FILE: /run/secrets/s3_access_key
       S3_SECRET_KEY_FILE: /run/secrets/s3_secret_key
@@ -72,7 +72,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio-init:
+      seaweedfs-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/usr/local/bin/figcraft-cloud", "--check-ready"]
@@ -114,31 +114,53 @@ services:
       retries: 5
       start_period: 10s
 
-  minio:
-    image: ${MINIO_IMAGE:?D-001 requires a reviewed MinIO image reference}
-    command: ["server", "/data", "--address", ":9000"]
-    environment:
-      MINIO_CONFIG_ENV_FILE: /run/secrets/minio_env
+  seaweedfs:
+    image: ${SEAWEEDFS_IMAGE:?D-001 requires a reviewed SeaweedFS image reference}
+    command:
+      - mini
+      - -dir=/data
+      - -s3.config=/run/secrets/seaweedfs_s3_config
+      - -s3.autoCreateBucket=false
+      - -s3.allowDeleteBucketNotEmpty=false
+      - -admin.ui=false
+      - -webdav=false
+      - -bucket=${S3_BUCKET:-figcraft}
     secrets:
-      - minio_env
+      - seaweedfs_s3_config
     volumes:
-      - minio_data:/data
+      - seaweedfs_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--show-error", "--fail", "http://127.0.0.1:8333/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
 
-  minio-init:
-    image: ${MINIO_MC_IMAGE:?D-001 requires a release-matched MinIO client image reference}
-    entrypoint: ["mc", "--config-dir", "/run/secrets", "mb", "--ignore-existing", "--with-versioning"]
-    command: ["local/${S3_BUCKET:-figcraft}"]
-    secrets:
-      - source: minio_mc_config
-        target: config.json
+  seaweedfs-init:
+    image: ${SEAWEEDFS_IMAGE:?D-001 requires a reviewed SeaweedFS image reference}
+    entrypoint: ["/bin/sh", "-ec"]
+    environment:
+      S3_BUCKET: ${S3_BUCKET:-figcraft}
+    command:
+      - |
+        bucket="$$S3_BUCKET"
+        test "$${#bucket}" -ge 3 && test "$${#bucket}" -le 63
+        case "$$bucket" in *[!a-z0-9.-]*|.*|*.) exit 1;; esac
+        printf 's3.bucket.versioning -name %s -enable\n' "$$bucket" |
+          weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888
+        status=$$(printf 's3.bucket.versioning -name %s\n' "$$bucket" |
+          weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888)
+        printf '%s\n' "$$status"
+        printf '%s\n' "$$status" | grep -Fq 'Versioning: Enabled'
     depends_on:
-      - minio
+      seaweedfs:
+        condition: service_healthy
     restart: "on-failure:10"
 
 volumes:
   postgres_data:
   redis_data:
-  minio_data:
+  seaweedfs_data:
 
 secrets:
   database_url:
@@ -159,7 +181,5 @@ secrets:
     file: ./secrets/redis.conf
   redis_password:
     file: ./secrets/redis_password
-  minio_env:
-    file: ./secrets/minio.env
-  minio_mc_config:
-    file: ./secrets/minio-mc-config.json
+  seaweedfs_s3_config:
+    file: ./secrets/seaweedfs-s3-config.json

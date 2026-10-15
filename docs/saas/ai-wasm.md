@@ -123,7 +123,7 @@ The gateway rejects unknown commands, disallowed commands, invalid parameters, e
 sizes and references outside the authorized document. The engine executes the batch behind its
 existing guard. The relay applies it as one named undo step.
 
-The model does not receive direct database, MinIO or collaboration credentials.
+The model does not receive direct database, object-store or collaboration credentials.
 
 ## AI participant identity
 
@@ -190,7 +190,7 @@ processes or dedicated worker containers.
 1. Publisher uploads a bundle through a verified reservation.
 2. The service validates the manifest, API version, imports, size and cryptographic checksum.
 3. An administrator or authorized tenant publisher approves requested capabilities.
-4. The immutable bundle is stored in MinIO.
+4. The immutable bundle is stored in S3-compatible object storage.
 5. A job selects a specific approved version.
 6. The worker loads it into a fresh metered runtime.
 7. Host calls enforce tenant, document, capability and size limits.
@@ -210,7 +210,7 @@ processes or dedicated worker containers.
 | `job.progress` | Bounded progress updates |
 | `kv.read`, `kv.write` | Small tenant/module-scoped settings, with quota |
 
-No capability provides arbitrary SQL, Redis, MinIO, filesystem, process, clock precision or network
+No capability provides arbitrary SQL, Redis, object-store, filesystem, process, clock precision or network
 access. A coarse platform time may be supplied when needed for deterministic business logic.
 
 ### Runtime limits
@@ -233,7 +233,7 @@ Limits are stored with the approved module version so a retry uses the same poli
 - WASM workers use a restricted network policy.
 - Provider traffic is available only to the AI gateway or AI worker.
 - Local model runtimes accept traffic only from the AI service network.
-- MinIO administration is unavailable to workers; object access uses service-scoped credentials or
+- Object-store administration is unavailable to workers; object access uses service-scoped credentials or
   short-lived requests.
 - Metadata endpoints of cloud providers are blocked from plugin and AI execution networks.
 

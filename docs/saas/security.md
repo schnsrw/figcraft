@@ -119,7 +119,7 @@
 - Production secrets come from an orchestrator secret store or dedicated secret manager.
 - Docker Compose supports mounted secret files.
 - Secret values never appear in configuration diagnostics.
-- Use separate database, Redis, MinIO, AI and webhook credentials by role where supported.
+- Use separate database, Redis, object-store, AI and webhook credentials by role where supported.
 - Rotate signing keys with an overlap window identified by key ID.
 - Rotate database and object credentials without rebuilding images.
 - Backups containing secrets are encrypted and access-controlled.
@@ -141,7 +141,7 @@
 
 - TLS terminates at the trusted edge; internal production traffic uses private networks and TLS
   where the platform requires it.
-- PostgreSQL, Redis and MinIO administration are not internet-accessible.
+- PostgreSQL, Redis and object-store administration are not internet-accessible.
 - Only the gateway reaches public API and relay ports.
 - Workers receive only the egress required by their role.
 - Local AI runtimes accept requests only from the AI worker network.

@@ -82,8 +82,7 @@ jobs:
           POSTGRES_IMAGE: example.invalid/postgres:fixture
           POSTGRES_DATA_DIR: /var/lib/postgresql/data
           REDIS_IMAGE: example.invalid/redis:fixture
-          MINIO_IMAGE: example.invalid/minio:fixture
-          MINIO_MC_IMAGE: example.invalid/mc:fixture
+          SEAWEEDFS_IMAGE: example.invalid/seaweedfs:fixture
         run: docker compose --file deploy/saas/compose.yaml config --quiet
 
       - name: Build cloud runtime image

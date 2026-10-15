@@ -31,7 +31,7 @@ Desktop client    React shell + WASM editor    Host product backend
                     |
           +---------+----------+----------------+
           |                    |                |
-      PostgreSQL             Redis          MinIO or S3
+      PostgreSQL             Redis          S3-compatible store
           |                    |                |
           +--------------------+----------------+
                                |
@@ -45,10 +45,10 @@ Desktop client    React shell + WASM editor    Host product backend
 
 | Role | Responsibility | Durable writes |
 |---|---|---|
-| `all` | Runs API, relay scheduling and workers for a small deployment | PostgreSQL and MinIO |
+| `all` | Runs API, relay scheduling and workers for a small deployment | PostgreSQL and S3-compatible storage |
 | `api` | Authentication, tenancy, workspaces, documents, links, webhooks, billing and job submission | PostgreSQL |
-| `relay` | WebSocket admission, authoritative rooms, event persistence, presence and reconnection | PostgreSQL; snapshots through MinIO |
-| `worker` | Compaction, thumbnails, exports, object cleanup, webhook delivery, AI and server WASM | PostgreSQL and MinIO |
+| `relay` | WebSocket admission, authoritative rooms, event persistence, presence and reconnection | PostgreSQL; snapshots through S3-compatible storage |
+| `worker` | Compaction, thumbnails, exports, object cleanup, webhook delivery, AI and server WASM | PostgreSQL and S3-compatible storage |
 
 All roles use the same configuration parser, domain types, authorization library, metrics and
 release version. Production may run separate replicas without building different binaries.
@@ -78,7 +78,7 @@ an alternate document model.
 ### Cloud domain
 
 Contains identifiers, tenancy context, roles, plans, quotas, resource states and shared error
-types. It has no database, HTTP, Redis, MinIO or UI dependency.
+types. It has no database, HTTP, Redis, S3 or UI dependency.
 
 ### Authentication
 
@@ -87,7 +87,7 @@ principal and tenant context before application handlers access a repository.
 
 ### Storage
 
-Owns PostgreSQL repositories, transactions, migrations, MinIO operations and immutable object
+Owns PostgreSQL repositories, transactions, migrations, S3 operations and immutable object
 checksums. It exposes domain-oriented operations instead of raw SQL to API and relay code.
 
 ### Relay
@@ -139,7 +139,7 @@ cannot open sockets, read host files or write a document outside the command gat
 
 1. The client requests an upload reservation with size, hash and media type.
 2. The API authorizes the tenant and checks quota.
-3. The API returns a short-lived presigned MinIO request for a staging key.
+3. The API returns a short-lived presigned S3 request for a staging key.
 4. The client uploads the bytes.
 5. The client completes the reservation.
 6. A worker verifies size and checksum and promotes the object to a content-addressed key.
@@ -223,8 +223,9 @@ designed.
 
 ### Object storage
 
-MinIO may run as one container for development and private deployments. Hosted production uses a
-distributed MinIO cluster or managed S3-compatible storage with versioning and lifecycle rules.
+The local Compose stack uses single-node SeaweedFS for development and private evaluation. Hosted
+production uses a separately reviewed distributed S3-compatible service or managed S3 with
+versioning, lifecycle rules, network isolation and restore-tested backups.
 
 ## Protocol evolution
 
@@ -246,7 +247,7 @@ distributed MinIO cluster or managed S3-compatible storage with versioning and l
 | Relay stops after commit | Event is replayed by the next owner; clients learn its accepted sequence |
 | Redis unavailable | New ownership pauses; current rooms may continue only while fenced database writes remain valid |
 | PostgreSQL unavailable | Mutations and control-plane writes stop; no edit is confirmed |
-| MinIO unavailable | Existing warm rooms may edit while event limits permit; uploads, snapshots and exports pause |
+| Object store unavailable | Existing warm rooms may edit while event limits permit; uploads, snapshots and exports pause |
 | Worker stops | Its expired job lease permits another worker to retry idempotently |
 | Webhook receiver unavailable | Delivery retries with backoff and preserves a visible failure state |
 | AI provider unavailable | AI job fails or routes to an allowed fallback; document editing remains available |
@@ -271,7 +272,7 @@ This preserves the current `cargo xtask layers` architecture and limits upstream
 ## Multi-region boundary
 
 The first multi-region design assigns each tenant or document a home region. Web requests may enter
-through any edge, but realtime traffic routes to the home region. PostgreSQL metadata and MinIO
+through any edge, but realtime traffic routes to the home region. PostgreSQL metadata and S3
 objects may replicate for disaster recovery. Active-active mutation of one document in several
 regions is outside the initial architecture because it would replace the single-authority ordering
 model.

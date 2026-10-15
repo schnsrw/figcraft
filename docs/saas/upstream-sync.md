@@ -241,7 +241,7 @@ Upstream-compatible checks and SaaS checks are separate jobs but both gate `main
 |---|---|
 | Upstream | Existing `cargo xtask ci`, platform builds, layers, assets and WASM |
 | SaaS unit | Cloud domain, auth, storage, relay, jobs, AI and WASM crates |
-| SaaS integration | PostgreSQL, Redis and MinIO behavior |
+| SaaS integration | PostgreSQL, Redis and S3-compatible object-store behavior |
 | SaaS Compose | Image build, migration, health, collaboration and restart smoke tests |
 | Compatibility | Supported desktop/browser clients and snapshot/event fixtures |
 | Security | Tenant isolation, secret scanning, dependencies and container images |

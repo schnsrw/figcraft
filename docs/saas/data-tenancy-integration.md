@@ -8,7 +8,7 @@
 - Treat identifiers as opaque outside their owning service.
 - Include `tenant_id` on every tenant-owned row even when a parent already implies it.
 - Include `tenant_id` in uniqueness constraints where names or external mappings are scoped.
-- Never derive MinIO keys directly from unsanitized customer names.
+- Never derive S3 object keys directly from unsanitized customer names.
 - Retain existing FigCraft node and collaboration identifiers inside document state.
 
 ## PostgreSQL schema
@@ -104,12 +104,12 @@ Tests must attempt cross-tenant access through:
 - Search and pagination cursors.
 - Job identifiers and result objects.
 - Share-link and embed-token reuse.
-- MinIO presigned requests.
+- S3 presigned requests.
 - Redis room and cache keys.
 - Webhook delivery inspection.
 - Operator support tooling.
 
-## MinIO object layout
+## S3-compatible object layout
 
 ```text
 tenants/${TENANT_ID}/documents/${DOCUMENT_ID}/snapshots/${SEQUENCE}-${SHA256}.bin

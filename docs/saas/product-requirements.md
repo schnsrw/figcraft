@@ -139,7 +139,7 @@ protocols, tenant-aware schema and container image.
 - Verify declared size, checksum, media type and tenant before attaching an object.
 - Track object references so unused objects can be collected safely.
 - Keep snapshots, libraries, plugin bundles, exports and thumbnails immutable.
-- Support MinIO in Docker and any compatible S3 service in production.
+- Support a maintained S3-compatible service in Docker and compatible managed S3 in production.
 
 ### AI
 
@@ -207,7 +207,7 @@ These targets are release gates, not claims about the current repository.
 - Running Figma JavaScript plugins.
 - Giving plugins arbitrary internet access.
 - Storing confirmed collaboration state only in Redis.
-- Using MinIO as the searchable metadata database.
+- Using the S3-compatible object store as the searchable metadata database.
 - Supporting anonymous administrative access.
 - Building native mobile applications.
 - Providing a general-purpose user-code hosting platform.

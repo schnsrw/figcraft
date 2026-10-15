@@ -8,7 +8,7 @@
 | Stage | Outcome | Milestones |
 |---|---|---|
 | Architecture baseline | Reviewed scope, decisions, tracker and fork policy | S0 |
-| Private preview | One tenant runs through Docker with PostgreSQL and MinIO | S1–S3 |
+| Private preview | One tenant runs through Docker with PostgreSQL and S3-compatible storage | S1–S3 |
 | Multi-tenant alpha | Accounts, workspaces, roles and isolated storage | S4 |
 | Collaborative beta | Horizontally scalable, fenced realtime rooms | S5 |
 | Product integration beta | Browser and desktop use cloud files; host products embed them | S6 |
@@ -25,7 +25,7 @@ S1 Cloud foundation
  |
 S2 PostgreSQL metadata and event storage
  | \
- |  S3 MinIO assets and immutable snapshots
+ |  S3 object assets and immutable snapshots
  |   \
 S4 Identity, tenancy and authorization
  |     \
@@ -48,7 +48,7 @@ final release gate is S8.
 | S0 | Documentation and fork governance | 8–16 h | — | Architecture, requirements, tracker and upstream policy approved |
 | S1 | Cloud foundation | 40–65 h | S0 | Cloud roles and the fork-owned browser shell build with health and configuration |
 | S2 | PostgreSQL metadata and events | 60–100 h | S1 | Files and ordered collaboration events survive process and database-safe restarts |
-| S3 | MinIO objects and migration | 45–75 h | S1, S2 | Snapshots, assets, libraries, plugins and exports use verified immutable objects |
+| S3 | S3-compatible objects and migration | 45–75 h | S1, S2 | Snapshots, assets, libraries, plugins and exports use verified immutable objects |
 | S4 | Identity, tenancy and authorization | 100–165 h | S2 | Single and multiple tenants use the same isolated schema and role model |
 | S5 | Distributed collaboration relay | 100–170 h | S2, S3, S4 | Multiple relay replicas safely own rooms with leases and fencing |
 | S6 | Browser, desktop and embedded integration | 95–160 h | S3, S4, S5 | All clients share cloud identity and host products embed authorized documents |
@@ -90,7 +90,7 @@ multi-region editing and building a foundation model.
 - Structured logging, request identifiers and tracing foundation.
 - Liveness, readiness and startup endpoints.
 - Multi-stage non-root container image.
-- Initial Docker Compose stack with PostgreSQL, Redis and MinIO dependency health.
+- Initial Docker Compose stack with PostgreSQL, Redis and S3-compatible dependency health.
 - Cloud CI jobs that do not weaken existing upstream gates.
 - Fork-owned React/TypeScript/Vite workspace with pinned toolchain, lockfile and quality gates.
 - Versioned TypeScript-to-Rust/WASM bridge contract.
@@ -126,7 +126,7 @@ multi-region editing and building a foundation model.
 - Restart replay reproduces the accepted document state.
 - Migrations work from empty and the previous supported schema.
 
-## S3 — MinIO objects and migration
+## S3 — S3-compatible objects and migration
 
 ### Deliverables
 
@@ -136,8 +136,8 @@ multi-region editing and building a foundation model.
 - Asset, team-library, plugin, export and thumbnail object types.
 - Presigned download authorization.
 - Object-reference tracking and garbage collection.
-- MinIO initialization, versioning and lifecycle policy.
-- Filesystem-to-PostgreSQL/MinIO migration command with dry-run and report.
+- S3-compatible initialization, versioning and lifecycle policy.
+- Filesystem-to-PostgreSQL/S3 migration command with dry-run and report.
 - Backup and restore integration test.
 
 ### Exit gate
@@ -302,7 +302,7 @@ multi-region editing and building a foundation model.
 
 ### Private preview
 
-S1–S3 provide Docker deployment, database metadata/events and MinIO objects for one configured
+S1–S3 provide Docker deployment, database metadata/events and S3 objects for one configured
 tenant. Authentication may initially use one OIDC issuer, but public unauthenticated administration
 is not permitted.
 

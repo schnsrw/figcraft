@@ -1,9 +1,9 @@
 # FigCraft SaaS deployment
 
 This directory contains the cloud image, static web image and single-node Compose topology. The
-topology is a development scaffold, **not a runnable or healthy SaaS deployment**: PostgreSQL and
-Redis are pinned, but D-001 still lacks a supported object-storage and initializer image choice;
-cloud API, relay and worker services have not been implemented. The image review is in
+topology is a development scaffold, **not a healthy SaaS deployment**: PostgreSQL, Redis and
+SeaweedFS can run locally, but cloud API, relay and worker services have not been implemented.
+The dependency review is in
 [`docs/saas/dependency-images.md`](../../docs/saas/dependency-images.md).
 Build the cloud image from the repository root with:
 
@@ -18,42 +18,41 @@ already routes `/api/v1/*` and `/ws/v1/*` to that port, but those application ro
 yet. Its `/healthz` is only an edge liveness response, not a cloud readiness signal.
 
 `web.Dockerfile` builds the existing npm workspace with Node 22.18.0, then copies the static build
-into Caddy. `compose.yaml` defines the gateway, web, cloud, PostgreSQL, Redis, MinIO and a one-shot
-MinIO bucket initializer. The gateway publishes HTTP on loopback port 8080 only. It does not
-configure production TLS or expose the data services. The bucket initializer uses an operator-
-provided MinIO Client config file, not credentials in environment variables or command arguments.
-It creates a missing bucket with versioning; lifecycle rules and verification of an existing
-bucket's versioning are future work.
+into Caddy. `compose.yaml` defines the gateway, web, cloud, PostgreSQL, Redis, SeaweedFS and a
+one-shot bucket-versioning initializer. The gateway publishes HTTP on loopback port 8080 only. It
+does not configure production TLS or expose the data services. SeaweedFS `mini` creates the
+configured bucket if absent; the initializer enables versioning and verifies it on every startup.
+No object-store credentials appear in environment variables or command arguments. Lifecycle rules
+remain S3-014 work.
 
 The image uses the Rust 1.95 Bookworm builder and the Debian 12 distroless runtime. These tags are
 versioned but not digest-pinned; production digest pinning, SBOM and provenance are release work.
-PostgreSQL and Redis are digest-pinned in `env.example`; object storage remains the D-001 blocker.
+PostgreSQL, Redis and SeaweedFS are digest-pinned in `env.example`. Their security updates remain
+an operator's explicit review and re-pin task.
 
 ## Startup and persistence
 
-`postgres_data`, `redis_data` and `minio_data` are named Docker volumes. The selected PostgreSQL
+`postgres_data`, `redis_data` and `seaweedfs_data` are named Docker volumes. The selected PostgreSQL
 18 image uses `/var/lib/postgresql` as the volume target, matching its
 [official image documentation](https://hub.docker.com/_/postgres). Do not carry that path across a
 major upgrade without a migration plan. Redis enables append-only persistence under `/data`, even
 though cloud correctness must treat Redis as replaceable state.
 
-Compose waits for PostgreSQL and Redis health checks and for successful MinIO bucket initialization
+Compose waits for PostgreSQL and Redis health checks and for successful bucket initialization
 before creating the cloud container. The gateway waits for both web health and cloud readiness.
 `figcraft-cloud --check-ready` probes `/readyz` with a bounded local HTTP request and returns failure
 while the role runtime is unfinished; consequently the gateway correctly remains unstarted today.
-The one-shot MinIO initializer retries failures, but its supported replacement and credentials
-still need D-001 validation. The edge `/healthz` is only liveness after the gateway starts.
+The one-shot SeaweedFS initializer retries failures and fails closed if versioning cannot be
+confirmed. The edge `/healthz` is only liveness after the gateway starts.
 
 ## Configuration template
 
-Copy `env.example` to `.env` only when preparing a local stack. PostgreSQL, Redis and the PostgreSQL
-volume path are reviewed defaults; `MINIO_IMAGE` and `MINIO_MC_IMAGE` remain unset until the
-object-storage choice is resolved. Compose refuses to render without them. The checked-in
-template contains only non-secret local values, reserved `.invalid` hostnames and paths where
-containers receive mounted secrets. `.env` and the whole `secrets/` directory are ignored by Git.
-With image references supplied, validate
-the topology without starting containers using `docker compose -f deploy/saas/compose.yaml config
---quiet` from the repository root.
+Copy `env.example` to `.env` only when preparing a local stack. The checked-in template contains
+only non-secret local values, reserved `.invalid` hostnames and paths where containers receive
+mounted secrets. `.env` and the whole `secrets/` directory are ignored by Git. Validate the
+topology without starting containers using
+`docker compose --env-file deploy/saas/env.example -f deploy/saas/compose.yaml config --quiet`
+from the repository root. Secret files are required before starting data services.
 
 The application settings follow [`docs/saas/deployment-operations.md`](../../docs/saas/deployment-operations.md):
 
@@ -77,18 +76,18 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
   `session_signing_key` for the cloud service. The PostgreSQL `postgres_password` must agree with
   `database_url`; the Redis `redis.conf` and newline-free `redis_password` must agree with
   `redis_url`. The Redis health probe reads its password on stdin, never in argv.
-- Supply a MinIO server environment file at `secrets/minio.env` and a MinIO Client `config.json`
-  at `secrets/minio-mc-config.json`. The client config must contain an alias named `local` for
-  `http://minio:9000`, using credentials authorized to create the configured bucket. Keep the
-  server, client and cloud object-store credentials consistent. Provision these files through a
-  trusted secret-management process; never commit sample credentials.
+- Supply a SeaweedFS S3 identity configuration at `secrets/seaweedfs-s3-config.json`, mounted as
+  `/run/secrets/seaweedfs_s3_config`. Its application identity's access and secret keys must agree
+  with `s3_access_key` and `s3_secret_key`; give it only the actions needed by the application.
+  SeaweedFS `mini` and the one-shot `weed shell` initializer use private internal endpoints; do
+  not publish their master, filer, volume or admin ports. Provision the identity file through a
+  trusted secret-management process; never commit credentials.
 - Mount secrets read-only and pass only their in-container paths through `_FILE` settings.
 - Never place credentials in `.env`, Compose YAML, image layers, command-line arguments, logs or
   support bundles.
 - The cloud configuration rejects unreadable secret files and development defaults in production
   before starting the health server (S1-009 and S1-010).
 
-D-001 remains open for object storage. S1-016 adds named volumes, health checks and fail-closed
-ordering; the pinned PostgreSQL and Redis images were inspected but their Compose runtime health
-and persistence have not yet been verified. A healthy API/web/WebSocket smoke test is S1-018,
-after the cloud application routes exist.
+D-001 selects the local data-service images; this is still a single-node development topology, not
+a production security or backup design. A healthy API/web/WebSocket smoke test is S1-018, after
+the cloud application routes exist.

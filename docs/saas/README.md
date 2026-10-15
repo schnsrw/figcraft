@@ -21,7 +21,7 @@ auditing and operations.
 |---|---|
 | [Product requirements](product-requirements.md) | Scope, personas, deployment modes, functional requirements and non-goals |
 | [Architecture](architecture.md) | Target topology, service boundaries, collaboration consistency and failure handling |
-| [Data, tenancy and integration](data-tenancy-integration.md) | PostgreSQL model, MinIO layout, identity, permissions, API and embedding contracts |
+| [Data, tenancy and integration](data-tenancy-integration.md) | PostgreSQL model, S3 object layout, identity, permissions, API and embedding contracts |
 | [AI and WASM](ai-wasm.md) | Provider-neutral AI relay, command execution, server-side WASM and safety boundaries |
 | [Deployment and operations](deployment-operations.md) | Docker profiles, configuration, migrations, scaling, backup, restore and observability |
 | [Dependency image review](dependency-images.md) | Reviewed PostgreSQL and Redis pins and the unresolved object-storage release choice |
@@ -70,7 +70,7 @@ webapp/
 crates/
   cloud-domain/            tenant, workspace, identity, role and quota types
   cloud-auth/              OIDC, sessions, service tokens and embed-token validation
-  cloud-storage/           PostgreSQL repositories, migrations and MinIO object operations
+  cloud-storage/           PostgreSQL repositories, migrations and S3 object operations
   cloud-relay/             room leases, routing and database-backed collaboration persistence
   cloud-jobs/              durable job execution and scheduling
   cloud-ai/                AI providers, policy, context building and command application
@@ -81,7 +81,7 @@ deploy/saas/
   Caddyfile
   env.example
   postgres/
-  minio/
+  seaweedfs/
   observability/
   kubernetes/
 
@@ -100,6 +100,9 @@ together. Service boundaries and dependency direction matter more than the numbe
 
 This acceptance authorizes implementation that depends on the architecture baseline. It does not
 assign the architecture, security or operations reviewer identities tracked separately by S0-013.
+For the local Compose implementation of SAAS-ADR-005, D-001 selects maintained Apache-2.0
+SeaweedFS 4.48 in place of archived MinIO; see the [dependency image review](dependency-images.md).
+The S3-compatible contract remains provider-neutral for hosted deployments.
 
 ## Delivery rules
 
@@ -114,7 +117,7 @@ assign the architecture, security or operations reviewer identities tracked sepa
 - Every stored resource carries a tenant identifier, including jobs, events and audit records.
 - Every externally supplied identifier is authorized within its tenant before use.
 - Confirm a collaboration edit only after its durable event commit succeeds.
-- Never expose PostgreSQL, Redis, MinIO administration or AI provider credentials to clients.
+- Never expose PostgreSQL, Redis, object-store administration or AI provider credentials to clients.
 - Every milestone must satisfy its exit gate in [roadmap.md](roadmap.md).
 - Update [tracker.md](tracker.md) in the same commit as completed work.
 

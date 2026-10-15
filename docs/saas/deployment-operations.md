@@ -11,7 +11,7 @@ The SaaS extension will provide:
 - A Docker Compose stack for local development and single-node operation.
 - A Caddy configuration for TLS and route separation.
 - PostgreSQL migrations embedded in or released with the cloud image.
-- MinIO bucket initialization and lifecycle policy tooling.
+- S3-compatible bucket initialization and lifecycle policy tooling.
 - Optional observability and local-AI Compose profiles.
 - Kubernetes manifests or a Helm chart after role-separated scaling is proven.
 
@@ -19,12 +19,11 @@ The SaaS extension will provide:
 
 ### Core profile
 
-The `deploy/saas/compose.yaml` scaffold has digest-pinned PostgreSQL and Redis images and a
-reviewed PostgreSQL volume target; D-001 remains open for object storage (see the
-[image review](dependency-images.md)). It defines named persistence volumes, health checks and
-readiness-gated startup, but the cloud role runtime still reports not ready, so the gateway stays
-closed. The data services have not been runtime-smoke-tested; do not treat a successful Compose
-render as an operational deployment.
+The `deploy/saas/compose.yaml` scaffold has digest-pinned PostgreSQL, Redis and SeaweedFS images
+and a reviewed PostgreSQL volume target (see the [image review](dependency-images.md)). It defines
+named persistence volumes, health checks and readiness-gated startup. The data services and
+versioned bucket passed a local restart smoke test, but the cloud role runtime still reports not
+ready, so the gateway stays closed. Do not treat this as an operational SaaS deployment.
 
 | Service | Image or role | Persistence | Exposure |
 |---|---|---|---|
@@ -33,8 +32,8 @@ render as an operational deployment.
 | `cloud` | `figcraft-cloud`, role `all` | none local | internal HTTP and WebSocket |
 | `postgres` | supported PostgreSQL release | database volume | private network only |
 | `redis` | supported Redis release | optional append-only volume | private network only |
-| `minio` | unresolved supported S3-compatible release | object volumes | private network only |
-| `minio-init` | unresolved compatible client | none | one-shot initialization |
+| `seaweedfs` | pinned SeaweedFS `mini` | object volume | private network only |
+| `seaweedfs-init` | pinned SeaweedFS `weed shell` | none | one-shot versioning verification |
 
 ### Scale profile
 
@@ -74,8 +73,8 @@ FIGCRAFT_SINGLE_TENANT_ID=00000000-0000-0000-0000-000000000001
 
 DATABASE_URL_FILE=/run/secrets/database_url
 REDIS_URL_FILE=/run/secrets/redis_url
-S3_ENDPOINT=http://minio:9000
-S3_REGION=local
+S3_ENDPOINT=http://seaweedfs:8333
+S3_REGION=us-east-1
 S3_BUCKET=figcraft
 S3_ACCESS_KEY_FILE=/run/secrets/s3_access_key
 S3_SECRET_KEY_FILE=/run/secrets/s3_secret_key
@@ -133,8 +132,9 @@ The edge routes:
 /healthz                  shallow edge health
 ```
 
-MinIO is not exposed as a browsable service. Presigned object requests may use a separate object
-hostname or an authenticated gateway path. Administration endpoints remain private.
+SeaweedFS is not published outside the private Compose network. Presigned object requests may use
+a separate object hostname or an authenticated gateway path in a later release. Its master, filer,
+volume and admin endpoints require further network isolation before production.
 
 WebSocket proxy settings must preserve upgrades, client address metadata from trusted proxies,
 idle timeouts longer than heartbeat intervals and bounded request headers.
@@ -143,7 +143,8 @@ idle timeouts longer than heartbeat intervals and bounded request headers.
 
 1. PostgreSQL becomes reachable.
 2. The explicit migration job acquires a migration lock and applies forward migrations.
-3. MinIO initialization creates the bucket, versioning and lifecycle rules idempotently.
+3. SeaweedFS creates the local bucket if absent; its initializer enables and verifies versioning.
+   Lifecycle rules remain S3-014 work.
 4. Redis becomes reachable.
 5. API and relay roles start and pass readiness checks.
 6. Workers start and claim jobs.
@@ -172,7 +173,7 @@ closed when its database schema is outside the binary's supported range.
 | `/metrics` | Private metrics endpoint or collector integration |
 
 Relay readiness is false when it cannot obtain or validate room leases. API readiness is false when
-authorization-critical PostgreSQL access fails. MinIO failure may degrade readiness differently by
+authorization-critical PostgreSQL access fails. Object-store failure may degrade readiness differently by
 role: uploads and workers become unready while an existing relay may remain live until event or
 snapshot policy requires object access.
 
@@ -198,7 +199,7 @@ Minimum metrics:
 - Lease acquisition, renewal and fencing failures.
 - PostgreSQL pool use, transaction latency and serialization failures.
 - Redis latency and ownership lookup failures.
-- MinIO operation latency, bytes and checksum failures.
+- Object-store operation latency, bytes and checksum failures.
 - Job queue depth, lease age, attempts and completion latency.
 - Snapshot age and event backlog per document distribution.
 - Webhook attempts and terminal failures.
@@ -224,7 +225,7 @@ higher rate.
 - Backup copies in a failure domain separate from the primary.
 - Quarterly restoration exercise for production.
 
-### MinIO
+### S3-compatible object storage
 
 - Bucket versioning.
 - Lifecycle retention for snapshots, staging objects and deleted objects.
@@ -235,7 +236,7 @@ higher rate.
 ### Redis
 
 Redis data is reconstructible. Persistence may improve restart behavior but does not replace
-PostgreSQL or MinIO backup.
+PostgreSQL or object-store backup.
 
 ## Restore
 
@@ -276,7 +277,7 @@ Compose remains the reference single-node package. When an operator has an estab
 Swarm environment, provide a separate stack file derived from the same images and configuration:
 
 - Put edge, API, relay and workers on an encrypted overlay network.
-- Publish only the edge service; keep PostgreSQL, Redis and MinIO administration private.
+- Publish only the edge service; keep PostgreSQL, Redis and object-store administration private.
 - Scale API, relay and worker roles independently.
 - Use placement constraints and update policies that preserve relay drain time.
 - Use Swarm secrets or an external secret provider instead of environment values for credentials.
@@ -295,7 +296,7 @@ Kubernetes is introduced after Compose validates service boundaries. Production 
 
 - Deployments for API, relay and workers.
 - Services and ingress for HTTP and WebSocket routes.
-- Jobs for migrations and MinIO initialization.
+- Jobs for migrations and S3-compatible bucket initialization.
 - Pod disruption budgets for API and relay.
 - Topology spread constraints.
 - Network policies separating API, relay, workers, database, Redis, object storage and AI runtime.
@@ -311,7 +312,7 @@ is a highly available production database.
 
 - Database unavailable.
 - Redis unavailable or split ownership suspected.
-- MinIO unavailable or checksum mismatch.
+- Object store unavailable or checksum mismatch.
 - Relay overload and reconnect storm.
 - Event backlog prevents snapshot compaction.
 - Tenant storage quota exhausted.

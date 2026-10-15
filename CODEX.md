@@ -29,7 +29,7 @@ the continuation point, a blocker or a major decision changes.
 - TypeScript does not own document semantics, commands, undo, conflict resolution or a second
   realtime protocol. Snapshots and collaboration batches cross the bridge as opaque data.
 - Build one modular Rust cloud binary with `all`, `api`, `relay` and `worker` roles. Use PostgreSQL
-  for tenant metadata and durable ordered edits, MinIO/S3 for immutable objects, and Redis only for
+  for tenant metadata and durable ordered edits, S3-compatible storage for immutable objects, and Redis only for
   replaceable presence, routing, leases, cache and rate limits.
 - Acknowledged edits must be committed durably. One fenced authoritative sequencer owns a document
   at a time. A stale owner cannot write after losing its lease.
@@ -74,11 +74,13 @@ the continuation point, a blocker or a major decision changes.
   deployment environment contract without claiming that the not-yet-built Compose stack runs.
   `S1-017` adds a dedicated cloud format, lint, unit-test and image-build CI job without replacing
   the full Rust, WASM and web gates. `S1-014` adds a seven-service Compose topology, gateway route
-  configuration and static web image. `S1-016` adds named PostgreSQL, Redis and MinIO volumes,
+  configuration and static web image. `S1-016` adds named PostgreSQL, Redis and SeaweedFS volumes,
   health checks and fail-closed startup ordering. The cloud container remains unready until its
-  application roles exist. D-001 now pins PostgreSQL 18.6 and BSD-licensed Redis 7.2.16 by OCI
-  digest and confirms the PostgreSQL 18 volume target. Their runtime health and persistence remain
-  unverified; the object-storage image choice remains open because MinIO upstreams are archived.
+  application roles exist. D-001 selects OCI-digest-pinned PostgreSQL 18.6, BSD-licensed Redis
+  7.2.16 and Apache-2.0 SeaweedFS 4.48 after MinIO's upstream archives. The selected PostgreSQL
+  18 volume target is `/var/lib/postgresql`. A disposable Compose project passed all three data
+  health checks, bucket versioning, signed S3 writes and restart persistence. This does not pass
+  S1-018: live cloud API and relay routes still do not exist.
 - Commit `d2f244f` makes the pulled control-server cleanup test tolerate the expected macOS socket
   close race. Commit `f3856c5` records the scoped SaaS web policy.
 - The full `cargo xtask ci` gate passed after the pull and test stabilization, including tests,
@@ -93,11 +95,11 @@ the continuation point, a blocker or a major decision changes.
 
 1. Assign real architecture, security and operations reviewers (`S0-013`) only when their
    identities are provided; never invent approvals.
-2. Resolve the remaining D-001 object-storage choice with a maintained, license-compatible
-   S3-compatible service and initializer; see `docs/saas/dependency-images.md`. Then validate
-   PostgreSQL, Redis and object-storage health and persistence in a local stack. `S1-018`
-   additionally needs live cloud API and relay routes before a healthy end-to-end smoke test can
-   pass. Do not claim a healthy SaaS application from image metadata or Compose rendering.
+2. D-001 local dependency image choice and data-service validation are complete; see
+   `docs/saas/dependency-images.md`. Continue S1-018 only when live cloud API and relay routes can
+   pass a healthy API/web/WebSocket smoke test. Do not claim a healthy SaaS application from data
+   health alone. Lifecycle policy, backup/restore and production network isolation remain future
+   S3/S8 work.
 3. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
    each completed task.
 
