@@ -47,10 +47,11 @@ the continuation point, a blocker or a major decision changes.
 
 - `main` was fast-forwarded from `origin/main` on 2026-10-16 before SaaS implementation resumed.
 - The SaaS documentation baseline and 237-task tracker are committed under `docs/saas/`.
-- S0 is at 13/15 tasks. `S0-012` is complete: `AGENTS.md` now permits narrowly scoped web tooling
-  and defines its quality and licensing boundaries. `S0-015` verified `storytold/figcraft` from
-  GitHub fork metadata, configured the local `upstream` remote and passed the first synchronization
-  rehearsal with no incoming commits.
+- S0 is at 14/15 tasks. `S0-012` is complete: `AGENTS.md` now permits narrowly scoped web tooling
+  and defines its quality and licensing boundaries. The product owner explicitly accepted
+  SAAS-ADR-001 through SAAS-ADR-016 as written for `S0-014`. `S0-015` verified
+  `storytold/figcraft` from GitHub fork metadata, configured the local `upstream` remote and passed
+  the first synchronization rehearsal with no incoming commits.
 - S1 is in progress at 5/22 tasks. `S1-019` established the npm-pinned React, TypeScript and Vite
   workspace. `S1-020` defines the versioned opaque editor bridge with Rust/WASM as the sole owner
   of the browser collaboration WebSocket. `S1-021` adds the shared formatting, typecheck, lint,
@@ -71,12 +72,10 @@ the continuation point, a blocker or a major decision changes.
 
 1. Assign real architecture, security and operations reviewers (`S0-013`) only when their
    identities are provided; never invent approvals.
-2. Record product-owner review of SAAS-ADR-001 through SAAS-ADR-016 (`S0-014`) if acceptance is
-   explicit, including any amendments.
-3. Continue the requested `deploy/saas/` Docker and Compose foundation in dependency order with the
+2. Continue the requested `deploy/saas/` Docker and Compose foundation in dependency order with the
    cloud role/configuration tasks; do not claim a healthy SaaS application before its binary exists
    or select dependency image versions before D-001 is resolved.
-4. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
+3. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
    each completed task.
 
 ## Local environment notes

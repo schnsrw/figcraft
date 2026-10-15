@@ -17,7 +17,7 @@ the same commit as the completed task.
 
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
-| S0 Documentation and fork governance | in progress | 13 / 15 | Architecture and reviewer approval |
+| S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | in progress | 5 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
@@ -55,7 +55,9 @@ the same commit as the completed task.
   toolchain gates and dependency/license rules before adding browser-shell code.
   Evidence: root `AGENTS.md` section "Fork-owned web application".
 - [ ] **S0-013** Assign architecture, security and operations reviewers without guessing identities.
-- [ ] **S0-014** Review decisions SAAS-ADR-001 through SAAS-ADR-016 and record accepted changes.
+- [x] **S0-014** Review decisions SAAS-ADR-001 through SAAS-ADR-016 and record accepted changes.
+  Evidence: the product owner explicitly accepted SAAS-ADR-001 through SAAS-ADR-016 as written on
+  2026-10-16; `docs/saas/README.md` records the scope, outcome and absence of amendments.
 - [x] **S0-015** Configure the `upstream` remote and perform the first documented synchronization
   rehearsal on a temporary branch.
   Evidence: GitHub fork metadata verified `storytold/figcraft` as the parent and source; the local

@@ -91,6 +91,15 @@ docs/saas/
 The exact crate split may be consolidated when implementation shows two crates always change
 together. Service boundaries and dependency direction matter more than the number of crates.
 
+## Decision review record
+
+| Review | Date | Authority | Scope | Outcome | Amendments |
+|---|---|---|---|---|---|
+| S0-014 | 2026-10-16 | Product owner, by explicit session authorization | SAAS-ADR-001 through SAAS-ADR-016 | Accepted as written | None |
+
+This acceptance authorizes implementation that depends on the architecture baseline. It does not
+assign the architecture, security or operations reviewer identities tracked separately by S0-013.
+
 ## Delivery rules
 
 - Preserve the existing clean-room and asset-provenance requirements.
