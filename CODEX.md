@@ -96,10 +96,12 @@ the continuation point, a blocker or a major decision changes.
 1. Assign real architecture, security and operations reviewers (`S0-013`) only when their
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
-   `docs/saas/dependency-images.md`. Continue S1-018 only when live cloud API and relay routes can
-   pass a healthy API/web/WebSocket smoke test. Do not claim a healthy SaaS application from data
-   health alone. Lifecycle policy, backup/restore and production network isolation remain future
-   S3/S8 work.
+   `docs/saas/dependency-images.md`. `deploy/saas/smoke-preflight.sh` exercises the current
+   fail-closed Compose startup from disposable synthetic secrets. Continue S1-018 only when live
+   cloud API and relay routes can pass a healthy API/web/WebSocket smoke test. Do not claim a
+   healthy SaaS application from data health or mock routes alone. The S1-GATE prerequisite for S2
+   makes this a real transport/readiness implementation step, not just a test-script change.
+   Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
 3. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
    each completed task.
 

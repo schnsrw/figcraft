@@ -24,7 +24,7 @@ auditing and operations.
 | [Data, tenancy and integration](data-tenancy-integration.md) | PostgreSQL model, S3 object layout, identity, permissions, API and embedding contracts |
 | [AI and WASM](ai-wasm.md) | Provider-neutral AI relay, command execution, server-side WASM and safety boundaries |
 | [Deployment and operations](deployment-operations.md) | Docker profiles, configuration, migrations, scaling, backup, restore and observability |
-| [Dependency image review](dependency-images.md) | Reviewed PostgreSQL and Redis pins and the unresolved object-storage release choice |
+| [Dependency image review](dependency-images.md) | Reviewed PostgreSQL, Redis and SeaweedFS image pins and local data-service evidence |
 | [Security](security.md) | Threat model, tenant isolation, secret handling, abuse controls and release gates |
 | [Upstream synchronization](upstream-sync.md) | Fork strategy, conflict reduction, sync cadence and verification process |
 | [Enterprise proposal review](proposal-review.md) | Source-audited disposition of the supplied PRD/HLD/LLD and its repository-specific corrections |

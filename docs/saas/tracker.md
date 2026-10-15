@@ -176,6 +176,10 @@ the same commit as the completed task.
   web jobs remain unchanged. The same cloud checks and image build passed locally.
 - [ ] **S1-018** Add a Compose smoke test that reaches healthy state and verifies API, web and
   WebSocket upgrade routing from an empty environment.
+  Partial preparation: `deploy/saas/smoke-preflight.sh` creates a disposable Compose project with
+  synthetic secrets and verifies healthy data/web dependencies, successful bucket initialization,
+  and fail-closed cloud/gateway startup. It does not verify the absent API or WebSocket application
+  routes, so this task and S1-GATE remain unchecked.
 - [x] **S1-019** Initialize `webapp/` with React, TypeScript, Vite, a pinned package-manager version
   and one committed lockfile. Depends on S0-012.
   Evidence: `webapp/package.json`, `webapp/package-lock.json`, `webapp/saas/`; verified with
@@ -636,3 +640,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S1-016: added named data volumes, health probes and fail-closed startup ordering; S1 advanced to 21/22. |
 | 2026-10-16 | D-001: pinned and inspected supported PostgreSQL and Redis image digests and PostgreSQL volume target; documented archived MinIO blocker. S1 stays 21/22. |
 | 2026-10-16 | D-001: replaced archived MinIO with pinned SeaweedFS 4.48; validated data health, versioning, signed S3 writes and restart persistence in a disposable Compose project. S1 stays 21/22. |
+| 2026-10-16 | S1-018 preparation: added a disposable fail-closed Compose preflight; API/web/WebSocket acceptance remains pending. S1 stays 21/22. |

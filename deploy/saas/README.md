@@ -91,3 +91,14 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
 D-001 selects the local data-service images; this is still a single-node development topology, not
 a production security or backup design. A healthy API/web/WebSocket smoke test is S1-018, after
 the cloud application routes exist.
+
+The disposable `smoke-preflight.sh` exercises the currently implemented Compose contract from
+synthetic, randomly generated secrets. Run `bash deploy/saas/smoke-preflight.sh` from any directory
+with Docker available. It builds the local images, expects PostgreSQL, Redis, SeaweedFS and web to
+be healthy, confirms bucket initialization, and verifies that the unfinished cloud runtime remains
+unhealthy so the gateway does not start. It removes its uniquely named containers, volumes and
+temporary secrets on exit. This is a fail-closed preflight, **not** the S1-018 API/web/WebSocket
+acceptance test. If a machine or tool is forcibly stopped before cleanup completes, use the
+printed project name with `docker compose --project-name <name> --env-file
+deploy/saas/env.example --file deploy/saas/compose.yaml down --volumes --remove-orphans` to remove
+only that disposable project.
