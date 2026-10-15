@@ -77,6 +77,7 @@ commit as the change.
 | FP-003 | Root `Cargo.lock` test dependency edge | Record test-only `serde_json` use for pinning safe cloud error wire output; no new third-party package added | Keep the dependency in the fork-owned domain crate's dev dependencies and regenerate the lockfile during upstream synchronization | active |
 | FP-004 | Root `Cargo.lock` test dependency edge | Record test-only use of the workspace's existing `proptest` dependency for cloud identifier properties | Keep the dependency in the fork-owned domain crate's dev dependencies and regenerate the lockfile during upstream synchronization | active |
 | FP-005 | `xtask/src/layers.rs` crate dependency policy | Add explicit L7 cloud-domain, L8 cloud-adapter and L9 cloud-application layers and keep cloud-domain free of UI/network dependencies | Keep cloud packages additive and preserve the existing L0–L6 table and same-layer allowances | active |
+| FP-006 | Root `Cargo.lock` workspace dependency edge | Record the cloud binary's use of `figcraft-cloud-domain` for shared deployment mode types | Keep the dependency in the fork-owned application and regenerate the lockfile from workspace manifests during upstream synchronization | active |
 
 Statuses are `active`, `submitted-upstream`, `accepted-upstream`, `reworked` or `removed`.
 

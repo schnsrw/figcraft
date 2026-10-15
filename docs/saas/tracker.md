@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 12 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 13 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -109,7 +109,12 @@ the same commit as the completed task.
   `--role=value`, supports help, and rejects unknown, missing and duplicate arguments. Its current
   diagnostic explicitly states that the runtime is not implemented yet; tests cover all parsing
   branches without claiming that a service endpoint is available.
-- [ ] **S1-008** Implement strict configuration parsing with unknown-key rejection.
+- [x] **S1-008** Implement strict configuration parsing with unknown-key rejection.
+  Evidence: `apps/figcraft-cloud/src/config.rs` parses the shared deployment modes and runtime
+  roles, recognizes the documented cloud setting names, rejects unknown cloud-namespaced keys,
+  duplicate keys, empty values and invalid enums with non-echoing diagnostics, and ignores unrelated
+  process environment. Settings without an implemented consumer are validated but not retained.
+  Patch-ledger entry FP-006 records the cloud binary's dependency on the shared domain types.
 - [ ] **S1-009** Support mounted secret files and redact secret values from debug and errors.
 - [ ] **S1-010** Reject insecure development defaults when production mode is selected.
 - [ ] **S1-011** Add liveness, readiness and startup endpoints per role.

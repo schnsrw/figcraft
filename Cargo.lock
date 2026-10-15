@@ -1446,6 +1446,9 @@ dependencies = [
 [[package]]
 name = "figcraft-cloud"
 version = "0.6.0"
+dependencies = [
+ "figcraft-cloud-domain",
+]
 
 [[package]]
 name = "figcraft-cloud-ai"

@@ -1,42 +1,16 @@
 //! Process entry point for FigCraft's cloud application.
 
+mod config;
+
+use config::{CloudConfig, CloudRole};
 use std::env;
 use std::ffi::OsString;
 use std::process::ExitCode;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CloudRole {
-    All,
-    Api,
-    Relay,
-    Worker,
-}
-
-impl CloudRole {
-    fn parse(value: &str) -> Option<Self> {
-        match value {
-            "all" => Some(Self::All),
-            "api" => Some(Self::Api),
-            "relay" => Some(Self::Relay),
-            "worker" => Some(Self::Worker),
-            _ => None,
-        }
-    }
-
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::All => "all",
-            Self::Api => "api",
-            Self::Relay => "relay",
-            Self::Worker => "worker",
-        }
-    }
-}
-
 #[derive(Debug, Eq, PartialEq)]
 enum Arguments {
     Help,
-    Role(CloudRole),
+    Role(Option<CloudRole>),
 }
 
 fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments, &'static str> {
@@ -61,7 +35,7 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
         role = Some(CloudRole::parse(&value).ok_or("invalid role; expected all, api, relay or worker")?);
     }
 
-    Ok(Arguments::Role(role.unwrap_or(CloudRole::All)))
+    Ok(Arguments::Role(role))
 }
 
 fn usage() {
@@ -74,8 +48,17 @@ fn main() -> ExitCode {
             usage();
             ExitCode::SUCCESS
         }
-        Ok(Arguments::Role(role)) => {
-            eprintln!("figcraft-cloud: role '{}' selected, but the runtime is not implemented yet", role.as_str());
+        Ok(Arguments::Role(cli_role)) => {
+            let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
+            let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
+            let Ok(mut config) = CloudConfig::parse(settings) else {
+                eprintln!("figcraft-cloud: invalid cloud configuration");
+                return ExitCode::from(2);
+            };
+            if let Some(role) = cli_role {
+                config.role = role;
+            }
+            eprintln!("figcraft-cloud: role '{}' selected, but the runtime is not implemented yet", config.role.as_str());
             ExitCode::FAILURE
         }
         Err(error) => {
@@ -97,16 +80,16 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_all_role() {
-        assert_eq!(arguments(&[]), Ok(Arguments::Role(CloudRole::All)));
+    fn leaves_role_to_configuration_by_default() {
+        assert_eq!(arguments(&[]), Ok(Arguments::Role(None)));
     }
 
     #[test]
-    fn accepts_each_role_in_both_forms() {
+    fn accepts_each_cli_role_in_both_forms() {
         for (name, role) in [("all", CloudRole::All), ("api", CloudRole::Api), ("relay", CloudRole::Relay), ("worker", CloudRole::Worker)] {
-            assert_eq!(arguments(&["--role", name]), Ok(Arguments::Role(role)));
+            assert_eq!(arguments(&["--role", name]), Ok(Arguments::Role(Some(role))));
             let inline = format!("--role={name}");
-            assert_eq!(arguments(&[&inline]), Ok(Arguments::Role(role)));
+            assert_eq!(arguments(&[&inline]), Ok(Arguments::Role(Some(role))));
         }
     }
 

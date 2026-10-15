@@ -6,5 +6,8 @@ license.workspace = true
 publish = false
 description = "FigCraft's modular cloud application"
 
+[dependencies]
+figcraft-cloud-domain = { path = "../../crates/cloud-domain" }
+
 [lints]
 workspace = true
