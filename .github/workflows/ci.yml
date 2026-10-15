@@ -47,6 +47,9 @@ jobs:
       - name: Format, typecheck, lint, test and build web application
         run: npm run check --prefix webapp
 
+      - name: Audit web dependencies
+        run: npm run advisories:check --prefix webapp
+
   test:
     timeout-minutes: 35
     name: test (ubuntu-latest)

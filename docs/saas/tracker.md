@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 12 / 15 | Architecture and reviewer approval |
-| S1 Cloud foundation | in progress | 3 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 4 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -106,7 +106,10 @@ the same commit as the completed task.
   Evidence: root `webapp` scripts run Prettier, strict TypeScript, ESLint, Vitest and both production
   builds; `.github/workflows/ci.yml` installs the committed lockfile under Node 22.18.0 and runs the
   same aggregate check.
-- [ ] **S1-022** Add browser dependency advisory, license and generated-client drift checks.
+- [x] **S1-022** Add browser dependency advisory, license and generated-client drift checks.
+  Evidence: `webapp` runs high/critical `npm audit` checks in CI, validates every production
+  dependency license from the lockfile against a permissive allowlist with GPL-family rejection,
+  and reruns the API client generator to detect content drift once that package exists.
 
 ### S1 gate
 

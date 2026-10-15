@@ -12,14 +12,17 @@
     "packages/*"
   ],
   "scripts": {
+    "advisories:check": "npm audit --audit-level=high",
     "dev": "npm run dev --workspace=@figcraft/saas",
     "build": "npm run build --workspace=@figcraft/editor-bridge && npm run build --workspace=@figcraft/saas",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "generated:check": "node scripts/check-generated-client.mjs",
+    "licenses:check": "node scripts/check-licenses.mjs",
     "lint": "eslint . --max-warnings 0",
-    "test": "npm run test --workspaces --if-present",
+    "test": "vitest run scripts && npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspace=@figcraft/editor-bridge && npm run typecheck --workspace=@figcraft/saas",
-    "check": "npm run format:check && npm run typecheck && npm run lint && npm run test && npm run build"
+    "check": "npm run format:check && npm run typecheck && npm run lint && npm run test && npm run licenses:check && npm run generated:check && npm run build"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
