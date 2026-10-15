@@ -72,6 +72,7 @@ commit as the change.
 | Patch ID | Upstream area | Purpose | Isolation or upstreaming plan | Status |
 |---|---|---|---|---|
 | FP-000 | None | Documentation baseline under `docs/saas/` | Additive fork-only directory | active |
+| FP-001 | Root `Cargo.lock` workspace package entries | Register the additive `figcraft-cloud` application and seven `figcraft-cloud-*` crates; no third-party dependencies added | Keep implementation under fork-only paths; regenerate these lock entries from the workspace manifests during upstream synchronization | active |
 
 Statuses are `active`, `submitted-upstream`, `accepted-upstream`, `reworked` or `removed`.
 

@@ -1444,6 +1444,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "figcraft-cloud"
+version = "0.6.0"
+
+[[package]]
+name = "figcraft-cloud-ai"
+version = "0.6.0"
+
+[[package]]
+name = "figcraft-cloud-auth"
+version = "0.6.0"
+
+[[package]]
+name = "figcraft-cloud-domain"
+version = "0.6.0"
+
+[[package]]
+name = "figcraft-cloud-jobs"
+version = "0.6.0"
+
+[[package]]
+name = "figcraft-cloud-relay"
+version = "0.6.0"
+
+[[package]]
+name = "figcraft-cloud-storage"
+version = "0.6.0"
+
+[[package]]
+name = "figcraft-cloud-wasm"
+version = "0.6.0"
+
+[[package]]
 name = "figcraft-collab"
 version = "0.6.0"
 dependencies = [

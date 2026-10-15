@@ -1,0 +1,10 @@
+[package]
+name = "figcraft-cloud-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Infrastructure-independent domain types for FigCraft Cloud"
+
+[lints]
+workspace = true

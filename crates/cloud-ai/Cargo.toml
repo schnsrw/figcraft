@@ -1,0 +1,10 @@
+[package]
+name = "figcraft-cloud-ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Provider-neutral AI gateway for FigCraft Cloud"
+
+[lints]
+workspace = true

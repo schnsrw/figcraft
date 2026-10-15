@@ -1,0 +1,10 @@
+[package]
+name = "figcraft-cloud-storage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Durable metadata and object storage adapters for FigCraft Cloud"
+
+[lints]
+workspace = true

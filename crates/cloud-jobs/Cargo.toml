@@ -1,0 +1,10 @@
+[package]
+name = "figcraft-cloud-jobs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Durable job execution for FigCraft Cloud"
+
+[lints]
+workspace = true

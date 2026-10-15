@@ -52,12 +52,14 @@ the continuation point, a blocker or a major decision changes.
   SAAS-ADR-001 through SAAS-ADR-016 as written for `S0-014`. `S0-015` verified
   `storytold/figcraft` from GitHub fork metadata, configured the local `upstream` remote and passed
   the first synchronization rehearsal with no incoming commits.
-- S1 is in progress at 5/22 tasks. `S1-019` established the npm-pinned React, TypeScript and Vite
-  workspace. `S1-020` defines the versioned opaque editor bridge with Rust/WASM as the sole owner
-  of the browser collaboration WebSocket. `S1-021` adds the shared formatting, typecheck, lint,
-  unit-test and production-build gate locally and in CI. `S1-022` enforces browser advisories,
-  production dependency licenses and generated API-client drift. `S1-015` adds the safe deployment
-  environment contract without claiming that the not-yet-built Compose stack runs.
+- S1 is in progress at 6/22 tasks. `S1-001` adds compileable, dependency-free workspace members for
+  the modular cloud application and seven cloud libraries. `S1-019` established the npm-pinned
+  React, TypeScript and Vite workspace. `S1-020` defines the versioned opaque editor bridge with
+  Rust/WASM as the sole owner of the browser collaboration WebSocket. `S1-021` adds the shared
+  formatting, typecheck, lint, unit-test and production-build gate locally and in CI. `S1-022`
+  enforces browser advisories, production dependency licenses and generated API-client drift.
+  `S1-015` adds the safe deployment environment contract without claiming that the not-yet-built
+  Compose stack runs.
 - Commit `d2f244f` makes the pulled control-server cleanup test tolerate the expected macOS socket
   close race. Commit `f3856c5` records the scoped SaaS web policy.
 - The full `cargo xtask ci` gate passed after the pull and test stabilization, including tests,
