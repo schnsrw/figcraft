@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 12 / 15 | Architecture and reviewer approval |
-| S1 Cloud foundation | in progress | 4 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 5 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -88,7 +88,10 @@ the same commit as the completed task.
 - [ ] **S1-013** Build a multi-stage, non-root, read-only-root `figcraft-cloud` image.
 - [ ] **S1-014** Add `deploy/saas/compose.yaml` with gateway, web, cloud, PostgreSQL, Redis, MinIO and
   MinIO initialization.
-- [ ] **S1-015** Add `deploy/saas/env.example` containing no working production secret.
+- [x] **S1-015** Add `deploy/saas/env.example` containing no working production secret.
+  Evidence: `deploy/saas/env.example` contains only loopback or reserved-host development values
+  and mounted-secret paths; the adjacent ignore rules and README keep `.env` and `secrets/` out of
+  Git and state that no runnable stack exists yet.
 - [ ] **S1-016** Add container health checks, dependency ordering and named volumes.
 - [ ] **S1-017** Add cloud formatting, lint, unit and image-build CI without weakening `cargo xtask
   ci`.
