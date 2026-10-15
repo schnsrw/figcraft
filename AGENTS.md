@@ -12,12 +12,14 @@ follow its standards, and contribute reusable learnings back there. Never code: 
 code.
 
 ## Start every session here
-1. Read [`ROADMAP.md`](ROADMAP.md) (stage, headline numbers, estimates) and
+1. Read [`CODEX.md`](CODEX.md) for the current fork handoff, active SaaS milestone and safe
+   continuation point.
+2. Read [`ROADMAP.md`](ROADMAP.md) (stage, headline numbers, estimates) and
    [`docs/gaps.md`](docs/gaps.md) (the ranked work list). Unless the user gives you a task, pick
    work from the top of `docs/gaps.md`.
-2. Read `plan/STATUS.md` and `plan/execution-plan.md` (local, gitignored) if present; behaviour
+3. Read `plan/STATUS.md` and `plan/execution-plan.md` (local, gitignored) if present; behaviour
    reference notes are in `plan/figma/*.md`.
-3. Orient → plan → implement + test → verify (screenshot) → record (ROADMAP, devlog) → commit.
+4. Orient → plan → implement + test → verify (screenshot) → record (ROADMAP, devlog) → commit.
 
 `plan/` is gitignored (local only).
 
