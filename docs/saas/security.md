@@ -118,6 +118,9 @@
 
 - Production secrets come from an orchestrator secret store or dedicated secret manager.
 - Docker Compose supports mounted secret files.
+- The database administrator URL is mounted only into one-shot role-provisioning jobs. Migration
+  and long-running cloud roles use separate non-superuser credentials; runtime cannot change
+  schema or mutate migration history.
 - Secret values never appear in configuration diagnostics.
 - Use separate database, Redis, object-store, AI and webhook credentials by role where supported.
 - Rotate signing keys with an overlap window identified by key ID.

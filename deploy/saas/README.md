@@ -20,8 +20,8 @@ document operations or durable collaboration; those product services remain futu
 edge `/healthz` is only gateway liveness.
 
 `web.Dockerfile` builds the existing npm workspace with Node 22.18.0, then copies the static build
-into Caddy. `compose.yaml` defines the gateway, web, cloud, PostgreSQL, Redis, SeaweedFS and a
-one-shot database migration and bucket-versioning jobs. The gateway publishes HTTP on loopback port 8080 only. It
+into Caddy. `compose.yaml` defines the gateway, web, cloud, PostgreSQL, Redis, SeaweedFS and
+one-shot database role-provisioning, migration and bucket-versioning jobs. The gateway publishes HTTP on loopback port 8080 only. It
 does not configure production TLS or expose the data services. SeaweedFS `mini` creates the
 configured bucket if absent; the initializer enables versioning and verifies it on every startup.
 No object-store credentials appear in environment variables or command arguments. Lifecycle rules
@@ -40,8 +40,9 @@ an operator's explicit review and re-pin task.
 major upgrade without a migration plan. Redis enables append-only persistence under `/data`, even
 though cloud correctness must treat Redis as replaceable state.
 
-Compose waits for PostgreSQL and Redis health checks and for successful bucket initialization,
-then runs a one-shot migration job before creating the cloud container. The gateway waits for both
+Compose waits for PostgreSQL health, provisions limited database roles, runs migrations as the
+migrator, reconciles runtime grants, and then creates the cloud container after Redis and bucket
+health checks. The gateway waits for both
 web health and cloud readiness. `figcraft-cloud --check-ready` probes `/readyz` with a bounded
 local HTTP request. At startup, `/readyz` is healthy only when the listener is bound and the SQLx
 migration ledger is at the supported S2-005 schema version `20261016000002`. This does not imply
@@ -63,7 +64,7 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
 | Area | Non-secret settings | Secret files |
 |---|---|---|
 | Deployment | `FIGCRAFT_ENV`, `FIGCRAFT_DEPLOYMENT`, `FIGCRAFT_ROLE`, `FIGCRAFT_PUBLIC_URL`, `FIGCRAFT_SINGLE_TENANT_ID` | none |
-| PostgreSQL | none | `DATABASE_URL_FILE` |
+| PostgreSQL | none | runtime `DATABASE_URL_FILE`; one-shot jobs additionally mount administrator and migrator URLs and separate role passwords |
 | Redis | none | `REDIS_URL_FILE` |
 | Object storage | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_FORCE_PATH_STYLE` | `S3_ACCESS_KEY_FILE`, `S3_SECRET_KEY_FILE` |
 | Identity | `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_AUDIENCE` | `OIDC_CLIENT_SECRET_FILE` |
@@ -77,8 +78,11 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
 - Store local Compose values under the ignored `deploy/saas/secrets/` directory. Production uses
   an orchestrator secret store or dedicated secret manager.
 - Supply `database_url`, `redis_url`, `s3_access_key`, `s3_secret_key`, `oidc_client_secret` and
-  `session_signing_key` for the cloud service. The PostgreSQL `postgres_password` must agree with
-  `database_url`; the Redis `redis.conf` and newline-free `redis_password` must agree with
+  `session_signing_key` for the cloud service. `database_url` must authenticate as
+  `figcraft_runtime`. Supply `admin_database_url`, `migration_database_url`,
+  `migrator_password` and `runtime_password` for the one-shot database jobs; the administrator URL
+  must use the PostgreSQL `postgres_password`, while the migration URL must use
+  `figcraft_migrator` and `migrator_password`. The Redis `redis.conf` and newline-free `redis_password` must agree with
   `redis_url`. The Redis health probe reads its password on stdin, never in argv.
 - Supply a SeaweedFS S3 identity configuration at `secrets/seaweedfs-s3-config.json`, mounted as
   `/run/secrets/seaweedfs_s3_config`. Its application identity's access and secret keys must agree
@@ -99,7 +103,8 @@ WebSocket probes; it does not validate application workflows.
 The disposable `smoke-preflight.sh` exercises the Compose transport contract from synthetic,
 randomly generated secrets. Run `bash deploy/saas/smoke-preflight.sh` from any directory with Docker
 available. It builds the local images, checks service health, bucket initialization and both
-PostgreSQL migrations, runs tenant and document-scope constraint checks in a rolled-back transaction, starts each
+PostgreSQL migrations, verifies database role privileges and tenant/document-scope constraints in
+rolled-back transactions, starts each
 cloud role, and verifies web content, API and WebSocket routing plus rejection of unsafe production
 configuration. It removes its uniquely named containers, volumes and temporary secrets on exit.
 The API and WebSocket endpoints are diagnostic probes, not application workflows. If a machine or
@@ -107,9 +112,10 @@ tool is forcibly stopped before cleanup completes, use the printed project name 
 deploy/saas/env.example --file deploy/saas/compose.yaml down --volumes --remove-orphans` to remove
 only that disposable project.
 
-Run `figcraft-cloud --migrate` as a one-shot release action after PostgreSQL is healthy and before
-rolling out application roles. Compose models this as a dedicated job that gates cloud startup. It
-reads `DATABASE_URL` or `DATABASE_URL_FILE`, applies embedded
+Run `figcraft-cloud --provision-db-roles` before and after the one-shot `--migrate` action. The
+first pass creates the constrained logins and transfers existing table ownership; the second grants
+runtime access to newly migrated tables. The provision jobs alone receive the administrator URL.
+The migration job receives the migrator URL through `DATABASE_URL_FILE` and applies embedded
 versioned SQL under a PostgreSQL advisory lock, and emits only fixed, non-secret diagnostics. Normal
 role startup never applies migrations. The S2-005 event, snapshot, job, idempotency and audit
 schema is present, but repositories and durable collaboration behavior remain future S2 tasks.

@@ -68,7 +68,7 @@ enum Environment {
 pub(super) struct Secret(String);
 
 impl Secret {
-    fn from_file(path: &str) -> Result<Self, &'static str> {
+    pub(super) fn from_file(path: &str) -> Result<Self, &'static str> {
         const MAX_SECRET_FILE_BYTES: usize = 64 * 1024;
         let contents = fs::read(path).map_err(|_| "unable to read configured secret file")?;
         if contents.len() > MAX_SECRET_FILE_BYTES {
@@ -80,6 +80,10 @@ impl Secret {
             return Err("configured secret file is empty");
         }
         Ok(Self(value.to_string()))
+    }
+
+    pub(super) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 

@@ -27,10 +27,16 @@ trap 'exit 143' TERM
 umask 077
 
 postgres_password=$(openssl rand -hex 24)
+migrator_password=$(openssl rand -hex 24)
+runtime_password=$(openssl rand -hex 24)
 redis_password=$(openssl rand -hex 24)
 s3_access_key="FCsmoke$(openssl rand -hex 12)"
 s3_secret_key=$(openssl rand -hex 24)
-printf 'postgres://figcraft:%s@postgres:5432/figcraft\n' "$postgres_password" > "$test_dir/database_url"
+printf 'postgres://figcraft:%s@postgres:5432/figcraft\n' "$postgres_password" > "$test_dir/admin_database_url"
+printf 'postgres://figcraft_migrator:%s@postgres:5432/figcraft\n' "$migrator_password" > "$test_dir/migration_database_url"
+printf 'postgres://figcraft_runtime:%s@postgres:5432/figcraft\n' "$runtime_password" > "$test_dir/database_url"
+printf '%s\n' "$migrator_password" > "$test_dir/migrator_password"
+printf '%s\n' "$runtime_password" > "$test_dir/runtime_password"
 printf 'redis://:%s@redis:6379/\n' "$redis_password" > "$test_dir/redis_url"
 printf '%s\n' "$postgres_password" > "$test_dir/postgres_password"
 printf '%s' "$redis_password" > "$test_dir/redis_password"
@@ -45,7 +51,7 @@ printf '{"identities":[{"name":"smoke","credentials":[{"accessKey":"%s","secretK
 {
   printf 'services:\n  gateway:\n    ports:\n      - "127.0.0.1::8080"\n'
   printf 'secrets:\n'
-  for secret in database_url redis_url postgres_password redis_password redis_conf s3_access_key s3_secret_key oidc_client_secret session_signing_key seaweedfs_s3_config; do
+  for secret in admin_database_url migration_database_url database_url migrator_password runtime_password redis_url postgres_password redis_password redis_conf s3_access_key s3_secret_key oidc_client_secret session_signing_key seaweedfs_s3_config; do
     filename=$secret
     case "$secret" in
       redis_conf) filename=redis.conf ;;
@@ -101,6 +107,13 @@ if test -z "$migration_container"; then
   printf 'Compose migration job should exist\n' >&2
   exit 1
 fi
+for service in role-provision role-grants; do
+  role_job=$("${compose[@]}" ps --all --quiet "$service")
+  if test -z "$role_job" || test "$(docker inspect --format '{{.State.ExitCode}}' "$role_job")" != 0; then
+    printf 'Database role job %s should complete successfully\n' "$service" >&2
+    exit 1
+  fi
+done
 if test "$(docker inspect --format '{{.State.ExitCode}}' "$migration_container")" != 0; then
   printf 'Compose migration job should complete successfully before cloud startup\n' >&2
   docker logs "$migration_container" >&2 || true
@@ -123,9 +136,15 @@ if test "$schema_version" != 20261016000002; then
 fi
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/schema-preflight.sql" > "$test_dir/schema-preflight.log"
-"${compose[@]}" run --rm --no-deps cloud --migrate > "$test_dir/migration-a.log" 2>&1 &
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  -c 'GRANT CREATE ON SCHEMA public TO figcraft_runtime; GRANT DELETE ON public.audit_events TO figcraft_runtime; GRANT INSERT ON public._sqlx_migrations TO figcraft_runtime' \
+  > "$test_dir/stale-grants.log"
+"${compose[@]}" run --rm --no-deps role-grants > "$test_dir/reconcile-grants.log" 2>&1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/role-preflight.sql" > "$test_dir/role-preflight.log"
+"${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-a.log" 2>&1 &
 migration_a=$!
-"${compose[@]}" run --rm --no-deps cloud --migrate > "$test_dir/migration-b.log" 2>&1 &
+"${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-b.log" 2>&1 &
 migration_b=$!
 migrations_ok=true
 if ! wait "$migration_a"; then
@@ -199,4 +218,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: metadata, event, snapshot and operations constraints; concurrent migration serialization; all roles and routes; unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: separate database roles and grants; schema constraints; concurrent migration serialization; all cloud roles and routes; unsafe-config rejection.\n'

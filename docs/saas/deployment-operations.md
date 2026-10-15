@@ -31,6 +31,7 @@ an operational SaaS deployment.
 | `gateway` | Caddy | certificates and configuration | 80 and 443 |
 | `web` | static FigCraft WASM | none | internal HTTP |
 | `cloud` | `figcraft-cloud`, role `all` | none local | internal HTTP and WebSocket |
+| `role-provision`, `role-grants` | `figcraft-cloud --provision-db-roles` | PostgreSQL roles and grants | one-shot, private network |
 | `migrate` | `figcraft-cloud --migrate` | PostgreSQL schema | one-shot, private network |
 | `postgres` | supported PostgreSQL release | database volume | private network only |
 | `redis` | supported Redis release | optional append-only volume | private network only |
@@ -146,14 +147,18 @@ idle timeouts longer than heartbeat intervals and bounded request headers.
 ## Startup sequence
 
 1. PostgreSQL becomes reachable.
-2. Run `figcraft-cloud --migrate` as an explicit one-shot release job. It applies embedded,
-   versioned SQL under a PostgreSQL advisory lock; application roles never migrate on startup.
-3. SeaweedFS creates the local bucket if absent; its initializer enables and verifies versioning.
+2. Run `figcraft-cloud --provision-db-roles` with the administrator URL and separate migrator and
+   runtime passwords mounted only in this one-shot job. It creates the two limited logins and
+   transfers ownership of existing application tables to the migrator.
+3. Run `figcraft-cloud --migrate` with the migrator URL. It applies embedded, versioned SQL under a
+   PostgreSQL advisory lock; application roles never migrate on startup.
+4. Run role provisioning again to grant runtime access to newly created tables.
+5. SeaweedFS creates the local bucket if absent; its initializer enables and verifies versioning.
    Lifecycle rules remain S3-014 work.
-4. Redis becomes reachable.
-5. API and relay roles start and pass readiness checks.
-6. Workers start and claim jobs.
-7. Gateway exposes the deployment.
+6. Redis becomes reachable.
+7. API and relay roles start with only the runtime URL and pass readiness checks.
+8. Workers start and claim jobs.
+9. Gateway exposes the deployment.
 
 Application replicas do not race to run schema migrations during normal startup. A release fails
 closed when its database schema is outside the binary's supported range.
@@ -169,6 +174,16 @@ against the binary's supported inclusive range. A missing ledger or unsupported 
 `/readyz` at 503 while liveness remains available. The S2-005 event and operations migration has
 version `20261016000002`, which is the current supported version. Schema rollback policy is handled by
 later S2 tasks.
+
+The database administrator URL is available only to the role-provisioning jobs. The migration job
+gets a separate migrator URL; cloud roles get only the runtime URL. The provisioning command binds
+passwords as query parameters, checks administrator authority and emits fixed diagnostics. It
+revokes public database/schema/table access, gives the migrator schema creation and ownership of
+known application tables, and grants runtime only DML on those tables. Runtime can read the SQLx
+ledger for readiness but cannot write it; document events and audit events allow insert and read,
+not update or delete. Run provisioning after every migration release so newly added tables receive
+reviewed grants. Roles and credentials are scoped to the dedicated FigCraft database; production
+operators must rotate the administrator credential independently.
 
 - Every migration has a unique ordered version and checksum.
 - Migrations are forward-only in production.

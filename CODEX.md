@@ -62,7 +62,8 @@ the continuation point, a blocker or a major decision changes.
   `--migrate` execution, separate from normal service startup; S2-003 checks the migration ledger
   at startup; S2-004 adds 13 tenant-scoped identity and document metadata tables with cross-tenant
   foreign-key checks. S2-005 adds event, snapshot-pointer, job, idempotency and audit tables;
-  repository methods and durable collaboration are still pending. The cloud image builds with
+  S2-006 provisions separate limited migrator/runtime database logins and reconciles grants before
+  cloud starts. Repository methods and durable collaboration are still pending. The cloud image builds with
   workspace Rust 1.95 (SQLx declares MSRV 1.94).
 - `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
@@ -109,9 +110,9 @@ the continuation point, a blocker or a major decision changes.
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
    `docs/saas/dependency-images.md`. S1-018 and S1-GATE pass their transport and startup criteria.
-   S2-001 through S2-005 are complete; see `docs/saas/postgres-client-decision.md`, the
-   `--migrate` command and cloud-storage migrations. Continue with S2-006: add separate constrained
-   PostgreSQL roles for migration and runtime access.
+   S2-001 through S2-006 are complete; see `docs/saas/postgres-client-decision.md`, the
+   `--migrate` and `--provision-db-roles` commands and cloud-storage migrations. Continue with
+   S2-007: add a transaction helper that sets tenant context for row-level security.
    Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
 3. Update task evidence and milestone counts in the same commit as each completed task.
 

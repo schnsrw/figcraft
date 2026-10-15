@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (5/21) · **Last updated:** 2026-10-16
+> **Status:** S1 complete (22/22); S2 in progress (6/21) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 5 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 6 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -251,7 +251,14 @@ the same commit as the completed task.
   references, wrong-document snapshot pointers, malformed checksums and invalid operational rows
   in a rolled-back synthetic transaction. Cloud readiness now requires schema version
   `20261016000002`. Event commit, lease, replay and repository behavior remain later S2 tasks.
-- [ ] **S2-006** Add constrained database roles for migration and runtime access.
+- [x] **S2-006** Add constrained database roles for migration and runtime access.
+  Evidence: `figcraft-cloud --provision-db-roles` creates and rotates separate non-superuser
+  `figcraft_migrator` and `figcraft_runtime` login roles from mounted secrets. Compose provisions
+  before migrations, migrates as the schema-owning migrator, reconciles grants afterward and starts
+  cloud with only the runtime URL. Runtime gets DML on application metadata, select/insert on
+  event and audit tables, and read-only access to `_sqlx_migrations`; it cannot create or alter
+  schema objects. The disposable PostgreSQL role preflight exercises both roles, denied DDL and
+  reconciliation of deliberately stale runtime grants.
 - [ ] **S2-007** Add transaction helper that sets tenant context for row-level security.
 
 ### Metadata behavior
@@ -686,3 +693,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S2-003: gated startup readiness on the supported SQLx schema range and ordered the one-shot Compose migration job before cloud roles; empty baseline 0 is supported pending S2-004. |
 | 2026-10-16 | S2-004: added the first tenant-scoped identity and document metadata migration, checked its constraints against PostgreSQL, and advanced cloud schema readiness to version 20261016000001. |
 | 2026-10-16 | S2-005: added event, snapshot-pointer, job, idempotency and audit schema with synthetic PostgreSQL constraint checks; advanced readiness to version 20261016000002. |
+| 2026-10-16 | S2-006: provisioned separate migration/runtime PostgreSQL logins, transferred existing schema ownership, reconciled least-privilege grants and verified runtime DDL denial in Compose. |

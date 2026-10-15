@@ -3,7 +3,7 @@
 mod config;
 mod health;
 
-use config::{CloudConfig, CloudRole};
+use config::{CloudConfig, CloudRole, Secret};
 use std::env;
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -16,6 +16,7 @@ enum Arguments {
     Help,
     CheckReady,
     Migrate,
+    ProvisionDatabaseRoles,
     Role(Option<CloudRole>),
 }
 
@@ -42,6 +43,13 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
                 Err("--migrate cannot be combined with other arguments")
             };
         }
+        if argument == "--provision-db-roles" {
+            return if role.is_none() && args.next().is_none() {
+                Ok(Arguments::ProvisionDatabaseRoles)
+            } else {
+                Err("--provision-db-roles cannot be combined with other arguments")
+            };
+        }
         let value = if argument == "--role" {
             args.next().ok_or("--role requires one of: all, api, relay, worker")?.into_string().map_err(|_| "arguments must be valid UTF-8")?
         } else if let Some(value) = argument.strip_prefix("--role=") {
@@ -60,8 +68,50 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
 
 fn usage() {
     println!(
-        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n\nDefaults to --role all."
+        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --provision-db-roles\n\nDefaults to --role all."
     );
+}
+
+fn run_role_provisioning() -> ExitCode {
+    let read_secret = |key| -> Result<Secret, &'static str> {
+        let path = env::var(key).map_err(|_| "database role provisioning requires mounted secret files")?;
+        Secret::from_file(&path)
+    };
+    let (Ok(admin_url), Ok(migrator_password), Ok(runtime_password)) =
+        (read_secret("DATABASE_ADMIN_URL_FILE"), read_secret("DATABASE_MIGRATOR_PASSWORD_FILE"), read_secret("DATABASE_RUNTIME_PASSWORD_FILE"))
+    else {
+        eprintln!("figcraft-cloud: database role provisioning requires readable mounted secrets");
+        return ExitCode::from(2);
+    };
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(_) => {
+            eprintln!("figcraft-cloud: unable to initialize database role provisioning runtime");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(figcraft_cloud_storage::provision_database_roles(
+        admin_url.as_str(),
+        migrator_password.as_str(),
+        runtime_password.as_str(),
+    )) {
+        Ok(()) => {
+            println!("figcraft-cloud: database roles provisioned");
+            ExitCode::SUCCESS
+        }
+        Err(figcraft_cloud_storage::ProvisionError::Connect) => {
+            eprintln!("figcraft-cloud: database administrator connection failed");
+            ExitCode::FAILURE
+        }
+        Err(figcraft_cloud_storage::ProvisionError::RequiresAdministrator) => {
+            eprintln!("figcraft-cloud: database role provisioning requires an administrator");
+            ExitCode::FAILURE
+        }
+        Err(figcraft_cloud_storage::ProvisionError::Apply) => {
+            eprintln!("figcraft-cloud: database role provisioning failed");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 fn run_migrations() -> ExitCode {
@@ -119,6 +169,7 @@ fn main() -> ExitCode {
             Ok(false) | Err(_) => ExitCode::FAILURE,
         },
         Ok(Arguments::Migrate) => run_migrations(),
+        Ok(Arguments::ProvisionDatabaseRoles) => run_role_provisioning(),
         Ok(Arguments::Role(cli_role)) => {
             let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
             let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
@@ -199,5 +250,12 @@ mod tests {
         assert_eq!(arguments(&["--migrate"]), Ok(Arguments::Migrate));
         assert!(arguments(&["--migrate", "--role", "api"]).is_err());
         assert!(arguments(&["--role", "api", "--migrate"]).is_err());
+    }
+
+    #[test]
+    fn role_provisioning_command_is_standalone() {
+        assert_eq!(arguments(&["--provision-db-roles"]), Ok(Arguments::ProvisionDatabaseRoles));
+        assert!(arguments(&["--provision-db-roles", "--role", "api"]).is_err());
+        assert!(arguments(&["--role", "api", "--provision-db-roles"]).is_err());
     }
 }

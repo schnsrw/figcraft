@@ -2,32 +2,34 @@ name: figcraft-saas
 
 # D-001: PostgreSQL, Redis and SeaweedFS are digest-pinned in env.example.
 # This topology is not yet a healthy SaaS stack: the cloud API/relay/worker runtime is pending.
+x-cloud-environment: &cloud-environment
+  FIGCRAFT_ENV: ${FIGCRAFT_ENV:-development}
+  FIGCRAFT_DEPLOYMENT: ${FIGCRAFT_DEPLOYMENT:-single}
+  FIGCRAFT_ROLE: ${FIGCRAFT_ROLE:-all}
+  FIGCRAFT_PUBLIC_URL: ${FIGCRAFT_PUBLIC_URL:-http://127.0.0.1:8080}
+  FIGCRAFT_SINGLE_TENANT_ID: ${FIGCRAFT_SINGLE_TENANT_ID:-00000000-0000-0000-0000-000000000001}
+  DATABASE_URL_FILE: /run/secrets/database_url
+  REDIS_URL_FILE: /run/secrets/redis_url
+  S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs:8333}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-figcraft}
+  S3_ACCESS_KEY_FILE: /run/secrets/s3_access_key
+  S3_SECRET_KEY_FILE: /run/secrets/s3_secret_key
+  S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
+  OIDC_ISSUER: ${OIDC_ISSUER:-https://identity.invalid}
+  OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-figcraft-local}
+  OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+  OIDC_AUDIENCE: ${OIDC_AUDIENCE:-figcraft-local}
+  SESSION_SIGNING_KEY_FILE: /run/secrets/session_signing_key
+  EMBED_ISSUER_CONFIG_FILE: ${EMBED_ISSUER_CONFIG_FILE:-/etc/figcraft/embed-issuers.toml}
+  RUST_LOG: ${RUST_LOG:-info}
+
 x-cloud-settings: &cloud-settings
   image: figcraft-cloud:local
   build:
     context: ../..
     dockerfile: deploy/saas/cloud.Dockerfile
-  environment:
-    FIGCRAFT_ENV: ${FIGCRAFT_ENV:-development}
-    FIGCRAFT_DEPLOYMENT: ${FIGCRAFT_DEPLOYMENT:-single}
-    FIGCRAFT_ROLE: ${FIGCRAFT_ROLE:-all}
-    FIGCRAFT_PUBLIC_URL: ${FIGCRAFT_PUBLIC_URL:-http://127.0.0.1:8080}
-    FIGCRAFT_SINGLE_TENANT_ID: ${FIGCRAFT_SINGLE_TENANT_ID:-00000000-0000-0000-0000-000000000001}
-    DATABASE_URL_FILE: /run/secrets/database_url
-    REDIS_URL_FILE: /run/secrets/redis_url
-    S3_ENDPOINT: ${S3_ENDPOINT:-http://seaweedfs:8333}
-    S3_REGION: ${S3_REGION:-us-east-1}
-    S3_BUCKET: ${S3_BUCKET:-figcraft}
-    S3_ACCESS_KEY_FILE: /run/secrets/s3_access_key
-    S3_SECRET_KEY_FILE: /run/secrets/s3_secret_key
-    S3_FORCE_PATH_STYLE: ${S3_FORCE_PATH_STYLE:-true}
-    OIDC_ISSUER: ${OIDC_ISSUER:-https://identity.invalid}
-    OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-figcraft-local}
-    OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
-    OIDC_AUDIENCE: ${OIDC_AUDIENCE:-figcraft-local}
-    SESSION_SIGNING_KEY_FILE: /run/secrets/session_signing_key
-    EMBED_ISSUER_CONFIG_FILE: ${EMBED_ISSUER_CONFIG_FILE:-/etc/figcraft/embed-issuers.toml}
-    RUST_LOG: ${RUST_LOG:-info}
+  environment: *cloud-environment
   secrets:
     - database_url
     - redis_url
@@ -35,6 +37,22 @@ x-cloud-settings: &cloud-settings
     - s3_secret_key
     - oidc_client_secret
     - session_signing_key
+
+x-role-provision: &role-provision
+  image: figcraft-cloud:local
+  build:
+    context: ../..
+    dockerfile: deploy/saas/cloud.Dockerfile
+  command: ["--provision-db-roles"]
+  restart: "no"
+  environment:
+    DATABASE_ADMIN_URL_FILE: /run/secrets/admin_database_url
+    DATABASE_MIGRATOR_PASSWORD_FILE: /run/secrets/migrator_password
+    DATABASE_RUNTIME_PASSWORD_FILE: /run/secrets/runtime_password
+  secrets:
+    - admin_database_url
+    - migrator_password
+    - runtime_password
 
 services:
   gateway:
@@ -79,6 +97,8 @@ services:
         condition: service_completed_successfully
       migrate:
         condition: service_completed_successfully
+      role-grants:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "/usr/local/bin/figcraft-cloud", "--check-ready"]
       interval: 10s
@@ -88,10 +108,32 @@ services:
   migrate:
     <<: *cloud-settings
     command: ["--migrate"]
+    environment:
+      <<: *cloud-environment
+      DATABASE_URL_FILE: /run/secrets/migration_database_url
+    secrets:
+      - migration_database_url
+      - redis_url
+      - s3_access_key
+      - s3_secret_key
+      - oidc_client_secret
+      - session_signing_key
     restart: "no"
+    depends_on:
+      role-provision:
+        condition: service_completed_successfully
+
+  role-provision:
+    <<: *role-provision
     depends_on:
       postgres:
         condition: service_healthy
+
+  role-grants:
+    <<: *role-provision
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
   postgres:
     image: ${POSTGRES_IMAGE:?D-001 requires a reviewed PostgreSQL image reference}
@@ -176,8 +218,16 @@ volumes:
   seaweedfs_data:
 
 secrets:
+  admin_database_url:
+    file: ./secrets/admin_database_url
+  migration_database_url:
+    file: ./secrets/migration_database_url
   database_url:
     file: ./secrets/database_url
+  migrator_password:
+    file: ./secrets/migrator_password
+  runtime_password:
+    file: ./secrets/runtime_password
   redis_url:
     file: ./secrets/redis_url
   s3_access_key:
