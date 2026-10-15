@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 6 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 7 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -74,8 +74,12 @@ the same commit as the completed task.
   `figcraft-cloud-domain`, `-auth`, `-storage`, `-relay`, `-jobs`, `-ai` and `-wasm` library crates;
   all inherit the workspace edition, license and crash-prevention lints and introduce no external
   dependencies. Patch-ledger entry FP-001 records the generated root lockfile additions.
-- [ ] **S1-002** Add `cloud-domain` identifiers for tenant, workspace, project, cloud document,
+- [x] **S1-002** Add `cloud-domain` identifiers for tenant, workspace, project, cloud document,
   principal, object, job and request.
+  Evidence: `figcraft-cloud-domain` exposes distinct, non-interchangeable UUID-backed identifier
+  types with random UUIDv4 generation, canonical non-nil parsing, safe non-echoing parse errors,
+  stable display and validated string serialization; focused tests cover every identifier kind and
+  generated UUID version. Patch-ledger entry FP-002 records the root lockfile dependency edge.
 - [ ] **S1-003** Define `TenantContext`, deployment mode, role, permission, resource state and quota
   value types without infrastructure dependencies.
 - [ ] **S1-004** Define stable cloud error codes and safe public error serialization.

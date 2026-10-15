@@ -1458,6 +1458,10 @@ version = "0.6.0"
 [[package]]
 name = "figcraft-cloud-domain"
 version = "0.6.0"
+dependencies = [
+ "serde",
+ "uuid",
+]
 
 [[package]]
 name = "figcraft-cloud-jobs"
@@ -4787,6 +4791,7 @@ version = "1.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "97277d36b9c3ace13e58fa6e753f8b0bbbf302a18dd193240d70f9e29681059a"
 dependencies = [
+ "getrandom 0.4.3",
  "js-sys",
  "serde_core",
  "wasm-bindgen",
