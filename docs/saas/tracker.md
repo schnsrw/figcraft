@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 14 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 15 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -120,7 +120,11 @@ the same commit as the completed task.
   cap, validates UTF-8/non-empty contents, and strips trailing newlines. Secret wrappers redact
   `Debug`; read, size, encoding and empty-file errors are fixed and do not include paths or values.
   Tests exercise successful reads, redaction and a failing file lookup.
-- [ ] **S1-010** Reject insecure development defaults when production mode is selected.
+- [x] **S1-010** Reject insecure development defaults when production mode is selected.
+  Evidence: `FIGCRAFT_ENV=production` requires non-loopback HTTPS public and identity URLs and all
+  core credentials via mounted secret files; HTTP/loopback/reserved `.invalid` endpoints and inline
+  credentials are refused. `deploy/saas/env.example` explicitly selects development mode. Tests pin
+  both the production rejection cases and a valid mounted-secret configuration.
 - [ ] **S1-011** Add liveness, readiness and startup endpoints per role.
 - [ ] **S1-012** Add request IDs, structured logs and OpenTelemetry context propagation foundation.
 

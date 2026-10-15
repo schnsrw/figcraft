@@ -38,12 +38,30 @@ pub(super) struct CloudConfig {
     pub(super) role: CloudRole,
     pub(super) deployment: DeploymentMode,
     pub(super) secrets: BTreeMap<&'static str, Secret>,
+    environment: Environment,
+    public_url: Option<String>,
+    oidc_issuer: Option<String>,
+    mounted_secrets: BTreeSet<&'static str>,
 }
 
 impl Default for CloudConfig {
     fn default() -> Self {
-        Self { role: CloudRole::All, deployment: DeploymentMode::SingleTenant, secrets: BTreeMap::new() }
+        Self {
+            role: CloudRole::All,
+            deployment: DeploymentMode::SingleTenant,
+            secrets: BTreeMap::new(),
+            environment: Environment::Development,
+            public_url: None,
+            oidc_issuer: None,
+            mounted_secrets: BTreeSet::new(),
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Environment {
+    Development,
+    Production,
 }
 
 #[derive(Clone, Eq, PartialEq)]
@@ -107,19 +125,69 @@ impl CloudConfig {
                         }
                     };
                 }
+                "FIGCRAFT_ENV" => {
+                    config.environment = match value {
+                        "development" => Environment::Development,
+                        "production" => Environment::Production,
+                        _ => return Err("invalid FIGCRAFT_ENV; expected development or production"),
+                    };
+                }
+                "FIGCRAFT_PUBLIC_URL" => config.public_url = Some(value.to_string()),
+                "OIDC_ISSUER" => config.oidc_issuer = Some(value.to_string()),
                 _ if let Some((name, from_file)) = secret_setting(key) => {
                     if !seen_secrets.insert(name) {
                         return Err("secret may be configured only once");
                     }
                     let secret = if from_file { Secret::from_file(value)? } else { Secret(value.to_string()) };
                     config.secrets.insert(name, secret);
+                    if from_file {
+                        config.mounted_secrets.insert(name);
+                    }
                 }
                 _ => {}
             }
         }
 
+        config.validate_production()?;
         Ok(config)
     }
+
+    fn validate_production(&self) -> Result<(), &'static str> {
+        if self.environment != Environment::Production {
+            return Ok(());
+        }
+        let public_url = self.public_url.as_deref().ok_or("production requires FIGCRAFT_PUBLIC_URL")?;
+        if !is_public_https_url(public_url) {
+            return Err("production requires a public HTTPS FIGCRAFT_PUBLIC_URL");
+        }
+        let issuer = self.oidc_issuer.as_deref().ok_or("production requires OIDC_ISSUER")?;
+        if !is_public_https_url(issuer) {
+            return Err("production requires a public HTTPS OIDC_ISSUER");
+        }
+        const REQUIRED_MOUNTED_SECRETS: &[&str] =
+            &["DATABASE_URL", "REDIS_URL", "S3_ACCESS_KEY", "S3_SECRET_KEY", "OIDC_CLIENT_SECRET", "SESSION_SIGNING_KEY"];
+        if REQUIRED_MOUNTED_SECRETS.iter().any(|name| !self.mounted_secrets.contains(name)) {
+            return Err("production requires mounted secret files for all core credentials");
+        }
+        Ok(())
+    }
+}
+
+fn is_public_https_url(value: &str) -> bool {
+    let Some(authority) = value.strip_prefix("https://").map(|rest| rest.split(['/', '?', '#']).next().unwrap_or("")) else {
+        return false;
+    };
+    if authority.is_empty() || authority.contains('@') {
+        return false;
+    }
+    let host = authority.split(':').next().unwrap_or("").trim_matches(['[', ']']);
+    !host.is_empty()
+        && !host.eq_ignore_ascii_case("localhost")
+        && !host.ends_with(".localhost")
+        && !host.ends_with(".invalid")
+        && host != "127.0.0.1"
+        && host != "0.0.0.0"
+        && host != "::1"
 }
 
 fn secret_setting(key: &str) -> Option<(&'static str, bool)> {
@@ -149,6 +217,7 @@ fn is_cloud_setting(key: &str) -> bool {
 fn is_known_setting(key: &str) -> bool {
     const KNOWN: &[&str] = &[
         "FIGCRAFT_ROLE",
+        "FIGCRAFT_ENV",
         "FIGCRAFT_DEPLOYMENT",
         "FIGCRAFT_PUBLIC_URL",
         "FIGCRAFT_SINGLE_TENANT_ID",
@@ -246,5 +315,69 @@ mod tests {
     fn secret_file_errors_are_non_echoing() {
         let path = "/no/such/figcraft-cloud-secret-file";
         assert_eq!(CloudConfig::parse([("DATABASE_URL_FILE", path)]), Err("unable to read configured secret file"));
+    }
+
+    #[test]
+    fn production_rejects_missing_or_development_urls_and_inline_secrets() {
+        assert_eq!(CloudConfig::parse([("FIGCRAFT_ENV", "production")]), Err("production requires FIGCRAFT_PUBLIC_URL"));
+        assert_eq!(
+            CloudConfig::parse([
+                ("FIGCRAFT_ENV", "production"),
+                ("FIGCRAFT_PUBLIC_URL", "http://127.0.0.1:8080"),
+                ("OIDC_ISSUER", "https://identity.example.com"),
+            ]),
+            Err("production requires a public HTTPS FIGCRAFT_PUBLIC_URL")
+        );
+        assert_eq!(
+            CloudConfig::parse([
+                ("FIGCRAFT_ENV", "production"),
+                ("FIGCRAFT_PUBLIC_URL", "https://design.example.com"),
+                ("OIDC_ISSUER", "https://identity.invalid"),
+            ]),
+            Err("production requires a public HTTPS OIDC_ISSUER")
+        );
+        assert_eq!(
+            CloudConfig::parse([
+                ("FIGCRAFT_ENV", "production"),
+                ("FIGCRAFT_PUBLIC_URL", "https://design.example.com"),
+                ("OIDC_ISSUER", "https://identity.example.com"),
+                ("DATABASE_URL", "postgres://developer:developer@localhost/db"),
+            ]),
+            Err("production requires mounted secret files for all core credentials")
+        );
+    }
+
+    #[test]
+    fn production_accepts_https_origins_and_mounted_core_secrets() {
+        static NEXT_FILE: AtomicUsize = AtomicUsize::new(100);
+        let sequence = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!("figcraft-cloud-prod-secret-{}-{sequence}", std::process::id()));
+        let result = (|| {
+            fs::write(&path, "mounted-secret").map_err(|_| "test setup failed")?;
+            let path_text = path.to_str().ok_or("test path is not UTF-8")?;
+            let mut settings = vec![
+                ("FIGCRAFT_ENV", "production"),
+                ("FIGCRAFT_PUBLIC_URL", "https://design.example.com"),
+                ("OIDC_ISSUER", "https://identity.example.com"),
+            ];
+            settings.extend([
+                ("DATABASE_URL_FILE", path_text),
+                ("REDIS_URL_FILE", path_text),
+                ("S3_ACCESS_KEY_FILE", path_text),
+                ("S3_SECRET_KEY_FILE", path_text),
+                ("OIDC_CLIENT_SECRET_FILE", path_text),
+                ("SESSION_SIGNING_KEY_FILE", path_text),
+            ]);
+            let config = CloudConfig::parse(settings)?;
+            assert_eq!(config.environment, super::Environment::Production);
+            Ok::<(), &'static str>(())
+        })();
+        let _ = fs::remove_file(path);
+        assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn development_environment_keeps_loopback_configuration_allowed() {
+        assert!(CloudConfig::parse([("FIGCRAFT_ENV", "development"), ("FIGCRAFT_PUBLIC_URL", "http://127.0.0.1:8080"),]).is_ok());
     }
 }

@@ -52,11 +52,14 @@ Replace `cloud` with independently scalable services:
 
 Configuration is loaded from environment variables or mounted secret files. Unknown settings fail
 startup. Secrets must support a `_FILE` variant so Docker and orchestrator secrets are not forced
-into environment inspection.
+into environment inspection. `FIGCRAFT_ENV=production` rejects loopback, HTTP and reserved `.invalid`
+public/identity endpoints and requires core credentials through mounted secret files; development
+defaults are not production credentials.
 
 Core settings:
 
 ```text
+FIGCRAFT_ENV=development|production
 FIGCRAFT_DEPLOYMENT=single|multi|embedded
 FIGCRAFT_ROLE=all|api|relay|worker
 FIGCRAFT_PUBLIC_URL=https://design.example.com
