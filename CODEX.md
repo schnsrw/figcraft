@@ -52,7 +52,13 @@ the continuation point, a blocker or a major decision changes.
   SAAS-ADR-001 through SAAS-ADR-016 as written for `S0-014`. `S0-015` verified
   `storytold/figcraft` from GitHub fork metadata, configured the local `upstream` remote and passed
   the first synchronization rehearsal with no incoming commits.
-- S1 is in progress at 21/22 tasks. `S1-001` adds compileable workspace members for the modular
+- S1 is complete at 22/22 tasks and its cloud foundation gate passes. The cloud binary now serves
+  `/api/v1/healthz` and diagnostic `/ws/v1/health` upgrades in the `api`, `relay` and `all` roles;
+  `/readyz` means the transport listener is serving probes, not that database-backed operations
+  work. A disposable Compose smoke starts every role from one image, checks web/API/WebSocket
+  routing and rejects unsafe production settings. S2 is unstarted; select its PostgreSQL client and
+  migration approach in S2-001 before database implementation.
+- `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
   workspace, project, cloud-document, principal, object, job and request identifiers with strict
   parsing and UUIDv4 generation. `S1-003` adds infrastructure-neutral deployment, role, explicit
@@ -60,27 +66,27 @@ the continuation point, a blocker or a major decision changes.
   error codes and a safe fixed-message public error envelope. `S1-005` pins domain wire formats and
   adds hostile-value and identifier property tests. `S1-006` extends dependency layering above the
   editor crates for cloud domain, adapters and application roles. `S1-007` adds strict CLI selection
-  for `all`, `api`, `relay` and `worker` while making the missing runtime explicit. `S1-008` adds
+  for `all`, `api`, `relay` and `worker` while making missing product services explicit. `S1-008` adds
   strict cloud environment parsing and unknown-key rejection. `S1-009` loads bounded mounted secrets
   through redacted wrappers and fixed diagnostics. `S1-010` rejects development URLs and inline
-  credentials in production mode. `S1-011` adds bounded per-role health endpoints while keeping
-  readiness false until the role runtime is initialized. `S1-012` adds generated request IDs,
+  credentials in production mode. `S1-011` adds bounded per-role health endpoints; readiness
+  follows transport listener startup. `S1-012` adds generated request IDs,
   structured JSON request logs and validated W3C trace context propagation. `S1-013` builds a
   non-root distroless cloud image that runs with a read-only root filesystem. `S1-019` established the npm-pinned React,
   TypeScript and Vite workspace. `S1-020` defines the versioned opaque editor bridge with Rust/WASM
   as the sole owner of the browser collaboration WebSocket. `S1-021` adds the shared formatting,
   typecheck, lint, unit-test and production-build gate locally and in CI. `S1-022` enforces browser
   advisories, production dependency licenses and generated API-client drift. `S1-015` adds the safe
-  deployment environment contract without claiming that the not-yet-built Compose stack runs.
+  deployment environment contract without claiming that product services are implemented.
   `S1-017` adds a dedicated cloud format, lint, unit-test and image-build CI job without replacing
   the full Rust, WASM and web gates. `S1-014` adds a seven-service Compose topology, gateway route
   configuration and static web image. `S1-016` adds named PostgreSQL, Redis and SeaweedFS volumes,
-  health checks and fail-closed startup ordering. The cloud container remains unready until its
-  application roles exist. D-001 selects OCI-digest-pinned PostgreSQL 18.6, BSD-licensed Redis
+  health checks and readiness-gated startup. D-001 selects OCI-digest-pinned PostgreSQL 18.6, BSD-licensed Redis
   7.2.16 and Apache-2.0 SeaweedFS 4.48 after MinIO's upstream archives. The selected PostgreSQL
   18 volume target is `/var/lib/postgresql`. A disposable Compose project passed all three data
-  health checks, bucket versioning, signed S3 writes and restart persistence. This does not pass
-  S1-018: live cloud API and relay routes still do not exist.
+  health checks, bucket versioning, signed S3 writes and restart persistence. S1-018 verifies
+  diagnostic transport routes only; schemas, authentication, durable events and collaborative
+  sessions remain unbuilt.
 - Commit `d2f244f` makes the pulled control-server cleanup test tolerate the expected macOS socket
   close race. Commit `f3856c5` records the scoped SaaS web policy.
 - The full `cargo xtask ci` gate passed after the pull and test stabilization, including tests,
@@ -96,14 +102,11 @@ the continuation point, a blocker or a major decision changes.
 1. Assign real architecture, security and operations reviewers (`S0-013`) only when their
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
-   `docs/saas/dependency-images.md`. `deploy/saas/smoke-preflight.sh` exercises the current
-   fail-closed Compose startup from disposable synthetic secrets. Continue S1-018 only when live
-   cloud API and relay routes can pass a healthy API/web/WebSocket smoke test. Do not claim a
-   healthy SaaS application from data health or mock routes alone. The S1-GATE prerequisite for S2
-   makes this a real transport/readiness implementation step, not just a test-script change.
+   `docs/saas/dependency-images.md`. S1-018 and S1-GATE pass their transport and startup criteria.
+   Continue with S2-001: select an async PostgreSQL client and migration approach compatible with
+   the workspace, then record the decision and compatibility evidence before adding dependencies.
    Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
-3. Continue S1 in dependency order; update task evidence and milestone counts in the same commit as
-   each completed task.
+3. Update task evidence and milestone counts in the same commit as each completed task.
 
 ## Local environment notes
 

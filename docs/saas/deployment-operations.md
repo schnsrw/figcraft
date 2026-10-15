@@ -111,11 +111,13 @@ initial bootstrap administrator, but bootstrap credentials expire or are removed
 The API, relay and worker images share the same binary but may use different network policies and
 resource limits.
 
-The current cloud scaffold exposes `/healthz`, `/readyz` and `/startupz` on port 8081. Liveness and
-startup indicate that the process health server is running; readiness remains HTTP 503 until the
-selected role's application services are initialized. Its shell-free `--check-ready` command probes
-the local readiness endpoint for the distroless container health check. Do not use this scaffold as
-a healthy SaaS deployment yet.
+The current cloud scaffold exposes `/healthz`, `/readyz` and `/startupz` on port 8081, plus
+diagnostic `/api/v1/healthz` and `/ws/v1/health` transport routes. Liveness and startup indicate
+that the process health server is running; readiness becomes HTTP 200 when its listener is bound
+and these transport probes can be served. It does not yet report database schema, authorization or
+document-operation readiness. Its shell-free `--check-ready` command probes the local readiness
+endpoint for the distroless container health check. Do not treat transport readiness as a healthy
+SaaS product deployment.
 
 Health responses carry a generated `X-Request-Id`; each request emits a structured JSON stdout
 record. Valid W3C version-00 `traceparent` context is forwarded and included in logs, while malformed

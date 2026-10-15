@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 cloud foundation in progress (21/22) · **Last updated:** 2026-10-16
+> **Status:** S1 cloud foundation complete (22/22) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 21 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -107,8 +107,8 @@ the same commit as the completed task.
 - [x] **S1-007** Create `figcraft-cloud` with `all`, `api`, `relay` and `worker` role selection.
   Evidence: `apps/figcraft-cloud` defaults to `all`, accepts each role through `--role value` or
   `--role=value`, supports help, and rejects unknown, missing and duplicate arguments. The health
-  server reports the selected role, while readiness stays false until that role's application
-  runtime is implemented.
+  server reports the selected role and becomes ready after binding its listener; product services
+  remain explicit future work.
 - [x] **S1-008** Implement strict configuration parsing with unknown-key rejection.
   Evidence: `apps/figcraft-cloud/src/config.rs` parses the shared deployment modes and runtime
   roles, recognizes the documented cloud setting names, rejects unknown cloud-namespaced keys,
@@ -127,9 +127,10 @@ the same commit as the completed task.
   both the production rejection cases and a valid mounted-secret configuration.
 - [x] **S1-011** Add liveness, readiness and startup endpoints per role.
   Evidence: `figcraft-cloud` serves bounded HTTP `GET /healthz`, `/readyz` and `/startupz` routes on
-  port 8081 and includes the selected runtime role. Readiness returns 503 because role services are
-  not initialized yet; liveness/startup do not claim readiness. Tests exercise all roles, route
-  errors and a real local TCP request.
+  port 8081 and includes the selected runtime role. Readiness returns 200 after the transport
+  listener starts and 503 before it does; liveness/startup do not claim readiness. Database and
+  product-service checks remain future work. Tests exercise each role, route errors, readiness
+  transitions and real local TCP requests.
 - [x] **S1-012** Add request IDs, structured logs and OpenTelemetry context propagation foundation.
   Evidence: health responses receive generated UUID request IDs; each request emits one JSON stdout
   record with timestamp, level, event, role, status and request ID. Valid W3C version-00
@@ -142,9 +143,10 @@ the same commit as the completed task.
 - [x] **S1-013** Build a multi-stage, non-root, read-only-root `figcraft-cloud` image.
   Evidence: `deploy/saas/cloud.Dockerfile` builds with Rust 1.95 Bookworm and runs from Debian 12
   distroless as UID 65532; a focused Docker ignore file excludes local secrets and build output.
-  The image built successfully and served `/healthz` (200) and `/readyz` (503, as intended) with
-  `--read-only --user 65532:65532`. Base tags are versioned but not digest-pinned; release pinning,
-  SBOM and provenance remain follow-up hardening.
+  The image built successfully and served `/healthz` and `/readyz` (200 after listener startup)
+  with `--read-only --user 65532:65532`. Readiness indicates transport probes are serving, not that
+  application operations can access a schema or persist data. Base tags are versioned but not
+  digest-pinned; release pinning, SBOM and provenance remain follow-up hardening.
 - [x] **S1-014** Add `deploy/saas/compose.yaml` with gateway, web, cloud, PostgreSQL, Redis,
   S3-compatible storage and bucket initialization.
   Evidence: the seven-service Compose topology includes an HTTP gateway, built static web image,
@@ -152,18 +154,18 @@ the same commit as the completed task.
   topology refused unreviewed image inputs under D-001; the selected PostgreSQL, Redis and
   SeaweedFS digests are now recorded in `deploy/saas/env.example`. `docker compose config`
   validates all service definitions. The Caddy gateway configuration and static web image build
-  passed. S1-016 added persistence and health ordering; S1-018 retains end-to-end acceptance work.
+  passed. S1-016 added persistence and health ordering; S1-018 verifies the routed transport probes.
 - [x] **S1-015** Add `deploy/saas/env.example` containing no working production secret.
   Evidence: `deploy/saas/env.example` contains only loopback or reserved-host development values
   and mounted-secret paths; the adjacent ignore rules and README keep `.env` and `secrets/` out of
-  Git and state that no healthy SaaS application stack exists yet.
+  Git and distinguish transport health from a healthy SaaS application.
 - [x] **S1-016** Add container health checks, dependency ordering and named volumes.
   Evidence: Compose defines PostgreSQL, Redis and SeaweedFS named data volumes; the PostgreSQL 18
   mount target is `/var/lib/postgresql`. Web, gateway, PostgreSQL, Redis, SeaweedFS and cloud have
   health checks, with Redis auth read from a mounted secret on stdin. The cloud image's shell-free
-  readiness probe has success/failure regression tests and returns failure against the current
-  `/readyz` 503 in the built distroless image. PostgreSQL and Redis health plus completed SeaweedFS
-  bucket-versioning initialization gate cloud creation; web health and cloud readiness gate the
+  readiness probe has success/failure regression tests and returns success after the transport
+  listener binds. PostgreSQL and Redis health plus completed SeaweedFS bucket-versioning
+  initialization gate cloud creation; web health and cloud readiness gate the
   gateway. CI renders Compose with deliberately non-deployable image fixtures. The 2026-10-16
   [image review](dependency-images.md) records pinned OCI digests and a disposable Compose run:
   all three data services became healthy; PostgreSQL and Redis markers and the versioned bucket
@@ -174,12 +176,16 @@ the same commit as the completed task.
   Evidence: the dedicated `cloud` CI job checks formatting, clippy and unit tests for
   `figcraft-cloud`, then builds `deploy/saas/cloud.Dockerfile`; the existing full Rust, WASM and
   web jobs remain unchanged. The same cloud checks and image build passed locally.
-- [ ] **S1-018** Add a Compose smoke test that reaches healthy state and verifies API, web and
+- [x] **S1-018** Add a Compose smoke test that reaches healthy state and verifies API, web and
   WebSocket upgrade routing from an empty environment.
-  Partial preparation: `deploy/saas/smoke-preflight.sh` creates a disposable Compose project with
-  synthetic secrets and verifies healthy data/web dependencies, successful bucket initialization,
-  and fail-closed cloud/gateway startup. It does not verify the absent API or WebSocket application
-  routes, so this task and S1-GATE remain unchecked.
+  Evidence: `deploy/saas/smoke-preflight.sh` creates a disposable Compose project with random
+  synthetic secrets, builds the images, waits for all services to become healthy, verifies bucket
+  initialization, and fetches the web shell and API transport probe through Caddy. It also
+  completes a standards-compliant WebSocket upgrade through the relay route, starts `all`, `api`,
+  `relay` and `worker` from the identical cloud image, and verifies unsafe production URLs are
+  rejected. The WebSocket probe sends a normal close frame; collaboration messages are future work.
+  The project and its data are removed on exit. This validates S1 transport and startup, not
+  authenticated or persistent application workflows.
 - [x] **S1-019** Initialize `webapp/` with React, TypeScript, Vite, a pinned package-manager version
   and one committed lockfile. Depends on S0-012.
   Evidence: `webapp/package.json`, `webapp/package-lock.json`, `webapp/saas/`; verified with
@@ -199,8 +205,11 @@ the same commit as the completed task.
 
 ### S1 gate
 
-- [ ] **S1-GATE** Verify one image starts in every role, Compose starts cleanly, invalid
+- [x] **S1-GATE** Verify one image starts in every role, Compose starts cleanly, invalid
   configuration fails safely and all existing upstream gates pass.
+  Evidence: the S1-018 disposable smoke starts all roles from one image, reaches healthy Compose
+  state, checks API/web/WebSocket routes and rejects unsafe production settings. `cargo xtask ci`,
+  web checks, shell lint and Compose validation passed.
 
 ## S2 — PostgreSQL metadata and events
 
@@ -641,3 +650,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | D-001: pinned and inspected supported PostgreSQL and Redis image digests and PostgreSQL volume target; documented archived MinIO blocker. S1 stays 21/22. |
 | 2026-10-16 | D-001: replaced archived MinIO with pinned SeaweedFS 4.48; validated data health, versioning, signed S3 writes and restart persistence in a disposable Compose project. S1 stays 21/22. |
 | 2026-10-16 | S1-018 preparation: added a disposable fail-closed Compose preflight; API/web/WebSocket acceptance remains pending. S1 stays 21/22. |
+| 2026-10-16 | S1-018 and S1-GATE: implemented diagnostic API/WebSocket transport probes and validated healthy Compose routing, all roles and unsafe-config rejection. S1 complete at 22/22. |

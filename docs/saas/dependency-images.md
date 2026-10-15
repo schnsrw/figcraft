@@ -44,5 +44,6 @@ This closes the **local image selection** part of D-001. It does not certify hos
 the single-node SeaweedFS `mini` topology exposes internal master/filer/volume/admin endpoints on
 the private Compose network, and needs a deployment-specific network/security review before
 production. Lifecycle-policy provisioning and backup/restore remain S3/S8 tasks; neither is
-claimed as validated here. The full API/web/WebSocket smoke test remains S1-018 because the cloud
-application routes are not implemented.
+claimed as validated here. S1-018 passes a diagnostic API/web/WebSocket transport smoke test. The
+API and upgrade endpoints prove routing only; authenticated application operations and live
+collaboration remain unimplemented.

@@ -12,10 +12,12 @@ docker build -f deploy/saas/cloud.Dockerfile -t figcraft-cloud:dev .
 ```
 
 The image uses a Rust builder stage and a non-root distroless runtime. Run it with a read-only root
-filesystem (`--read-only`) and mount secret files read-only. Its health-only server listens on port
-8081; `/readyz` remains 503 until the API, relay and worker services are implemented. The gateway
-already routes `/api/v1/*` and `/ws/v1/*` to that port, but those application routes do not exist
-yet. Its `/healthz` is only an edge liveness response, not a cloud readiness signal.
+filesystem (`--read-only`) and mount secret files read-only. The transport server listens on port
+8081. `/api/v1/healthz` returns a transport probe for `api` and `all`; `/ws/v1/health` validates a
+WebSocket upgrade for `relay` and `all`, then closes normally. `/readyz` becomes healthy after the
+listener starts. These probes do not verify database schema, authentication, document operations
+or durable collaboration; those product services remain future milestones. The edge `/healthz` is
+only gateway liveness.
 
 `web.Dockerfile` builds the existing npm workspace with Node 22.18.0, then copies the static build
 into Caddy. `compose.yaml` defines the gateway, web, cloud, PostgreSQL, Redis, SeaweedFS and a
@@ -39,9 +41,9 @@ major upgrade without a migration plan. Redis enables append-only persistence un
 though cloud correctness must treat Redis as replaceable state.
 
 Compose waits for PostgreSQL and Redis health checks and for successful bucket initialization
-before creating the cloud container. The gateway waits for both web health and cloud readiness.
-`figcraft-cloud --check-ready` probes `/readyz` with a bounded local HTTP request and returns failure
-while the role runtime is unfinished; consequently the gateway correctly remains unstarted today.
+before creating the cloud container. The gateway waits for both web health and cloud transport
+readiness. `figcraft-cloud --check-ready` probes `/readyz` with a bounded local HTTP request.
+Database and product-service readiness checks will extend this probe as those services are built.
 The one-shot SeaweedFS initializer retries failures and fails closed if versioning cannot be
 confirmed. The edge `/healthz` is only liveness after the gateway starts.
 
@@ -89,16 +91,15 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
   before starting the health server (S1-009 and S1-010).
 
 D-001 selects the local data-service images; this is still a single-node development topology, not
-a production security or backup design. A healthy API/web/WebSocket smoke test is S1-018, after
-the cloud application routes exist.
+a production security or backup design. S1-018 verifies transport routing with diagnostic API and
+WebSocket probes; it does not validate application workflows.
 
-The disposable `smoke-preflight.sh` exercises the currently implemented Compose contract from
-synthetic, randomly generated secrets. Run `bash deploy/saas/smoke-preflight.sh` from any directory
-with Docker available. It builds the local images, expects PostgreSQL, Redis, SeaweedFS and web to
-be healthy, confirms bucket initialization, and verifies that the unfinished cloud runtime remains
-unhealthy so the gateway does not start. It removes its uniquely named containers, volumes and
-temporary secrets on exit. This is a fail-closed preflight, **not** the S1-018 API/web/WebSocket
-acceptance test. If a machine or tool is forcibly stopped before cleanup completes, use the
-printed project name with `docker compose --project-name <name> --env-file
+The disposable `smoke-preflight.sh` exercises the Compose transport contract from synthetic,
+randomly generated secrets. Run `bash deploy/saas/smoke-preflight.sh` from any directory with Docker
+available. It builds the local images, checks service health and bucket initialization, starts each
+cloud role, and verifies web content, API and WebSocket routing plus rejection of unsafe production
+configuration. It removes its uniquely named containers, volumes and temporary secrets on exit.
+The API and WebSocket endpoints are diagnostic probes, not application workflows. If a machine or
+tool is forcibly stopped before cleanup completes, use the printed project name with `docker compose --project-name <name> --env-file
 deploy/saas/env.example --file deploy/saas/compose.yaml down --volumes --remove-orphans` to remove
 only that disposable project.

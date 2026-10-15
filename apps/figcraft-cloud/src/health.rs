@@ -2,12 +2,15 @@ use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use base64::Engine as _;
 use figcraft_cloud_domain::RequestId;
+use sha1::{Digest, Sha1};
 
 use crate::config::CloudRole;
 
 const MAX_REQUEST_BYTES: usize = 8 * 1024;
 const HEALTH_ADDR: &str = "0.0.0.0:8081";
+const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub(super) fn probe_ready() -> io::Result<bool> {
     probe_ready_at(SocketAddr::from(([127, 0, 0, 1], 8081)))
@@ -28,25 +31,43 @@ pub(super) fn serve(role: CloudRole) -> io::Result<()> {
     eprintln!("figcraft-cloud: health endpoints listening on {HEALTH_ADDR} for role '{}'", role.as_str());
     for stream in listener.incoming() {
         let mut stream = stream?;
-        handle_connection(&mut stream, role)?;
+        handle_connection(&mut stream, role, true)?;
     }
     Ok(())
 }
 
-fn handle_connection(stream: &mut TcpStream, role: CloudRole) -> io::Result<()> {
+fn handle_connection(stream: &mut TcpStream, role: CloudRole, ready: bool) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
     let request = read_request(stream);
     let context = RequestContext::from_request(request.as_ref().ok().map(String::as_str));
-    let (status, result) = match request {
-        Ok(request) => route(&request, role),
-        Err(RequestError::TooLarge) => (413, ("Payload Too Large", "{\"error\":\"request too large\"}".to_string())),
-        Err(RequestError::Invalid) => (400, ("Bad Request", "{\"error\":\"invalid request\"}".to_string())),
+    let result = match request {
+        Ok(request) => route(&request, role, ready),
+        Err(RequestError::TooLarge) => RouteResult::Http(413, "Payload Too Large", "{\"error\":\"request too large\"}".to_string()),
+        Err(RequestError::Invalid) => RouteResult::Http(400, "Bad Request", "{\"error\":\"invalid request\"}".to_string()),
     };
-    let response = response(status, result.0, &result.1, &context);
-    stream.write_all(response.as_bytes())?;
+    let status = match result {
+        RouteResult::Http(status, reason, body) => {
+            let response = response(status, reason, &body, &context);
+            stream.write_all(response.as_bytes())?;
+            status
+        }
+        RouteResult::WebSocket(accept) => {
+            let response = websocket_response(&accept, &context);
+            stream.write_all(response.as_bytes())?;
+            // The probe proves the upgrade path and immediately closes with a normal WebSocket
+            // close frame. Collaboration messages are implemented by a later relay milestone.
+            stream.write_all(&[0x88, 0x02, 0x03, 0xE8])?;
+            101
+        }
+    };
     stream.flush()?;
     write_request_log(role, status, &context);
     Ok(())
+}
+
+enum RouteResult {
+    Http(u16, &'static str, String),
+    WebSocket(String),
 }
 
 #[derive(Clone, Copy)]
@@ -117,27 +138,66 @@ fn parse_traceparent(request: &str) -> Option<TraceParent> {
     Some(TraceParent { value: value.to_string(), trace_id: trace_id.to_string(), parent_id: parent_id.to_string() })
 }
 
-fn route(request: &str, role: CloudRole) -> (u16, (&'static str, String)) {
+fn route(request: &str, role: CloudRole, ready: bool) -> RouteResult {
     let Some(line) = request.lines().next() else {
-        return (400, ("Bad Request", "{\"error\":\"invalid request\"}".to_string()));
+        return RouteResult::Http(400, "Bad Request", r#"{"error":"invalid request"}"#.to_string());
     };
     let mut parts = line.split_ascii_whitespace();
     let (Some(method), Some(path), Some(version)) = (parts.next(), parts.next(), parts.next()) else {
-        return (400, ("Bad Request", "{\"error\":\"invalid request\"}".to_string()));
+        return RouteResult::Http(400, "Bad Request", "{\"error\":\"invalid request\"}".to_string());
     };
     if parts.next().is_some() || (version != "HTTP/1.0" && version != "HTTP/1.1") {
-        return (400, ("Bad Request", "{\"error\":\"invalid request\"}".to_string()));
+        return RouteResult::Http(400, "Bad Request", "{\"error\":\"invalid request\"}".to_string());
     }
     if method != "GET" {
-        return (405, ("Method Not Allowed", "{\"error\":\"method not allowed\"}".to_string()));
+        return RouteResult::Http(405, "Method Not Allowed", "{\"error\":\"method not allowed\"}".to_string());
+    }
+
+    if path == "/api/v1/healthz" && matches!(role, CloudRole::All | CloudRole::Api) {
+        return RouteResult::Http(200, "OK", "{\"status\":\"transport_ready\"}".to_string());
+    }
+    if path == "/ws/v1/health" && matches!(role, CloudRole::All | CloudRole::Relay) {
+        return match websocket_accept(request) {
+            Some(accept) => RouteResult::WebSocket(accept),
+            None => RouteResult::Http(426, "Upgrade Required", "{\"error\":\"websocket upgrade required\"}".to_string()),
+        };
     }
 
     match path {
-        "/healthz" => (200, ("OK", format!("{{\"status\":\"alive\",\"role\":\"{}\"}}", role.as_str()))),
-        "/startupz" => (200, ("OK", format!("{{\"status\":\"started\",\"role\":\"{}\"}}", role.as_str()))),
-        "/readyz" => (503, ("Service Unavailable", format!("{{\"status\":\"not_ready\",\"role\":\"{}\"}}", role.as_str()))),
-        _ => (404, ("Not Found", "{\"error\":\"not found\"}".to_string())),
+        "/healthz" => RouteResult::Http(200, "OK", format!("{{\"status\":\"alive\",\"role\":\"{}\"}}", role.as_str())),
+        "/startupz" => RouteResult::Http(200, "OK", format!("{{\"status\":\"started\",\"role\":\"{}\"}}", role.as_str())),
+        "/readyz" if ready => RouteResult::Http(200, "OK", format!("{{\"status\":\"transport_ready\",\"role\":\"{}\"}}", role.as_str())),
+        "/readyz" => RouteResult::Http(503, "Service Unavailable", format!("{{\"status\":\"not_ready\",\"role\":\"{}\"}}", role.as_str())),
+        _ => RouteResult::Http(404, "Not Found", "{\"error\":\"not found\"}".to_string()),
     }
+}
+
+fn websocket_accept(request: &str) -> Option<String> {
+    if request.lines().next()?.split_ascii_whitespace().nth(2)? != "HTTP/1.1" {
+        return None;
+    }
+    let header = |name: &str| {
+        request.lines().skip(1).take_while(|line| !line.is_empty()).find_map(|line| {
+            let (key, value) = line.split_once(':')?;
+            key.eq_ignore_ascii_case(name).then(|| value.trim())
+        })
+    };
+    header("host")?;
+    let upgrade = header("upgrade")?;
+    let connection = header("connection")?;
+    let version = header("sec-websocket-version")?;
+    let key = header("sec-websocket-key")?;
+    if !upgrade.eq_ignore_ascii_case("websocket")
+        || !connection.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        || version != "13"
+        || base64::engine::general_purpose::STANDARD.decode(key).ok()?.len() != 16
+    {
+        return None;
+    }
+    let mut digest = Sha1::new();
+    digest.update(key.as_bytes());
+    digest.update(WEBSOCKET_GUID.as_bytes());
+    Some(base64::engine::general_purpose::STANDARD.encode(digest.finalize()))
 }
 
 fn response(status: u16, reason: &str, body: &str, context: &RequestContext) -> String {
@@ -145,6 +205,13 @@ fn response(status: u16, reason: &str, body: &str, context: &RequestContext) -> 
     format!(
         "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Request-Id: {}\r\n{trace_header}Connection: close\r\n\r\n{body}",
         body.len(),
+        context.request_id
+    )
+}
+
+fn websocket_response(accept: &str, context: &RequestContext) -> String {
+    format!(
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nX-Request-Id: {}\r\n\r\n",
         context.request_id
     )
 }
@@ -169,10 +236,12 @@ fn write_request_log(role: CloudRole, status: u16, context: &RequestContext) {
 }
 
 #[cfg(test)]
-fn response_for(request: &str, role: CloudRole) -> String {
+fn response_for(request: &str, role: CloudRole, ready: bool) -> String {
     let context = RequestContext::from_request(Some(request));
-    let (status, (reason, body)) = route(request, role);
-    response(status, reason, &body, &context)
+    match route(request, role, ready) {
+        RouteResult::Http(status, reason, body) => response(status, reason, &body, &context),
+        RouteResult::WebSocket(accept) => websocket_response(&accept, &context),
+    }
 }
 
 #[cfg(test)]
@@ -190,28 +259,55 @@ mod tests {
     #[test]
     fn liveness_startup_and_readiness_are_distinct_for_each_role() {
         for role in [CloudRole::All, CloudRole::Api, CloudRole::Relay, CloudRole::Worker] {
-            let health = response_for("GET /healthz HTTP/1.1\r\n\r\n", role);
-            let startup = response_for("GET /startupz HTTP/1.1\r\n\r\n", role);
-            let ready = response_for("GET /readyz HTTP/1.1\r\n\r\n", role);
+            let health = response_for("GET /healthz HTTP/1.1\r\n\r\n", role, false);
+            let startup = response_for("GET /startupz HTTP/1.1\r\n\r\n", role, false);
+            let ready = response_for("GET /readyz HTTP/1.1\r\n\r\n", role, false);
             assert!(health.starts_with("HTTP/1.1 200 OK"));
             assert!(health.contains(role.as_str()));
             assert!(startup.starts_with("HTTP/1.1 200 OK"));
             assert!(startup.contains("started"));
             assert!(ready.starts_with("HTTP/1.1 503 Service Unavailable"));
             assert!(ready.contains("not_ready"));
+            assert!(response_for("GET /readyz HTTP/1.1\r\n\r\n", role, true).starts_with("HTTP/1.1 200 OK"));
         }
     }
 
     #[test]
+    fn api_transport_probe_is_available_only_in_api_roles() {
+        let request = "GET /api/v1/healthz HTTP/1.1\r\n\r\n";
+        assert!(response_for(request, CloudRole::All, true).starts_with("HTTP/1.1 200 OK"));
+        assert!(response_for(request, CloudRole::Api, true).contains("transport_ready"));
+        assert!(response_for(request, CloudRole::Relay, true).starts_with("HTTP/1.1 404"));
+        assert!(response_for(request, CloudRole::Worker, true).starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn websocket_probe_validates_the_upgrade_and_returns_the_rfc_accept_value() {
+        let request = concat!(
+            "GET /ws/v1/health HTTP/1.1\r\n",
+            "Host: localhost\r\n",
+            "Upgrade: websocket\r\n",
+            "Connection: keep-alive, Upgrade\r\n",
+            "Sec-WebSocket-Version: 13\r\n",
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+        );
+        let response = response_for(request, CloudRole::All, true);
+        assert!(response.starts_with("HTTP/1.1 101 Switching Protocols"));
+        assert!(response.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
+        assert!(response_for("GET /ws/v1/health HTTP/1.1\r\n\r\n", CloudRole::All, true).starts_with("HTTP/1.1 426"));
+        assert!(response_for(request, CloudRole::Api, true).starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
     fn unknown_paths_methods_and_malformed_requests_fail_safely() {
-        assert!(response_for("GET /metrics HTTP/1.1\r\n\r\n", CloudRole::Api).starts_with("HTTP/1.1 404"));
-        assert!(response_for("POST /healthz HTTP/1.1\r\n\r\n", CloudRole::Api).starts_with("HTTP/1.1 405"));
-        assert!(response_for("not http", CloudRole::Api).starts_with("HTTP/1.1 400"));
+        assert!(response_for("GET /metrics HTTP/1.1\r\n\r\n", CloudRole::Api, false).starts_with("HTTP/1.1 404"));
+        assert!(response_for("POST /healthz HTTP/1.1\r\n\r\n", CloudRole::Api, false).starts_with("HTTP/1.1 405"));
+        assert!(response_for("not http", CloudRole::Api, false).starts_with("HTTP/1.1 400"));
     }
 
     #[test]
     fn request_ids_are_generated_and_returned() {
-        let response = response_for("GET /healthz HTTP/1.1\r\n\r\n", CloudRole::Api);
+        let response = response_for("GET /healthz HTTP/1.1\r\n\r\n", CloudRole::Api, false);
         let id = response.lines().find_map(|line| line.strip_prefix("X-Request-Id: ")).expect("request ID header");
         assert!(RequestId::from_str(id).is_ok());
     }
@@ -220,7 +316,7 @@ mod tests {
     fn valid_w3c_trace_context_is_forwarded_and_invalid_context_is_dropped() {
         let valid = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
         let request = format!("GET /healthz HTTP/1.1\r\ntraceparent: {valid}\r\n\r\n");
-        assert!(response_for(&request, CloudRole::Api).contains(&format!("traceparent: {valid}\r\n")));
+        assert!(response_for(&request, CloudRole::Api, false).contains(&format!("traceparent: {valid}\r\n")));
         assert!(parse_traceparent("GET /healthz HTTP/1.1\r\ntraceparent: 00-00000000000000000000000000000000-00f067aa0ba902b7-01\r\n\r\n").is_none());
     }
 
@@ -230,7 +326,7 @@ mod tests {
         let address = listener.local_addr().expect("test socket address");
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().expect("accept test request");
-            handle_connection(&mut stream, CloudRole::Relay).expect("serve test request");
+            handle_connection(&mut stream, CloudRole::Relay, false).expect("serve test request");
         });
 
         let mut client = TcpStream::connect(address).expect("connect test socket");
@@ -241,6 +337,27 @@ mod tests {
         assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
         assert!(response.contains("\"role\":\"relay\""));
         assert!(response.contains("X-Request-Id: "));
+    }
+
+    #[test]
+    fn websocket_probe_writes_a_normal_close_frame_after_upgrade() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test socket");
+        let address = listener.local_addr().expect("test socket address");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept test request");
+            handle_connection(&mut stream, CloudRole::All, true).expect("serve websocket probe");
+        });
+        let mut client = TcpStream::connect(address).expect("connect test socket");
+        client
+            .write_all(
+                b"GET /ws/v1/health HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+            )
+            .expect("write websocket handshake");
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).expect("read websocket close");
+        server.join().expect("websocket handler thread");
+        assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
+        assert!(response.ends_with(&[0x88, 0x02, 0x03, 0xE8]));
     }
 
     #[test]
