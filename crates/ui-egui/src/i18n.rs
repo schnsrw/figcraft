@@ -163,6 +163,9 @@ enum Plural {
 /// CLDR integer rules. Existing one/other catalogs may omit the extra forms.
 fn plural(code: &str, n: usize) -> Plural {
     match code {
+        "cs" if n == 1 => Plural::One,
+        "cs" if (2..=4).contains(&n) => Plural::Few,
+        "cs" => Plural::Other,
         "ru" if n % 10 == 1 && n % 100 != 11 => Plural::One,
         "ru" if (2..=4).contains(&(n % 10)) && !(12..=14).contains(&(n % 100)) => Plural::Few,
         "ru" => Plural::Many,
@@ -174,7 +177,7 @@ fn plural(code: &str, n: usize) -> Plural {
 }
 
 // CLDR's million-count "many" in French, Spanish and Portuguese still reads their existing
-// "other" wording. Only Russian currently supplies separate few/many forms.
+// "other" wording. Czech supplies separate few forms; Russian supplies few/many forms.
 
 /// Whether count `n` takes the "one" form: 0 and 1 in French and Brazilian Portuguese, never in
 /// Japanese, Korean and Chinese (no plural forms: always "other"), 1 elsewhere (CLDR's integer rules).

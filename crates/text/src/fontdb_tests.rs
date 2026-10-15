@@ -56,7 +56,9 @@ fn the_scan_reads_names_like_a_whole_file_read() {
                 let p = e.path();
                 if p.is_dir() {
                     stack.push(p);
-                } else if p.extension().is_some_and(|x| ["ttf", "otf", "ttc", "otc"].contains(&x.to_ascii_lowercase().to_str().unwrap_or(""))) {
+                } else if p.is_file()
+                    && p.extension().is_some_and(|x| ["ttf", "otf", "ttc", "otc"].contains(&x.to_ascii_lowercase().to_str().unwrap_or("")))
+                {
                     files.push(p);
                 }
             }
@@ -65,6 +67,90 @@ fn the_scan_reads_names_like_a_whole_file_read() {
     for p in files {
         let Ok(whole) = std::fs::read(&p) else { continue };
         assert_eq!(faces_in(&index_bytes(&p, whole.len()).unwrap()), faces_in(&whole), "{}", p.display());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn the_scan_skips_named_pipes() {
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    const INPUT: &str = "FIGCRAFT_TEST_PIPE_FONT_DIR";
+    if let Some(dir) = std::env::var_os(INPUT) {
+        let mut pending = BTreeMap::new();
+        scan_dir(std::path::Path::new(&dir), 0, &mut pending);
+        assert!(pending.is_empty());
+        std::fs::write(std::path::Path::new(&dir).join("complete"), b"scanned").unwrap();
+        return;
+    }
+
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let path = std::env::temp_dir().join(format!("figcraft-font-pipe-{}", std::process::id()));
+    std::fs::create_dir(&path).unwrap();
+    let dir = TempDir(path);
+    // POSIX mkfifo is only a test fixture helper, never a runtime font dependency.
+    let status = match Command::new("mkfifo").arg(dir.0.join("pipe.ttf")).status() {
+        Ok(status) => status,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            eprintln!("skipping named-pipe fixture: POSIX mkfifo is unavailable");
+            return;
+        }
+        Err(error) => panic!("cannot create named-pipe fixture: {error}"),
+    };
+    assert!(status.success(), "mkfifo failed");
+    std::os::unix::fs::symlink("pipe.ttf", dir.0.join("linked.otf")).unwrap();
+    std::os::unix::fs::symlink("missing.ttf", dir.0.join("broken.ttf")).unwrap();
+
+    // A regression must fail without leaving a blocked test thread behind. Run only this
+    // test in a child, then kill and reap it if opening the pipe blocks the scanner.
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let module = module_path!().split_once("::").unwrap().1;
+    let mut child = Child(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("{module}::the_scan_skips_named_pipes"), "--nocapture"])
+            .env(INPUT, &dir.0)
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            assert!(status.success(), "font-scan child failed: {status}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "font scan blocked on a named pipe");
+        // std::process has no portable timed wait; a bounded poll keeps the regression finite.
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // An exact-filter typo otherwise makes libtest report success after running zero tests.
+    assert_eq!(std::fs::read(dir.0.join("complete")).unwrap(), b"scanned");
+}
+
+#[test]
+fn fallback_faces_follow_the_runs_style() {
+    // A bold run's missing characters come from each fallback family's face nearest Bold, not its
+    // Regular, so Hangul or kana in a bold Latin run come out bold too. Same families, same order.
+    scan_system_fonts();
+    let mut w = db().write().unwrap();
+    let regular = w.fallbacks();
+    let bold = w.fallbacks_for("Bold");
+    let families = |v: &[Arc<Face>]| v.iter().map(|f| f.family.clone()).collect::<Vec<_>>();
+    assert_eq!(families(&regular), families(&bold));
+    for (r, b) in regular.iter().zip(&bold) {
+        assert!(b.weight >= r.weight, "{}: {} is lighter than {}", b.family, b.style, r.style);
     }
 }
 

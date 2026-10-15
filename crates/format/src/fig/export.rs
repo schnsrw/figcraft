@@ -1552,6 +1552,10 @@ impl<'d> Exporter<'d> {
                 .map(|(st, id)| {
                     let mut ef: Fields = vec![("styleID", u(id))];
                     style_fields(st, &mut ef);
+                    // An empty link clears the text's own (a missing one would inherit it).
+                    if st.link.is_none() && td.style.link.is_some() {
+                        ef.push(("hyperlink", o(vec![("url", s(""))])));
+                    }
                     if let Some(p) = st.fills.as_deref().or(td.style.fills.as_ref().map(|_| fills)) {
                         ef.push(("fillPaints", self.paints(p, true, &Bound::default())));
                     }

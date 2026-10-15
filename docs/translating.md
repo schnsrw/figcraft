@@ -80,9 +80,9 @@ language also needs its script in `cjk::language`.
    `few` for 2–4, 22–24… except 12–14; and `many` for the other integers, including 0. Keep `{n}`
    in all Russian forms. Add new rules to `plural` in
    [`crates/ui-egui/src/i18n.rs`](../crates/ui-egui/src/i18n.rs). A missing form reads `other`;
-   a missing key uses the fallback catalog's own plural rule. Czech has no rule of its own yet, so it
-   picks `one` for 1 and `other` for everything else: its `other` forms are count-neutral for 0,
-   2–4 and 5+ (e.g. `Vrstvy: {n}`).
+   a missing key uses the fallback catalog's own plural rule. Czech uses `one` for 1, `few` for
+   2–4 and `other` for 0 and 5+ (e.g. `{n} vrstva`, `{n} vrstvy`, `{n} vrstev`). Keep `{n}` in all
+   three forms. Czech's CLDR `many` applies only to decimals; `trn` takes integer counts.
 4. To require full coverage, add the code to `COMPLETE` in
    [`crates/ui-egui/src/i18n_tests.rs`](../crates/ui-egui/src/i18n_tests.rs). Every later PR that
    adds a string then has to translate it into each complete language, so only Spanish is there:

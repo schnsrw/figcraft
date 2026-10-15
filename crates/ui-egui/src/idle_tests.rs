@@ -312,6 +312,26 @@ fn an_animated_gif_wakes_only_the_presenter_and_only_at_its_frames() {
 }
 
 #[test]
+fn cjk_names_are_looked_for_in_edits_not_on_every_pan() {
+    let mut s = Session::new();
+    let a = s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap()["id"].clone();
+    let b = s.execute("shape.rectangle", &json!({"x": 20, "y": 0, "width": 10, "height": 10})).unwrap()["id"].clone();
+    s.execute("node.set", &json!({"id": a, "name": "中文"})).unwrap();
+    let mut h = Harness::new(s);
+    let ctx = h.ctx.clone();
+    assert_eq!(h.app.cjk_needed(&ctx, 0), crate::cjk::HAN, "the first look reads every name");
+    // A pan or zoom changes the revision but not the document: its hundreds of thousands of
+    // names aren't read again (that took 70 ms a frame in a 900 000-layer file).
+    let revision = h.app.session.ds().unwrap().revision;
+    h.run("view.set", json!({"zoom": 2, "cx": 300, "cy": 200}));
+    assert_ne!(h.app.session.ds().unwrap().revision, revision);
+    assert_eq!(h.app.cjk_needed(&ctx, 0), 0);
+    // An edit is read: the layers it changed.
+    h.run("node.set", json!({"id": b, "name": "한국어"}));
+    assert_eq!(h.app.cjk_needed(&ctx, 0), crate::cjk::HANGUL);
+}
+
+#[test]
 fn a_hidden_window_answers_requests_that_need_no_frame() {
     // #269: minimised or covered, the window draws no frames, but the app's logic still runs: it
     // answers edits, inspection and saves; what needs a frame waits for the window to show.

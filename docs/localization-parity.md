@@ -21,7 +21,7 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
 
 - **Layer:** one TOML catalog per language in `crates/ui-egui/locales/`, baked into the binary by
   the UI crate's build script (desktop and web; nothing read at run time). Keys are the English text
-  (`tr("Fill")`, `trf` for `{named}` placeholders, `trn` for counts with one/other plural forms), so
+  (`tr("Fill")`, `trf` for `{named}` placeholders, `trn` for counts with one/few/many/other plural forms), so
   a missing translation shows English, never a raw key. One English text that needs two
   translations takes a context (`"Fill|sizing"`).
 - **Strings:** 1,417 UI keys in `en.toml` (36 with plural forms; ~110 are labels from engine and
@@ -55,9 +55,10 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
   until someone translates it. Every draft translates every string as of 2026-10-12 (checked by
   adding each to `COMPLETE` locally and running the check).
 - **Not yet localized:** messages the engine writes (errors, a few toasts, Dev Mode property values
-  such as "inside"), number formatting (decimal points stay `.`), and plural forms beyond one/other
-  (French and Brazilian Portuguese take the singular for 0 as well; Japanese, Korean and Chinese
-  have one form; CLDR's "many" for millions reads as the plural).
+  such as "inside"), number formatting (decimal points stay `.`), and decimal plural rules
+  (`trn` takes integers: Czech uses one/few/other and Russian one/few/many; French and Brazilian
+  Portuguese take the singular for 0 as well; Japanese, Korean and Chinese have one form;
+  CLDR's "many" for millions in French, Spanish and Portuguese reads as the plural).
 - **Script support in documents:** Unicode bidi with Arabic shaping and mirrored brackets in text
   layers; right-to-left list markers and indents; right-to-left names in the layers panel, tabs
   and canvas labels (visual order, joined Arabic); inline IME composition with the candidate window

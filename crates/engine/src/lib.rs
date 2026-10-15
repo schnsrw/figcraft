@@ -1562,6 +1562,8 @@ mod library_range_styles_tests;
 #[cfg(test)]
 mod library_variables_tests;
 #[cfg(test)]
+mod line_endings_tests;
+#[cfg(test)]
 mod live_access_tests;
 #[cfg(test)]
 mod live_docs_tests;
@@ -1587,6 +1589,8 @@ mod online_tests;
 mod open_issues_tests;
 #[cfg(test)]
 mod outline_options_tests;
+#[cfg(test)]
+mod page_copy_navigation_tests;
 #[cfg(test)]
 mod page_target_tests;
 #[cfg(test)]

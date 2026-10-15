@@ -97,11 +97,13 @@ pub fn specs() -> Vec<CommandSpec> {
             let doc = s.doc_mut()?;
             let name = format!("Copy of {}", doc.get(src)?.name);
             let np = doc.add_page(&name);
-            // Each layer and its copy (also those in sections), so flows can follow their start frames.
+            // One copy with one id map, so navigation between the copied frames points at the copies;
+            // then each layer and its copy (also those in sections), so flows can follow their start frames.
+            let children = doc.get(src)?.children.clone();
+            let copied = doc.duplicate_all_into(&children, np)?;
             let mut copies = Vec::new();
-            for c in doc.get(src)?.children.clone() {
-                let copy = doc.duplicate_into(c, np, None)?;
-                copies.extend(doc.subtree(c).into_iter().zip(doc.subtree(copy)));
+            for (c, copy) in children.iter().zip(&copied) {
+                copies.extend(doc.subtree(*c).into_iter().zip(doc.subtree(*copy)));
             }
             // The copy keeps the page's colour, flows (pointing at the copied frames), prototype settings and guides.
             if let NodeKind::Page { background, flows, prototype, guides } = doc.get(src)?.kind.clone()

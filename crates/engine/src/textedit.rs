@@ -83,12 +83,7 @@ fn edit(s: &mut Session, f: impl FnOnce(&mut TextData, &mut TextEdit)) -> Result
 /// Type (or paste) `text` replacing the selection. Line endings are normalised and other control
 /// characters dropped, so pasted plain text from any platform lands cleanly.
 pub fn insert(s: &mut Session, text: &str) -> Result<()> {
-    let text: String = text
-        .replace("\r\n", "\n")
-        .replace(['\r', '\u{2028}', '\u{2029}'], "\n")
-        .chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
-        .collect();
+    let text: String = crate::cmd::props::normalize_line_endings(text).chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
     if text.is_empty() {
         return Ok(());
     }

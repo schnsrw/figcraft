@@ -1762,7 +1762,8 @@ fn text_style(v: &View, size: Option<f64>) -> Obj {
             }
         }
     }
-    if let Some(u) = v.get("hyperlink").and_then(|h| h.get("url")).and_then(Kv::str).filter(|u| !u.is_empty()) {
+    // An empty URL is kept: on an override entry it clears the text's own link.
+    if let Some(u) = v.get("hyperlink").and_then(|h| h.get("url")).and_then(Kv::str) {
         s.insert("hyperlink".into(), json!({"type": "URL", "url": u}));
     }
     s

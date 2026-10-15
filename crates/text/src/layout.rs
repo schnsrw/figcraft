@@ -325,8 +325,10 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
     let mut dbw = db().write().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut fallbacks = dbw.fallbacks();
     let mut faces: Vec<Option<Arc<Face>>> = Vec::with_capacity(styles.len());
+    let mut style_fallbacks: Vec<Vec<Arc<Face>>> = Vec::with_capacity(styles.len());
     for s in &styles {
         faces.push(dbw.find(&s.font_family, &s.font_style).or_else(|| dbw.default_face()));
+        style_fallbacks.push(dbw.fallbacks_for(&s.font_style));
     }
     // Colour emoji are their own, large faces (Apple Color Emoji is ~180 MB): they are read only
     // for a text with emoji, or with characters nothing above covers.
@@ -371,6 +373,7 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
                 if c == '\n' || primary.has_char(c) {
                     return primary.clone();
                 }
+                let fallbacks = style_fallbacks.get(st_idx).unwrap_or(&fallbacks);
                 fallbacks.iter().find(|f| f.has_char(c)).cloned().unwrap_or_else(|| primary.clone())
             };
             let first = chars.get(seg_start).copied().unwrap_or(' ');

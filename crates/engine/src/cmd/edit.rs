@@ -1003,7 +1003,8 @@ fn find_replace(s: &mut Session, p: &Value) -> Result<Value> {
     if find.is_empty() {
         return Err(bad("edit.findReplace", "`find` is empty"));
     }
-    let replace = string(p, "replace");
+    // Line breaks stored as the editor stores them (CRLF, CR, U+2028 and U+2029 become LF).
+    let replace = string(p, "replace").map(|r| super::props::normalize_line_endings(&r));
     let names = boolean(p, "layerNames").unwrap_or(false);
     let page = s.page()?;
     let doc = s.doc_mut()?;

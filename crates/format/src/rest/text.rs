@@ -130,6 +130,8 @@ fn type_style(cx: &mut Ctx, s: &Value, base: &TextStyle) -> TextStyle {
             // and clipping a URL changed it into a different, working-looking one without a word
             // (#459). The FIG importer already keeps it whole.
             (Some("URL") | None, Some(url)) if !url.is_empty() => t.link = Some(url.to_string()),
+            // An empty URL clears the link the base style has.
+            (Some("URL") | None, Some(_)) => t.link = None,
             _ => {}
         }
     }

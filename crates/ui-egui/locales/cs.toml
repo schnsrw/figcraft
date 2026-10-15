@@ -7,7 +7,7 @@ status = "draft — needs native review"
 [ui]
 "% of all commits" = "% všech commitů"
 "(no longer published)" = "(již nepublikováno)"
-"({n} warnings: some entries were skipped)" = { one = "({n} varování: některé položky byly přeskočeny)", other = "(Varování: {n}; některé položky byly přeskočeny)" }
+"({n} warnings: some entries were skipped)" = { one = "({n} varování: některé položky byly přeskočeny)", few = "({n} varování: některé položky byly přeskočeny)", other = "({n} varování: některé položky byly přeskočeny)" }
 "+ Create variable" = "+ Vytvořit proměnnou"
 ".fig (experimental)" = ".fig (experimentální)"
 "1…9, 0" = "1…9, 0"
@@ -455,11 +455,11 @@ status = "draft — needs native review"
 "Export settings" = "Nastavení exportu"
 "Export variables" = "Exportovat proměnné"
 "Export {name}" = "Exportovat {name}"
-"Export {n} layers" = { one = "Exportovat {n} vrstvu", other = "Exportovat vrstvy: {n}" }
+"Export {n} layers" = { one = "Exportovat {n} vrstvu", few = "Exportovat {n} vrstvy", other = "Exportovat {n} vrstev" }
 "Exported {file}" = "Exportován soubor {file}"
 "Exported {name}" = "Exportováno: {name}"
-"Exported {name}; {n} kinds of content were left out" = { one = "Exportováno: {name}; vynechán {n} druh obsahu", other = "Exportováno: {name}; vynechané druhy obsahu: {n}" }
-"Exported {n} files" = { one = "Exportován {n} soubor", other = "Exportované soubory: {n}" }
+"Exported {name}; {n} kinds of content were left out" = { one = "Exportováno: {name}; vynechán {n} druh obsahu", few = "Exportováno: {name}; vynechány {n} druhy obsahu", other = "Exportováno: {name}; vynecháno {n} druhů obsahu" }
+"Exported {n} files" = { one = "Exportován {n} soubor", few = "Exportovány {n} soubory", other = "Exportováno {n} souborů" }
 "Export…" = "Exportovat…"
 "Expose properties to instances" = "Zpřístupnit vlastnosti instancím"
 "Exposure" = "Expozice"
@@ -477,7 +477,7 @@ status = "draft — needs native review"
 "File not found" = "Soubor nenalezen"
 "File published" = "Soubor publikován"
 "Files aren't end-to-end encrypted: the server's operator can read them." = "Soubory nemají koncové šifrování: provozovatel serveru je může číst."
-"Files nobody opens for {n} days are deleted." = { one = "Soubory, které nikdo neotevře déle než {n} den, se smažou.", other = "Soubory, které nikdo neotevře déle než {n} d, se smažou." }
+"Files nobody opens for {n} days are deleted." = { one = "Soubory, které nikdo neotevře déle než {n} den, se smažou.", few = "Soubory, které nikdo neotevře déle než {n} dny, se smažou.", other = "Soubory, které nikdo neotevře déle než {n} dní, se smažou." }
 "Fill" = "Výplň"
 "Fill (fr)" = "Vyplnit (fr)"
 "Fill container" = "Vyplnit kontejner"
@@ -601,7 +601,7 @@ status = "draft — needs native review"
 "Import plugin from manifest…" = "Importovat plugin z manifestu…"
 "Import variables" = "Importovat proměnné"
 "Imported {name}" = "Importováno: {name}"
-"Imported {n} new variables, updated {updated}" = { one = "Importována {n} nová proměnná, aktualizováno: {updated}", other = "Nově importované proměnné: {n}, aktualizované: {updated}" }
+"Imported {n} new variables, updated {updated}" = { one = "Importována {n} nová proměnná, aktualizováno: {updated}", few = "Importovány {n} nové proměnné, aktualizováno: {updated}", other = "Importováno {n} nových proměnných, aktualizováno: {updated}" }
 "Import…" = "Importovat…"
 "In an instance, this comes from the main component" = "V instanci se toto přebírá z hlavní komponenty"
 "In the browser you can join sessions the desktop app hosts and files on a FigCraft server. A page opened over https reaches other computers only through wss:// links (a server behind TLS)." = "V prohlížeči se můžete připojit k relacím hostovaným desktopovou aplikací a k souborům na serveru FigCraft. Stránka otevřená přes https může přistupovat k jiným počítačům pouze přes odkazy wss:// (server za TLS)."
@@ -1013,7 +1013,7 @@ status = "draft — needs native review"
 "Recent" = "Nedávné"
 "Recent files" = "Nedávné soubory"
 "Recents" = "Nedávné"
-"Recovered {n} unsaved files after the app quit unexpectedly: save them to keep them" = { one = "Po neočekávaném ukončení aplikace obnoven {n} neuložený soubor: uložte ho pro zachování", other = "Po neočekávaném ukončení aplikace obnoveny neuložené soubory (počet: {n}): uložte je pro zachování" }
+"Recovered {n} unsaved files after the app quit unexpectedly: save them to keep them" = { one = "Po neočekávaném ukončení aplikace obnoven {n} neuložený soubor: uložte ho pro zachování", few = "Po neočekávaném ukončení aplikace obnoveny {n} neuložené soubory: uložte je pro zachování", other = "Po neočekávaném ukončení aplikace obnoveno {n} neuložených souborů: uložte je pro zachování" }
 "Rectangle" = "Obdélník"
 "Rectangles" = "Obdélníky"
 "Red" = "Červená"
@@ -1287,8 +1287,8 @@ status = "draft — needs native review"
 "Swap to {name}" = "Vyměnit za {name}"
 "Swap width and height" = "Prohodit šířku a výšku"
 "Swapped instance" = "Instance vyměněna"
-"Swapped {n} assets" = { one = "Vyměněn {n} zdroj", other = "Vyměněné zdroje: {n}" }
-"Swapped {n} assets; {missed} had no match and still use the old library" = { one = "Vyměněn {n} zdroj; bez shody: {missed}, nadále používají původní knihovnu", other = "Vyměněné zdroje: {n}; bez shody: {missed}, nadále používají původní knihovnu" }
+"Swapped {n} assets" = { one = "Vyměněn {n} zdroj", few = "Vyměněny {n} zdroje", other = "Vyměněno {n} zdrojů" }
+"Swapped {n} assets; {missed} had no match and still use the old library" = { one = "Vyměněn {n} zdroj; bez shody: {missed}, nadále používají původní knihovnu", few = "Vyměněny {n} zdroje; bez shody: {missed}, nadále používají původní knihovnu", other = "Vyměněno {n} zdrojů; bez shody: {missed}, nadále používají původní knihovnu" }
 "Sweep" = "Rozsah"
 "System" = "Systém"
 "Tab / Shift+Tab" = "Tab / Shift+Tab"
@@ -1479,7 +1479,7 @@ status = "draft — needs native review"
 "Zoom to selection" = "Přiblížit na výběr"
 "Zoom tool: click to zoom in, drag an area" = "Nástroj přiblížení: kliknutím přiblížíte, tažením vyberete oblast"
 "Zoom tool: zoom out" = "Nástroj přiblížení: oddálit"
-"and {n} more" = { one = "a {n} další", other = "a další (počet: {n})" }
+"and {n} more" = { one = "a {n} další", few = "a {n} další", other = "a {n} dalších" }
 "bleed marks" = "značky spadávky"
 "by {author}" = "autor: {author}"
 "call any command its access allows" = "volat libovolný příkaz povolený jeho oprávněními"
@@ -1531,35 +1531,35 @@ status = "draft — needs native review"
 "{name}, in a live session" = "{name}, v živé relaci"
 "{name}, online, open only to you" = "{name}, online, přístupný pouze vám"
 "{name}, {kind}, {w} by {h}, selected" = "{name}, {kind}, {w} × {h}, vybráno"
-"{n} added" = { one = "Přidáno: {n}", other = "Přidáno: {n}" }
-"{n} autosave versions" = { one = "{n} automaticky uložená verze", other = "Automaticky uložené verze: {n}" }
-"{n} changed" = { one = "Změněno: {n}", other = "Změněno: {n}" }
-"{n} columns" = { one = "{n} sloupec", other = "Sloupce: {n}" }
-"{n} components" = { one = "{n} komponenta", other = "Komponenty: {n}" }
-"{n} components and styles have newer versions" = { one = "{n} komponenta nebo styl má novější verzi", other = "Komponenty a styly s novější verzí: {n}" }
-"{n} conflicts to resolve" = { one = "{n} konflikt k vyřešení", other = "Konflikty k vyřešení: {n}" }
-"{n} days ago" = { one = "Před {n} dnem", other = "Před {n} dny" }
-"{n} files" = { one = "{n} soubor", other = "Soubory: {n}" }
-"{n} hours ago" = { one = "Před {n} hodinou", other = "Před {n} hodinami" }
-"{n} instances" = { one = "{n} instance", other = "Instance: {n}" }
-"{n} layers" = { one = "{n} vrstva", other = "Vrstvy: {n}" }
-"{n} layers as one file" = { one = "{n} vrstva jako jeden soubor", other = "Vrstvy jako jeden soubor: {n}" }
-"{n} layers selected" = { one = "Vybrána {n} vrstva", other = "Vybrané vrstvy: {n}" }
-"{n} layers · {parts}" = { one = "{n} vrstva · {parts}", other = "Vrstvy: {n} · {parts}" }
-"{n} matches" = { one = "{n} shoda", other = "Shody: {n}" }
-"{n} minutes ago" = { one = "Před {n} minutou", other = "Před {n} minutami" }
-"{n} months ago" = { one = "Před {n} měsícem", other = "Před {n} měsíci" }
+"{n} added" = { one = "Přidáno: {n}", few = "Přidáno: {n}", other = "Přidáno: {n}" }
+"{n} autosave versions" = { one = "{n} automaticky uložená verze", few = "{n} automaticky uložené verze", other = "{n} automaticky uložených verzí" }
+"{n} changed" = { one = "Změněno: {n}", few = "Změněno: {n}", other = "Změněno: {n}" }
+"{n} columns" = { one = "{n} sloupec", few = "{n} sloupce", other = "{n} sloupců" }
+"{n} components" = { one = "{n} komponenta", few = "{n} komponenty", other = "{n} komponent" }
+"{n} components and styles have newer versions" = { one = "{n} komponenta nebo styl má novější verzi", few = "{n} komponenty nebo styly mají novější verzi", other = "{n} komponent nebo stylů má novější verzi" }
+"{n} conflicts to resolve" = { one = "{n} konflikt k vyřešení", few = "{n} konflikty k vyřešení", other = "{n} konfliktů k vyřešení" }
+"{n} days ago" = { one = "Před {n} dnem", few = "Před {n} dny", other = "Před {n} dny" }
+"{n} files" = { one = "{n} soubor", few = "{n} soubory", other = "{n} souborů" }
+"{n} hours ago" = { one = "Před {n} hodinou", few = "Před {n} hodinami", other = "Před {n} hodinami" }
+"{n} instances" = { one = "{n} instance", few = "{n} instance", other = "{n} instancí" }
+"{n} layers" = { one = "{n} vrstva", few = "{n} vrstvy", other = "{n} vrstev" }
+"{n} layers as one file" = { one = "{n} vrstva jako jeden soubor", few = "{n} vrstvy jako jeden soubor", other = "{n} vrstev jako jeden soubor" }
+"{n} layers selected" = { one = "Vybrána {n} vrstva", few = "Vybrány {n} vrstvy", other = "Vybráno {n} vrstev" }
+"{n} layers · {parts}" = { one = "{n} vrstva · {parts}", few = "{n} vrstvy · {parts}", other = "{n} vrstev · {parts}" }
+"{n} matches" = { one = "{n} shoda", few = "{n} shody", other = "{n} shod" }
+"{n} minutes ago" = { one = "Před {n} minutou", few = "Před {n} minutami", other = "Před {n} minutami" }
+"{n} months ago" = { one = "Před {n} měsícem", few = "Před {n} měsíci", other = "Před {n} měsíci" }
 "{n} of {total}" = "{n} z {total}"
-"{n} people joined" = { one = "Připojena {n} osoba", other = "Připojené osoby: {n}" }
-"{n} preferred components" = { one = "{n} preferovaná komponenta", other = "Preferované komponenty: {n}" }
-"{n} ready" = { one = "Připraveno: {n}", other = "Připraveno: {n}" }
-"{n} removed" = { one = "Odebráno: {n}", other = "Odebráno: {n}" }
-"{n} replies" = { one = "{n} odpověď", other = "Odpovědi: {n}" }
-"{n} rows" = { one = "{n} řádek", other = "Řádky: {n}" }
-"{n} styles" = { one = "{n} styl", other = "Styly: {n}" }
-"{n} variables" = { one = "{n} proměnná", other = "Proměnné: {n}" }
-"{n} weeks ago" = { one = "Před {n} týdnem", other = "Před {n} týdny" }
-"{n} years ago" = { one = "Před {n} rokem", other = "Před {n} lety" }
+"{n} people joined" = { one = "Připojila se {n} osoba", few = "Připojily se {n} osoby", other = "Připojilo se {n} osob" }
+"{n} preferred components" = { one = "{n} preferovaná komponenta", few = "{n} preferované komponenty", other = "{n} preferovaných komponent" }
+"{n} ready" = { one = "Připraveno: {n}", few = "Připraveno: {n}", other = "Připraveno: {n}" }
+"{n} removed" = { one = "Odebráno: {n}", few = "Odebráno: {n}", other = "Odebráno: {n}" }
+"{n} replies" = { one = "{n} odpověď", few = "{n} odpovědi", other = "{n} odpovědí" }
+"{n} rows" = { one = "{n} řádek", few = "{n} řádky", other = "{n} řádků" }
+"{n} styles" = { one = "{n} styl", few = "{n} styly", other = "{n} stylů" }
+"{n} variables" = { one = "{n} proměnná", few = "{n} proměnné", other = "{n} proměnných" }
+"{n} weeks ago" = { one = "Před {n} týdnem", few = "Před {n} týdny", other = "Před {n} týdny" }
+"{n} years ago" = { one = "Před {n} rokem", few = "Před {n} lety", other = "Před {n} lety" }
 "{n}d" = "{n} d"
 "{n}h" = "{n} h"
 "{n}m" = "{n} min"

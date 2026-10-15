@@ -420,6 +420,26 @@ fn the_key_scanner_reads_rust_literals() {
 }
 
 #[test]
+fn czech_integer_plurals() {
+    let cs = LANGS.iter().position(|l| l.code == "cs").unwrap();
+    assert_eq!(plural("cs", 1), Plural::One);
+    assert_eq!(fill(counted(cs, "{n} layers", 1), &[("n", &1)]), "1 vrstva");
+    for n in [2, 3, 4] {
+        assert_eq!(plural("cs", n), Plural::Few, "{n}");
+        assert_eq!(fill(counted(cs, "{n} layers", n), &[("n", &n)]), format!("{n} vrstvy"));
+    }
+    for n in [0, 5, 11, 12, 21, 22, 100, 1_000_000] {
+        assert_eq!(plural("cs", n), Plural::Other, "{n}");
+        assert_eq!(fill(counted(cs, "{n} layers", n), &[("n", &n)]), format!("{n} vrstev"));
+    }
+    for (key, text) in LANGS[cs].ui {
+        if let Text::Plural { one, few, .. } = text {
+            assert!(one.is_some() && few.is_some(), "{key}: missing Czech plural forms");
+        }
+    }
+}
+
+#[test]
 fn russian_language_tags_and_integer_plurals() {
     let ru = LANGS.iter().position(|l| l.code == "ru").unwrap();
     assert_eq!(LANGS[ru].name, "Русский");

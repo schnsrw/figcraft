@@ -562,7 +562,7 @@ impl TextData {
         }
     }
 
-    /// Drop empty/out-of-range runs and runs equal to the base style.
+    /// Drop empty/out-of-range runs and runs equal to the base style, and merge touching equal runs.
     pub fn normalize(&mut self) {
         let n = self.char_count();
         let base = self.style.clone();
@@ -571,6 +571,14 @@ impl TextData {
             r.end = r.end.min(n);
         }
         self.runs.sort_by_key(|r| r.start);
+        let mut merged: Vec<StyleRun> = Vec::with_capacity(self.runs.len());
+        for r in std::mem::take(&mut self.runs) {
+            match merged.last_mut() {
+                Some(prev) if prev.end == r.start && prev.style == r.style => prev.end = r.end,
+                _ => merged.push(r),
+            }
+        }
+        self.runs = merged;
     }
 
     /// Replace chars `start..end` with `text`, shifting runs (inserted text takes the style at `start`).
@@ -602,7 +610,9 @@ impl TextData {
                 if p <= start {
                     p
                 } else if p >= end {
-                    p - removed + inserted
+                    // Runs of a file that reach past the text (nothing clamps them on load)
+                    // would otherwise overflow here; `normalize` below drops what is left.
+                    p.saturating_sub(removed).saturating_add(inserted)
                 } else {
                     start + inserted
                 }
