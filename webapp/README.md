@@ -16,3 +16,6 @@ npm ci --prefix webapp
 npm run check --prefix webapp
 npm run dev --prefix webapp
 ```
+
+`check` runs formatting verification, strict type checking, ESLint, unit tests and the production
+build. Use `npm run format --prefix webapp` to apply the repository's web formatting rules.

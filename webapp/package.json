@@ -14,7 +14,19 @@
   "scripts": {
     "dev": "npm run dev --workspace=@figcraft/saas",
     "build": "npm run build --workspace=@figcraft/editor-bridge && npm run build --workspace=@figcraft/saas",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "lint": "eslint . --max-warnings 0",
+    "test": "npm run test --workspaces --if-present",
     "typecheck": "npm run typecheck --workspace=@figcraft/editor-bridge && npm run typecheck --workspace=@figcraft/saas",
-    "check": "npm run typecheck && npm run build"
+    "check": "npm run format:check && npm run typecheck && npm run lint && npm run test && npm run build"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "eslint": "10.12.0",
+    "globals": "17.13.0",
+    "prettier": "3.9.10",
+    "typescript-eslint": "8.71.2",
+    "vitest": "5.0.5"
   }
 }

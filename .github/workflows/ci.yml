@@ -1,7 +1,7 @@
-# CI for pull requests and main: format, clippy, tests, dependency layering, asset attribution and
-# the wasm32 check (the same gates as `cargo xtask ci`). Linux only: macOS is built and tested only
-# by release.yml (the org's macOS runners are kept for releases; craftrules release/playbook.md),
-# and Windows/FreeBSD packaging have their own workflows.
+# CI for pull requests and main: web quality plus Rust format, clippy, tests, dependency layering,
+# asset attribution and the wasm32 check (the same Rust gates as `cargo xtask ci`). Linux only:
+# macOS is built and tested only by release.yml (the org's macOS runners are kept for releases;
+# craftrules release/playbook.md), and Windows/FreeBSD packaging have their own workflows.
 name: CI
 
 on:
@@ -28,6 +28,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  web:
+    timeout-minutes: 10
+    name: web quality (ubuntu-latest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.18.0
+          cache: npm
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Install web dependencies
+        run: npm ci --prefix webapp
+
+      - name: Format, typecheck, lint, test and build web application
+        run: npm run check --prefix webapp
+
   test:
     timeout-minutes: 35
     name: test (ubuntu-latest)

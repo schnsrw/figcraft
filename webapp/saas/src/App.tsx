@@ -17,7 +17,10 @@ export function App() {
           <ul>
             {workspaceItems.map((item, index) => (
               <li key={item}>
-                <a className={index === 0 ? "active" : undefined} href={`#${item.toLowerCase()}`}>
+                <a
+                  className={index === 0 ? "active" : undefined}
+                  href={`#${item.toLowerCase()}`}
+                >
                   {item}
                 </a>
               </li>
@@ -29,8 +32,8 @@ export function App() {
           <p className="eyebrow">Cloud foundation</p>
           <h1>Your design workspace</h1>
           <p className="intro">
-            The account and workspace shell is ready. The existing Rust/WASM editor will mount into
-            this application through a versioned bridge.
+            The account and workspace shell is ready. The existing Rust/WASM
+            editor will mount into this application through a versioned bridge.
           </p>
 
           <section className="status-card" aria-labelledby="runtime-heading">

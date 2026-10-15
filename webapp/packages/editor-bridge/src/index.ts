@@ -31,13 +31,10 @@ export interface OpaqueBinary {
 }
 
 export type EditorConnectionState =
-  | "connecting"
-  | "online"
-  | "reconnecting"
-  | "offline"
-  | "closed";
+  "connecting" | "online" | "reconnecting" | "offline" | "closed";
 
-export type EditorSyncState = "saved" | "saving" | "offline" | "conflict" | "error";
+export type EditorSyncState =
+  "saved" | "saving" | "offline" | "conflict" | "error";
 
 export type EditorEvent =
   | {
