@@ -1,9 +1,22 @@
 # FigCraft SaaS deployment
 
-This directory will contain the reference Docker Compose deployment for local development and
-single-node operation. It currently establishes only the safe environment contract from S1-015.
-There is no runnable SaaS stack yet: the cloud binary, container images, Compose topology and
-health checks land in S1-007 through S1-016.
+This directory contains the first cloud image and the safe environment contract; the reference
+Docker Compose deployment for local development and single-node operation is still pending. Build
+the cloud image from the repository root with:
+
+```sh
+docker build -f deploy/saas/cloud.Dockerfile -t figcraft-cloud:dev .
+```
+
+The image uses a Rust builder stage and a
+non-root distroless runtime. Run it with a read-only root filesystem (`--read-only`) and mount
+secret files read-only. Its health-only server listens on port 8081; `/readyz` remains 503 until
+the API, relay and worker services are implemented. There is not yet a runnable SaaS Compose stack;
+gateway, web, data services and healthy end-to-end routing remain future work.
+
+The image uses the Rust 1.95 Bookworm builder and the Debian 12 distroless runtime. These tags are
+versioned but not digest-pinned; production digest pinning, SBOM and provenance are release work.
+The D-001 decision still blocks selecting PostgreSQL, Redis and MinIO service image versions.
 
 ## Configuration template
 
@@ -15,7 +28,7 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
 
 | Area | Non-secret settings | Secret files |
 |---|---|---|
-| Deployment | `FIGCRAFT_DEPLOYMENT`, `FIGCRAFT_ROLE`, `FIGCRAFT_PUBLIC_URL`, `FIGCRAFT_SINGLE_TENANT_ID` | none |
+| Deployment | `FIGCRAFT_ENV`, `FIGCRAFT_DEPLOYMENT`, `FIGCRAFT_ROLE`, `FIGCRAFT_PUBLIC_URL`, `FIGCRAFT_SINGLE_TENANT_ID` | none |
 | PostgreSQL | none | `DATABASE_URL_FILE` |
 | Redis | none | `REDIS_URL_FILE` |
 | Object storage | `S3_ENDPOINT`, `S3_REGION`, `S3_BUCKET`, `S3_FORCE_PATH_STYLE` | `S3_ACCESS_KEY_FILE`, `S3_SECRET_KEY_FILE` |
@@ -32,8 +45,8 @@ The application settings follow [`docs/saas/deployment-operations.md`](../../doc
 - Mount secrets read-only and pass only their in-container paths through `_FILE` settings.
 - Never place credentials in `.env`, Compose YAML, image layers, command-line arguments, logs or
   support bundles.
-- The cloud application must reject missing secret files and development defaults in production;
-  that behavior belongs to S1-009 and S1-010 and is not claimed here.
+- The cloud configuration rejects unreadable secret files and development defaults in production
+  before starting the health server (S1-009 and S1-010).
 
 The dependency image release policy is still awaiting owner decision D-001. Compose files must not
 guess PostgreSQL, Redis or MinIO production versions before that decision is recorded.

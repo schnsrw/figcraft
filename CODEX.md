@@ -52,7 +52,7 @@ the continuation point, a blocker or a major decision changes.
   SAAS-ADR-001 through SAAS-ADR-016 as written for `S0-014`. `S0-015` verified
   `storytold/figcraft` from GitHub fork metadata, configured the local `upstream` remote and passed
   the first synchronization rehearsal with no incoming commits.
-- S1 is in progress at 17/22 tasks. `S1-001` adds compileable workspace members for the modular
+- S1 is in progress at 18/22 tasks. `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
   workspace, project, cloud-document, principal, object, job and request identifiers with strict
   parsing and UUIDv4 generation. `S1-003` adds infrastructure-neutral deployment, role, explicit
@@ -65,7 +65,8 @@ the continuation point, a blocker or a major decision changes.
   through redacted wrappers and fixed diagnostics. `S1-010` rejects development URLs and inline
   credentials in production mode. `S1-011` adds bounded per-role health endpoints while keeping
   readiness false until the role runtime is initialized. `S1-012` adds generated request IDs,
-  structured JSON request logs and validated W3C trace context propagation. `S1-019` established the npm-pinned React,
+  structured JSON request logs and validated W3C trace context propagation. `S1-013` builds a
+  non-root distroless cloud image that runs with a read-only root filesystem. `S1-019` established the npm-pinned React,
   TypeScript and Vite workspace. `S1-020` defines the versioned opaque editor bridge with Rust/WASM
   as the sole owner of the browser collaboration WebSocket. `S1-021` adds the shared formatting,
   typecheck, lint, unit-test and production-build gate locally and in CI. `S1-022` enforces browser

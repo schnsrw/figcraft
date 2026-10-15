@@ -18,7 +18,7 @@ the same commit as the completed task.
 | Milestone | Status | Completed tasks | Gate |
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
-| S1 Cloud foundation | in progress | 17 / 22 | Healthy role-selectable image and Compose stack |
+| S1 Cloud foundation | in progress | 18 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | not started | 0 / 21 | Durable transactional event path |
 | S3 MinIO objects and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
@@ -139,7 +139,12 @@ the same commit as the completed task.
 
 ### Containers and CI
 
-- [ ] **S1-013** Build a multi-stage, non-root, read-only-root `figcraft-cloud` image.
+- [x] **S1-013** Build a multi-stage, non-root, read-only-root `figcraft-cloud` image.
+  Evidence: `deploy/saas/cloud.Dockerfile` builds with Rust 1.95 Bookworm and runs from Debian 12
+  distroless as UID 65532; a focused Docker ignore file excludes local secrets and build output.
+  The image built successfully and served `/healthz` (200) and `/readyz` (503, as intended) with
+  `--read-only --user 65532:65532`. Base tags are versioned but not digest-pinned; release pinning,
+  SBOM and provenance remain follow-up hardening.
 - [ ] **S1-014** Add `deploy/saas/compose.yaml` with gateway, web, cloud, PostgreSQL, Redis, MinIO and
   MinIO initialization.
 - [x] **S1-015** Add `deploy/saas/env.example` containing no working production secret.
