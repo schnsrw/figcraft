@@ -101,6 +101,14 @@ not events. The codec is `figcraft-cloud-storage::events`.
 | `plugins` | `id`, `tenant_id` when private, publisher, name, state |
 | `plugin_versions` | `id`, plugin, version, object, checksum, manifest, state |
 
+S3-002 implements `objects` (with `object_key`, `sha256`, `size_bytes`, `media_type`,
+`producer_version` and a `pending`/`verified`/`rejected`/`deleting`/`deleted` state),
+`object_references` (owner kinds including `retention_hold`) and `upload_reservations` (method
+`PUT` only, `reserved`/`completed`/`promoted`/`rejected`/`expired`). Constraints keep every object
+key under `tenants/${TENANT_ID}/` without `.`/`..` segments or empty segments, fix each staging key
+to `tenants/${TENANT_ID}/staging/${RESERVATION_ID}`, keep references and promoted objects in the
+reservation's tenant, and allow one live row per stored key.
+
 Objects are immutable after verification. Replacement creates a new object and changes references.
 Garbage collection removes an object only after no live reference, retention hold or pending job
 needs it.

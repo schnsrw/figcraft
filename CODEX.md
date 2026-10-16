@@ -55,7 +55,7 @@ the continuation point, a blocker or a major decision changes.
 - S1 is complete at 22/22 tasks and its cloud foundation gate passes. The cloud binary now serves
   `/api/v1/healthz` and diagnostic `/ws/v1/health` upgrades in the `api`, `relay` and `all` roles;
   `/readyz` checks transport startup and the SQLx schema-version range, not database-backed product
-  operations. S2-014 requires schema version `20261016000005`; Compose runs the one-shot
+  operations. S3-002 requires schema version `20261017000001`; Compose runs the one-shot
   migration job before cloud roles. A disposable smoke starts each role from one image, checks
   web/API/WebSocket routing and rejects unsafe production settings. S2 is in progress: S2-001
   selects SQLx 0.9 with embedded SQL migrations, PostgreSQL advisory locking and Rustls; S2-002 adds explicit
@@ -128,7 +128,9 @@ the continuation point, a blocker or a major decision changes.
    and metadata/document/external-mapping/idempotency/audit/snapshot repositories. Continue with
    S3 is in progress: S3-001 adds `figcraft-cloud-storage::objects` (`rusty-s3` signing over
    `reqwest`/Rustls/ring; see `docs/saas/object-store-client-decision.md`) and an object-store
-   readiness check. Continue with S3-002 (object, reference and upload-reservation migrations).
+   readiness check; S3-002 adds the object, reference and upload-reservation tables
+   (`20261017000001_objects.sql`). Continue with S3-003 (object metadata repository and checksum
+   verification).
    Open S2 follow-ups: a typed retryable/timeout error variant (timeouts and lost connections all
    map to `Database` today), expiry/takeover of stale pending idempotency keys, and snapshot
    restore in `DurableRoom::open` once S3 objects exist.

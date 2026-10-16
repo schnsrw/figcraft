@@ -1,4 +1,4 @@
--- Synthetic S2-004/S2-005/S2-009/S2-010 integration checks. All inserted rows are rolled back.
+-- Synthetic S2-004/S2-005/S2-009/S2-010/S3-002 integration checks. All inserted rows are rolled back.
 BEGIN;
 
 CREATE FUNCTION pg_temp.expect_fk(statement TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
@@ -133,5 +133,42 @@ SELECT pg_temp.expect_constraint($sql$INSERT INTO external_mappings (tenant_id, 
     ('20000000-0000-4000-8000-000000000001', 'host-a', 'folder', 'ext-2', '60000000-0000-4000-8000-000000000005')$sql$);
 SELECT pg_temp.expect_fk($sql$INSERT INTO external_mappings (tenant_id, system_id, resource_kind, external_id, internal_id) VALUES
     ('20000000-0000-4000-8000-000000000003', 'host-a', 'document', 'ext-3', '60000000-0000-4000-8000-000000000005')$sql$);
+
+-- S3-002: object keys stay under their tenant's prefix; references and reservations stay in-tenant.
+INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version) VALUES
+    ('a0000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', 'asset', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000001/assets/abababababababababababababababababababababababababababababababab', decode(repeat('ab', 32), 'hex'), 10, 'image/png', 'figcraft-cloud 0.6.0');
+SELECT pg_temp.expect_constraint($sql$INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version) VALUES
+    ('a0000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001', 'asset', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000001/assets/abababababababababababababababababababababababababababababababab', decode(repeat('ab', 32), 'hex'), 10, 'image/png', 'figcraft-cloud 0.6.0')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version) VALUES
+    ('a0000000-0000-4000-8000-000000000003', '20000000-0000-4000-8000-000000000001', 'asset', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000002/assets/x', decode(repeat('ab', 32), 'hex'), 10, 'image/png', 'figcraft-cloud 0.6.0')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version) VALUES
+    ('a0000000-0000-4000-8000-000000000004', '20000000-0000-4000-8000-000000000001', 'asset', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000001/assets/../20000000-0000-4000-8000-000000000002/x', decode(repeat('ab', 32), 'hex'), 10, 'image/png', 'figcraft-cloud 0.6.0')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version) VALUES
+    ('a0000000-0000-4000-8000-000000000005', '20000000-0000-4000-8000-000000000001', 'asset', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000001//x', decode(repeat('ab', 32), 'hex'), 10, 'image/png', 'figcraft-cloud 0.6.0')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version) VALUES
+    ('a0000000-0000-4000-8000-000000000006', '20000000-0000-4000-8000-000000000001', 'asset', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000001/assets/short', decode('ab', 'hex'), 10, 'image/png', 'figcraft-cloud 0.6.0')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version) VALUES
+    ('a0000000-0000-4000-8000-000000000007', '20000000-0000-4000-8000-000000000001', 'asset', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000001/assets/empty', decode(repeat('ab', 32), 'hex'), 0, 'image/png', 'figcraft-cloud 0.6.0')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version) VALUES
+    ('a0000000-0000-4000-8000-000000000008', '20000000-0000-4000-8000-000000000001', 'script', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000001/assets/kind', decode(repeat('ab', 32), 'hex'), 10, 'image/png', 'figcraft-cloud 0.6.0')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO objects (id, tenant_id, kind, bucket, object_key, sha256, size_bytes, media_type, producer_version, state) VALUES
+    ('a0000000-0000-4000-8000-000000000009', '20000000-0000-4000-8000-000000000001', 'asset', 'figcraft', 'tenants/20000000-0000-4000-8000-000000000001/assets/verified', decode(repeat('ab', 32), 'hex'), 10, 'image/png', 'figcraft-cloud 0.6.0', 'verified')$sql$);
+INSERT INTO object_references (tenant_id, object_id, owner_kind, owner_id) VALUES
+    ('20000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001', 'document', '60000000-0000-4000-8000-000000000001');
+SELECT pg_temp.expect_fk($sql$INSERT INTO object_references (tenant_id, object_id, owner_kind, owner_id) VALUES
+    ('20000000-0000-4000-8000-000000000002', 'a0000000-0000-4000-8000-000000000001', 'document', '60000000-0000-4000-8000-000000000001')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO object_references (tenant_id, object_id, owner_kind, owner_id) VALUES
+    ('20000000-0000-4000-8000-000000000001', 'a0000000-0000-4000-8000-000000000001', 'folder', '60000000-0000-4000-8000-000000000001')$sql$);
+INSERT INTO upload_reservations (id, tenant_id, principal_id, kind, staging_key, expected_sha256, expected_size, media_type, expires_at) VALUES
+    ('b0000000-0000-4000-8000-000000000001', '20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'asset', 'tenants/20000000-0000-4000-8000-000000000001/staging/b0000000-0000-4000-8000-000000000001', decode(repeat('ab', 32), 'hex'), 10, 'image/png', now() + interval '15 minutes');
+SELECT pg_temp.expect_constraint($sql$INSERT INTO upload_reservations (id, tenant_id, principal_id, kind, staging_key, expected_sha256, expected_size, media_type, expires_at) VALUES
+    ('b0000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'asset', 'tenants/20000000-0000-4000-8000-000000000002/staging/b0000000-0000-4000-8000-000000000002', decode(repeat('ab', 32), 'hex'), 10, 'image/png', now() + interval '15 minutes')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO upload_reservations (id, tenant_id, principal_id, kind, staging_key, expected_sha256, expected_size, media_type, expires_at, method) VALUES
+    ('b0000000-0000-4000-8000-000000000003', '20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'asset', 'tenants/20000000-0000-4000-8000-000000000001/staging/b0000000-0000-4000-8000-000000000003', decode(repeat('ab', 32), 'hex'), 10, 'image/png', now() + interval '15 minutes', 'GET')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO upload_reservations (id, tenant_id, principal_id, kind, staging_key, expected_sha256, expected_size, media_type, expires_at) VALUES
+    ('b0000000-0000-4000-8000-000000000004', '20000000-0000-4000-8000-000000000001', '10000000-0000-4000-8000-000000000001', 'asset', 'tenants/20000000-0000-4000-8000-000000000001/staging/b0000000-0000-4000-8000-000000000004', decode(repeat('ab', 32), 'hex'), 10, 'image/png', now() - interval '1 minute')$sql$);
+SELECT pg_temp.expect_constraint($sql$UPDATE upload_reservations SET state = 'promoted', completed_at = now() WHERE id = 'b0000000-0000-4000-8000-000000000001'$sql$);
+SELECT pg_temp.expect_fk($sql$UPDATE upload_reservations SET state = 'promoted', completed_at = now(), object_id = 'a0000000-0000-4000-8000-0000000000ff' WHERE id = 'b0000000-0000-4000-8000-000000000001'$sql$);
+UPDATE upload_reservations SET state = 'promoted', completed_at = now(), object_id = 'a0000000-0000-4000-8000-000000000001' WHERE id = 'b0000000-0000-4000-8000-000000000001';
 
 ROLLBACK;

@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (1/20) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (2/20) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -20,7 +20,7 @@ the same commit as the completed task.
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
-| S3 Object storage and migration | in progress | 1 / 20 | Verified object storage and repeatable migration |
+| S3 Object storage and migration | in progress | 2 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -529,7 +529,20 @@ the same commit as the completed task.
   redaction and an unreachable endpoint; the SeaweedFS probe in the Compose smoke distinguishes
   success, a wrong secret or key (`Unauthorized`), a missing bucket (`BucketMissing`) and a closed
   port (`Unreachable`).
-- [ ] **S3-002** Create object, reference and upload-reservation migrations.
+- [x] **S3-002** Create object, reference and upload-reservation migrations.
+  Evidence: `20261017000001_objects.sql` adds `objects`, `object_references` and
+  `upload_reservations` and advances readiness to that version. Constraints, not application code,
+  keep every object key under its tenant's `tenants/<id>/` prefix with no `.`, `..` or empty
+  segments, require a 32-byte SHA-256, a positive size and bounded kind, media type, producer
+  version and state, require `verified_at` for verified objects and `deleted_at` exactly for
+  `deleting`/`deleted`, and allow one live row per `(bucket, object_key)`. References and promoted
+  reservations use composite `(tenant_id, object_id)` foreign keys; a reservation's staging key is
+  fixed to `tenants/<tenant>/staging/<reservation>`, its method to `PUT`, its expiry after
+  creation, and `promoted` requires an object. Runtime grants cover the three tables (the role
+  preflight checks every table). `schema-preflight.sql` proves cross-tenant keys, traversal, empty
+  segments, short digests, empty objects, unknown kinds, unverified `verified` rows, duplicate live
+  keys, cross-tenant references, a foreign staging key, a non-`PUT` method, past expiry and
+  object-less or unknown-object promotion are refused; the upgrade probe covers the new version.
 - [ ] **S3-003** Implement tenant-scoped immutable object metadata and checksum verification.
 - [ ] **S3-004** Implement staging upload reservations with method, key, size, type and expiry.
 - [ ] **S3-005** Implement upload completion, read-back verification and promotion.
@@ -937,3 +950,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S2-018: added `DurableRoom`, committing accepted batches under the fencing token before confirming or broadcasting them and reopening rooms by fenced takeover plus checksum-verified replay. S2 reaches 20/21. |
 | 2026-10-17 | S2-020/S2-GATE: added connection-kill, lock-wait, lost-acknowledgement, timeout, idempotency-boundary and room-level failure injection; the end-to-end create/edit/restart/restore gate probe; and a previous-schema upgrade probe. S2 complete (21/21) and its gate passes. |
 | 2026-10-17 | S3-001: chose `rusty-s3` + `reqwest` (Rustls/ring) for S3-compatible storage, added the validated object-store client and a signed `HeadBucket` readiness check. S3 reaches 1/20. |
+| 2026-10-17 | S3-002: added object, object-reference and upload-reservation tables with tenant-prefix key constraints; readiness advanced to schema version 20261017000001. S3 reaches 2/20. |
