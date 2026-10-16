@@ -9,6 +9,7 @@ pub mod bucket_admin;
 pub mod document_snapshots;
 pub mod downloads;
 pub mod events;
+pub mod exports;
 pub mod external_mappings;
 pub mod idempotency;
 pub mod legacy_scan;
