@@ -22,10 +22,12 @@
 //! tenant fails verification even though its bytes are intact. The fencing token and actor are
 //! provenance checked by the append transaction (S2-015), not part of the event's content.
 
-use figcraft_cloud_domain::{CloudDocumentId, TenantId};
+use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId};
 use figcraft_collab::Accepted;
 use figcraft_collab::message;
 use sha2::{Digest, Sha256};
+
+use crate::TenantTransaction;
 
 /// Largest stored payload, matching the `document_events.payload` `CHECK` constraint. It is
 /// smaller than the collaboration protocol's message limit, so the relay must refuse a larger
@@ -129,6 +131,125 @@ fn check_payload_size(payload: &[u8]) -> Result<(), EventCodecError> {
         return Err(EventCodecError::PayloadSize);
     }
     Ok(())
+}
+
+/// Most batches one append may write, keeping a single transaction's work bounded.
+pub const MAX_APPEND_BATCHES: usize = 1024;
+
+/// Fixed, non-leaking categories for event repository failures.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EventRepositoryError {
+    /// The request itself is unusable: no batches, too many, or a batch that cannot be encoded.
+    InvalidInput,
+    /// No such document in this tenant.
+    NotFound,
+    /// The document exists but is not `active`, so it cannot accept edits.
+    InvalidState,
+    /// The batches do not continue the document's committed sequence. `current` is the committed
+    /// sequence the caller must reconcile from.
+    SequenceConflict {
+        current: i64,
+    },
+    Conflict,
+    Constraint,
+    Database,
+}
+
+impl std::fmt::Display for EventRepositoryError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "document event repository error: {self:?}")
+    }
+}
+
+impl std::error::Error for EventRepositoryError {}
+
+fn event_database_error(error: sqlx::Error) -> EventRepositoryError {
+    match error.as_database_error().and_then(|database| database.code()).as_deref() {
+        Some("23505") => EventRepositoryError::Conflict,
+        Some("23503" | "23514") => EventRepositoryError::Constraint,
+        _ => EventRepositoryError::Database,
+    }
+}
+
+/// The committed sequence range one append wrote, inclusive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Appended {
+    pub first_seq: i64,
+    pub last_seq: i64,
+}
+
+/// Append accepted batches to a document's durable event log and advance its sequence.
+///
+/// The document row is locked (`FOR UPDATE`) for the rest of the caller's transaction, so
+/// concurrent appends to one document serialize. `batches` must continue the committed sequence
+/// exactly (`current_seq + 1`, `+ 2`, ...); anything else is `SequenceConflict` carrying the
+/// committed sequence, and nothing is written. The caller confirms the batches only after
+/// committing the transaction.
+pub async fn append_events(
+    transaction: &mut TenantTransaction<'_>,
+    document_id: CloudDocumentId,
+    fencing_token: i64,
+    actor: PrincipalId,
+    batches: &[Accepted],
+) -> Result<Appended, EventRepositoryError> {
+    if batches.is_empty() || batches.len() > MAX_APPEND_BATCHES {
+        return Err(EventRepositoryError::InvalidInput);
+    }
+    let tenant_id = transaction.tenant_id();
+    let encoded = batches
+        .iter()
+        .map(|batch| encode_event(tenant_id, document_id, batch))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| EventRepositoryError::InvalidInput)?;
+
+    let row: Option<(i64, String)> =
+        sqlx::query_as("SELECT current_seq, state FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE")
+            .bind(tenant_id.to_string())
+            .bind(document_id.to_string())
+            .fetch_optional(transaction.connection())
+            .await
+            .map_err(event_database_error)?;
+    let Some((current, state)) = row else {
+        return Err(EventRepositoryError::NotFound);
+    };
+    if state != "active" {
+        return Err(EventRepositoryError::InvalidState);
+    }
+    let consecutive = encoded.iter().zip(1_i64..).all(|(event, offset)| current.checked_add(offset) == Some(event.seq));
+    let (Some(first), Some(last)) = (encoded.first(), encoded.last()) else {
+        return Err(EventRepositoryError::InvalidInput);
+    };
+    if !consecutive {
+        return Err(EventRepositoryError::SequenceConflict { current });
+    }
+    let appended = Appended { first_seq: first.seq, last_seq: last.seq };
+
+    let seqs: Vec<i64> = encoded.iter().map(|event| event.seq).collect();
+    let checksums: Vec<Vec<u8>> = encoded.iter().map(|event| event.checksum.to_vec()).collect();
+    let payloads: Vec<Vec<u8>> = encoded.into_iter().map(|event| event.payload).collect();
+    sqlx::query(
+        "INSERT INTO document_events (tenant_id, document_id, seq, fencing_token, payload, checksum, actor_principal_id) \
+         SELECT $1::uuid, $2::uuid, event.seq, $3, event.payload, event.checksum, $4::uuid \
+         FROM UNNEST($5::bigint[], $6::bytea[], $7::bytea[]) AS event (seq, payload, checksum)",
+    )
+    .bind(tenant_id.to_string())
+    .bind(document_id.to_string())
+    .bind(fencing_token)
+    .bind(actor.to_string())
+    .bind(seqs)
+    .bind(payloads)
+    .bind(checksums)
+    .execute(transaction.connection())
+    .await
+    .map_err(event_database_error)?;
+    sqlx::query("UPDATE documents SET current_seq = $3, updated_at = now() WHERE tenant_id = $1::uuid AND id = $2::uuid")
+        .bind(tenant_id.to_string())
+        .bind(document_id.to_string())
+        .bind(appended.last_seq)
+        .execute(transaction.connection())
+        .await
+        .map_err(event_database_error)?;
+    Ok(appended)
 }
 
 #[cfg(test)]

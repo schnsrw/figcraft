@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (14/21) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 in progress (15/21) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 14 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 15 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -336,7 +336,19 @@ the same commit as the completed task.
   bounds, oversize payloads, checksummed garbage and a mutation sweep. The format is documented in
   `data-tenancy-integration.md`. Client-id issue and refusals stay session state, not events. No
   migration was needed.
-- [ ] **S2-014** Implement atomic sequence allocation with unique `(tenant, document, seq)`.
+- [x] **S2-014** Implement atomic sequence allocation with unique `(tenant, document, seq)`.
+  Evidence: `figcraft-cloud-storage::events::append_events` locks the tenant's document row
+  `FOR UPDATE`, requires the batches to continue the committed sequence exactly
+  (`current_seq + 1`, `+ 2`, ...), inserts them in one `UNNEST` statement under the existing
+  `(tenant_id, document_id, seq)` primary key and advances `documents.current_seq` in the same
+  transaction. Gaps, repeats, rewinds and reordering return `SequenceConflict { current }` before
+  anything is written; empty or oversized appends (over 1,024 batches) and unencodable batches are
+  `InvalidInput`; a non-`active` document is `InvalidState`; another tenant's document is
+  `NotFound`. `20261016000005_event_sequencing.sql` adds a trigger refusing any decrease of
+  `current_seq` or `fencing_token` whatever path updates the row, and advances readiness to that
+  version. The disposable PostgreSQL integration probe covers consecutive multi-batch appends,
+  every conflict shape, archived and missing documents, cross-tenant invisibility and both trigger
+  rewinds under the limited runtime role.
 - [ ] **S2-015** Implement append transaction that validates current fencing token.
 - [ ] **S2-016** Implement bounded event replay from a requested sequence.
 - [x] **S2-017** Implement snapshot metadata registration without object bytes.
@@ -772,3 +784,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S2-010/S2-011/S2-012/S2-017: added external mapping, idempotency-key, append-only audit and snapshot metadata repositories in parallel (each in its own new module/test/fixture files, with the coordinating session wiring `lib.rs` and the Compose smoke script afterward); `20261016000004_external_mappings.sql` advanced readiness to version 20261016000004. S2 reaches 13/21. |
 | 2026-10-17 | S2-010 fix: granted the runtime role access to `external_mappings` (its repository probe failed with a permission error in the full Compose smoke); `role-preflight.sql` now requires migrator ownership and runtime `SELECT` on every public table, so a future table missing from the grant list fails the smoke. |
 | 2026-10-17 | S2-013: defined durable event payloads as the existing collaboration `Accepted` wire form with a domain-separated SHA-256 checksum bound to tenant, document and sequence. S2 reaches 14/21. |
+| 2026-10-17 | S2-014: added the locked, gap-free event append and a trigger keeping document sequence and fencing token monotonic; readiness advanced to schema version 20261016000005. S2 reaches 15/21. |
