@@ -21,9 +21,27 @@
 //! never writes, renames or locks anything under the legacy root. Errors are fixed categories;
 //! no path, driver or store message is carried.
 //!
-//! Libraries, links and plugins are not imported yet: [`verify_import`] lists them as not imported,
-//! which blocks cutover (see `docs/saas/filesystem-migration-report.md`, "Import and cutover
-//! verification").
+//! After a document's stages, [`import_plan`] imports its planned **library files** (one
+//! transaction each): the bytes are read bounded, validated as a `.figcraft` archive, and stored
+//! under the plan's key with the legacy version number (`library-<n>.bin` becomes version `n`).
+//! `libraries::publish_library_version` always takes the next version number and a random object
+//! id, so this module keeps a narrow import path of its own: a `libraries` row with the plan's
+//! deterministic id (sourced from the imported document), the planned object registered and
+//! verified, a `library_versions` row with a derived id and a `library_version` reference. No
+//! `external_mappings` row is written for libraries or plugins: the table's `resource_kind` check
+//! admits only tenants, workspaces, projects, documents and principals, and every library and
+//! plugin id is derived from the legacy id anyway.
+//!
+//! **Plugin bundles** are imported through `plugin_store::install_plugin_version` (which validates
+//! the bundle and reads its manifest). The legacy index has no publisher, so every imported
+//! plugin is published by [`IMPORT_PUBLISHER`] under its legacy id as its name. The `plugins` row
+//! is created first with the plan's deterministic id, so the store finds it by name and the bundle
+//! lands at the planned key.
+//! Plugins run only on a full run (no [`ImportOptions::stop_after`]).
+//!
+//! Share links are not imported: they need the share-token tables of S4-005. [`verify_import`]
+//! lists them as not imported, which blocks cutover (see
+//! `docs/saas/filesystem-migration-report.md`, "Import and cutover verification").
 
 use std::fmt;
 use std::fs::{self, File};
@@ -39,12 +57,18 @@ use sqlx::PgPool;
 
 use crate::events::{EventRepositoryError, MAX_APPEND_BATCHES, append_events, claim_sequencer};
 use crate::legacy_scan::ScanLimits;
-use crate::migration_plan::{DocumentPlan, LEGACY_SYSTEM_ID, MigrationPlan, PLAN_FORMAT_VERSION, PlanBlocker};
+use crate::libraries::LibraryState;
+use crate::migration_plan::{
+    DocumentPlan, LEGACY_SYSTEM_ID, MigrationPlan, PLAN_FORMAT_VERSION, PlanBlocker, PlannedObject, PlannedObjectKind, PluginPlan, derived_id,
+};
 use crate::object_metadata::{
     NewObject, ObjectKind, ObjectRepositoryError, ObjectState, Verification, get_object, keys, register_object, verify_object,
 };
 use crate::object_references::{OwnerKind, add_reference};
 use crate::objects::{ObjectStore, ObjectStoreError, valid_key};
+use crate::plugin_store::{PluginName, PluginState, PluginStoreError, PluginVersionState, valid_plugin_name};
+use crate::uploads::{MAX_LIBRARY_BYTES, MAX_PLUGIN_BYTES};
+use crate::validation::{Budgets, MEDIA_FIGCRAFT, validate};
 use crate::{TenantTransaction, begin_tenant_transaction};
 
 /// `producer_version` recorded on objects this import writes.
@@ -53,6 +77,8 @@ pub const PRODUCER_VERSION: &str = "figcraft-legacy-import/1";
 pub const MAX_IMPORT_CHUNK_BATCHES: usize = 256;
 /// Most legacy record bytes appended in one transaction (a chunk always holds at least one batch).
 pub const MAX_IMPORT_CHUNK_BYTES: u64 = 8 << 20;
+/// The `plugins.publisher` of every imported plugin (the legacy index records none).
+pub const IMPORT_PUBLISHER: &str = "figcraft-server-import";
 
 const SNAP_MAGIC: &[u8; 4] = b"FCSN";
 const LOG_MAGIC: &[u8; 4] = b"FCLG";
@@ -83,6 +109,15 @@ pub enum ImportError {
     SnapshotRejected,
     /// A sequencer claimed the document while the import was appending.
     StaleFence,
+    /// A library file is not a valid `.figcraft` archive, or is too large.
+    LibraryRejected,
+    /// The plugin store refused the bundle: invalid layout or manifest, a manifest version other
+    /// than the indexed one, or a manifest id that differs from the plugin's other versions.
+    PluginRejected,
+    /// A stored library or plugin object was rejected on verification.
+    ObjectRejected,
+    /// The library's document did not import in this run, so its library was not attempted.
+    DocumentNotImported,
     Database,
     Store(ObjectStoreError),
 }
@@ -122,6 +157,8 @@ pub enum ImportStage {
     Mapping,
     Snapshot,
     Events,
+    /// The document's library files.
+    Libraries,
 }
 
 /// Operator choices for one run.
@@ -170,19 +207,46 @@ pub struct DocumentImport {
     pub result: Result<ImportOutcome, ImportError>,
 }
 
+/// One planned library file's result inside [`PlanImport`]. `Created` means this run wrote the
+/// version row; `AlreadyComplete` means it was in place and nothing was written.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LibraryImport {
+    pub legacy_document: String,
+    /// Legacy path (`files/<id>/library-<n>.bin`).
+    pub source: String,
+    pub library_id: Uuid,
+    pub version: u64,
+    pub result: Result<ImportStatus, ImportError>,
+}
+
+/// One planned plugin bundle's result inside [`PlanImport`]; statuses as for [`LibraryImport`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PluginImport {
+    pub legacy_id: String,
+    pub version: String,
+    pub plugin_id: Uuid,
+    pub result: Result<ImportStatus, ImportError>,
+}
+
 /// The result of [`import_plan`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PlanImport {
     pub documents: Vec<DocumentImport>,
+    /// Library files of the planned documents (none when `stop_after` stops before libraries).
+    pub libraries: Vec<LibraryImport>,
+    /// Plugin bundles (only on a full run).
+    pub plugins: Vec<PluginImport>,
     /// Legacy ids the plan excluded, which were not touched.
     pub skipped: Vec<String>,
 }
 
 impl PlanImport {
-    /// Whether every planned document imported.
+    /// Whether every planned document, library file and plugin attempted imported.
     #[must_use]
     pub fn all_succeeded(&self) -> bool {
         self.documents.iter().all(|document| document.result.is_ok())
+            && self.libraries.iter().all(|library| library.result.is_ok())
+            && self.plugins.iter().all(|plugin| plugin.result.is_ok())
     }
 }
 
@@ -215,11 +279,43 @@ pub async fn import_plan(
 ) -> Result<PlanImport, ImportError> {
     check_plan(plan, store, options)?;
     let mut documents = Vec::with_capacity(plan.documents.len());
+    let mut libraries = Vec::new();
+    let with_libraries = options.stop_after.is_none_or(|stage| stage >= ImportStage::Libraries);
     for entry in &plan.documents {
         let result = import_document(pool, store, plan, entry, root, limits, options).await;
+        if with_libraries {
+            for planned in &entry.libraries {
+                let identity = library_identity(plan, entry, planned);
+                let (library_id, version) = identity.as_ref().map_or((Uuid::nil(), 0), |identity| (identity.library_id, identity.version));
+                let result = match (&result, identity) {
+                    (Err(_), _) => Err(ImportError::DocumentNotImported),
+                    (Ok(_), Err(error)) => Err(error),
+                    (Ok(_), Ok(identity)) => import_library(pool, store, plan, entry, planned, &identity, root).await,
+                };
+                libraries.push(LibraryImport {
+                    legacy_document: entry.legacy_id.clone(),
+                    source: planned.source.clone(),
+                    library_id,
+                    version,
+                    result,
+                });
+            }
+        }
         documents.push(DocumentImport { legacy_id: entry.legacy_id.clone(), result });
     }
-    Ok(PlanImport { documents, skipped: plan.excluded.iter().map(|excluded| excluded.legacy_id.clone()).collect() })
+    let mut plugins = Vec::new();
+    if options.stop_after.is_none() {
+        for planned in &plan.plugins {
+            let result = import_plugin(pool, store, plan, planned, root).await;
+            plugins.push(PluginImport {
+                legacy_id: planned.legacy_id.clone(),
+                version: planned.version.clone(),
+                plugin_id: planned.plugin_id,
+                result,
+            });
+        }
+    }
+    Ok(PlanImport { documents, libraries, plugins, skipped: plan.excluded.iter().map(|excluded| excluded.legacy_id.clone()).collect() })
 }
 
 /// The legacy snapshot body and what its header and decoding say.
@@ -478,22 +574,11 @@ pub async fn import_document(
     // Stage 2: the external mapping.
     let mapping = &entry.external_mapping;
     let mut tx = begin(pool, plan).await?;
-    match crate::external_mappings::get_external_mapping(&mut tx, LEGACY_SYSTEM_ID, &mapping.resource_kind, &mapping.external_id).await.map_err(db)? {
-        Some(existing) if existing.internal_id == document_id.as_uuid() => tx.rollback().await.map_err(db)?,
-        Some(_) => return Err(ImportError::Diverged),
-        None => {
-            crate::external_mappings::create_external_mapping(
-                &mut tx,
-                LEGACY_SYSTEM_ID,
-                &mapping.resource_kind,
-                &mapping.external_id,
-                document_id.as_uuid(),
-            )
-            .await
-            .map_err(db)?;
-            tx.commit().await.map_err(db)?;
-            outcome.mapping_created = true;
-        }
+    if ensure_mapping(&mut tx, &mapping.resource_kind, &mapping.external_id, document_id.as_uuid()).await? {
+        tx.commit().await.map_err(db)?;
+        outcome.mapping_created = true;
+    } else {
+        tx.rollback().await.map_err(db)?;
     }
     if stop(ImportStage::Mapping, &mut outcome) {
         return Ok(finish(outcome));
@@ -544,6 +629,19 @@ pub async fn import_document(
     }
     stop(ImportStage::Events, &mut outcome);
     Ok(finish(outcome))
+}
+
+/// Create the `figcraft-server` mapping `kind`/`external` to `internal` unless it exists; `true`
+/// when created. A mapping to another id is `Diverged`.
+async fn ensure_mapping(tx: &mut TenantTransaction<'_>, kind: &str, external: &str, internal: Uuid) -> Result<bool, ImportError> {
+    match crate::external_mappings::get_external_mapping(tx, LEGACY_SYSTEM_ID, kind, external).await.map_err(db)? {
+        Some(existing) if existing.internal_id == internal => Ok(false),
+        Some(_) => Err(ImportError::Diverged),
+        None => {
+            crate::external_mappings::create_external_mapping(tx, LEGACY_SYSTEM_ID, kind, external, internal).await.map_err(db)?;
+            Ok(true)
+        }
+    }
 }
 
 fn finish(mut outcome: ImportOutcome) -> ImportOutcome {
@@ -642,6 +740,332 @@ async fn import_snapshot(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Library files and plugin bundles (S3-018 follow-up)
+// ---------------------------------------------------------------------------------------------
+
+/// The identifiers one planned library file imports under, re-derived from the plan entry.
+pub(crate) struct LibraryIdentity {
+    pub(crate) library_id: Uuid,
+    pub(crate) version: u64,
+    pub(crate) version_id: Uuid,
+}
+
+/// Bytes of a legacy library file or plugin bundle, their digest and the key they are stored at.
+pub(crate) struct LegacyBlob {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) sha256: [u8; 32],
+    pub(crate) object_key: String,
+}
+
+/// Re-derive `planned`'s library id, version and version-row id the way the planner did, and
+/// refuse an entry whose source, kind, key layout or object id does not match (a hand-edited plan
+/// cannot point the import outside `files/<id>/`).
+pub(crate) fn library_identity(plan: &MigrationPlan, entry: &DocumentPlan, planned: &PlannedObject) -> Result<LibraryIdentity, ImportError> {
+    let legacy = entry.legacy_id.as_str();
+    if !valid_legacy_id(legacy) || planned.kind != PlannedObjectKind::Library {
+        return Err(ImportError::InvalidPlanEntry);
+    }
+    let digits = planned
+        .source
+        .strip_prefix("files/")
+        .and_then(|rest| rest.strip_prefix(legacy))
+        .and_then(|rest| rest.strip_prefix("/library-"))
+        .and_then(|rest| rest.strip_suffix(".bin"))
+        .ok_or(ImportError::InvalidPlanEntry)?;
+    if digits.is_empty() || digits.len() > 19 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(ImportError::InvalidPlanEntry);
+    }
+    let version: u64 = digits.parse().map_err(|_| ImportError::InvalidPlanEntry)?;
+    if version == 0 || i64::try_from(version).is_err() {
+        return Err(ImportError::InvalidPlanEntry);
+    }
+    let tenant = plan.target.tenant_id;
+    let version_text = version.to_string();
+    let library_id = derived_id(tenant, &["library", legacy]);
+    let expected_prefix = format!("tenants/{tenant}/libraries/{library_id}/{version}-");
+    if planned.key_prefix != expected_prefix
+        || planned.key_suffix != ".figcraft"
+        || planned.id != derived_id(tenant, &["library_object", legacy, &version_text])
+        || planned.bucket != plan.target.bucket
+    {
+        return Err(ImportError::InvalidPlanEntry);
+    }
+    Ok(LibraryIdentity { library_id, version, version_id: derived_id(tenant, &["library_version", legacy, &version_text]) })
+}
+
+/// Re-read a planned library file, bounded, and check it against the plan.
+pub(crate) fn read_library(
+    plan: &MigrationPlan,
+    planned: &PlannedObject,
+    identity: &LibraryIdentity,
+    root: &Path,
+) -> Result<LegacyBlob, ImportError> {
+    let max = u64::try_from(MAX_LIBRARY_BYTES).unwrap_or(0);
+    if planned.size_bytes > max {
+        return Err(ImportError::LibraryRejected);
+    }
+    // `library_identity` checked `source` is `files/<valid id>/library-<digits>.bin`.
+    let bytes = read_bounded(&root.join(&planned.source), max)?.ok_or(ImportError::LegacyUnreadable)?;
+    if u64::try_from(bytes.len()).ok() != Some(planned.size_bytes) {
+        return Err(ImportError::LegacyChanged);
+    }
+    let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+    let object_key = keys::library(plan.target.tenant_id, identity.library_id, identity.version, &sha256);
+    if !valid_key(&object_key) || !object_key.starts_with(&planned.key_prefix) || !object_key.ends_with(&planned.key_suffix) {
+        return Err(ImportError::InvalidPlanEntry);
+    }
+    Ok(LegacyBlob { bytes, sha256, object_key })
+}
+
+/// The `libraries.name` of an imported library: the document's planned name when the library
+/// rules accept it, otherwise the legacy id.
+fn imported_library_name(entry: &DocumentPlan) -> &str {
+    let name = entry.document.name.trim();
+    let length = name.chars().count();
+    if (1..=crate::libraries::MAX_LIBRARY_NAME_CHARS).contains(&length) && !name.chars().any(char::is_control) { name } else { &entry.legacy_id }
+}
+
+/// The `library_versions` row at `(library, version)`: its id, object id and digest.
+async fn library_version_row(tx: &mut TenantTransaction<'_>, library: Uuid, version: i64) -> Result<Option<(String, String, Vec<u8>)>, ImportError> {
+    sqlx::query_as::<_, (String, String, Vec<u8>)>(
+        "SELECT id::text, object_id::text, sha256 FROM library_versions WHERE tenant_id = $1::uuid AND library_id = $2::uuid AND version = $3",
+    )
+    .bind(tx.tenant_id().to_string())
+    .bind(library.to_string())
+    .bind(version)
+    .fetch_optional(tx.connection())
+    .await
+    .map_err(db)
+}
+
+/// Import one planned library file of an imported document, in one transaction: the library row
+/// (plan id, sourced from the document), the object at the planned key and id, the
+/// version row with the legacy version number and its `library_version` reference.
+async fn import_library(
+    pool: &PgPool,
+    store: &ObjectStore,
+    plan: &MigrationPlan,
+    entry: &DocumentPlan,
+    planned: &PlannedObject,
+    identity: &LibraryIdentity,
+    root: &Path,
+) -> Result<ImportStatus, ImportError> {
+    if plan.target.bucket != store.bucket_name() {
+        return Err(ImportError::BucketMismatch);
+    }
+    let legacy = read_library(plan, planned, identity, root)?;
+    validate(MEDIA_FIGCRAFT, &legacy.bytes, &Budgets::default()).map_err(|_| ImportError::LibraryRejected)?;
+    let size = i64::try_from(legacy.bytes.len()).map_err(|_| ImportError::LibraryRejected)?;
+    let version = i64::try_from(identity.version).map_err(|_| ImportError::InvalidPlanEntry)?;
+    let document_id = entry.document.id;
+
+    let mut tx = begin(pool, plan).await?;
+    let mut wrote = false;
+    match crate::libraries::get_library(&mut tx, identity.library_id).await.map_err(db)? {
+        Some(library) => {
+            if library.state != LibraryState::Active || library.source_document_id != Some(document_id) || library.owning_team_id.is_some() {
+                return Err(ImportError::Diverged);
+            }
+        }
+        None => {
+            sqlx::query("INSERT INTO libraries (id, tenant_id, source_document_id, name) VALUES ($1::uuid, $2::uuid, $3::uuid, $4)")
+                .bind(identity.library_id.to_string())
+                .bind(tx.tenant_id().to_string())
+                .bind(document_id.to_string())
+                .bind(imported_library_name(entry))
+                .execute(tx.connection())
+                .await
+                .map_err(db)?;
+            wrote = true;
+        }
+    }
+
+    let object = get_object(&mut tx, planned.id).await.map_err(object_error)?;
+    if object.as_ref().is_some_and(|existing| {
+        existing.kind != ObjectKind::Library
+            || existing.sha256 != legacy.sha256
+            || existing.object_key != legacy.object_key
+            || existing.size_bytes != size
+    }) {
+        return Err(ImportError::LegacyChanged);
+    }
+    match library_version_row(&mut tx, identity.library_id, version).await? {
+        Some((id, object_id, sha256))
+            if id == identity.version_id.to_string() && object_id == planned.id.to_string() && sha256.as_slice() == legacy.sha256.as_slice() =>
+        {
+            // The version row is only ever committed with its verified object.
+            if !object.as_ref().is_some_and(|object| object.state == ObjectState::Verified) {
+                return Err(ImportError::ObjectRejected);
+            }
+            if wrote {
+                tx.commit().await.map_err(db)?;
+                return Ok(ImportStatus::Resumed);
+            }
+            tx.rollback().await.map_err(db)?;
+            return Ok(ImportStatus::AlreadyComplete);
+        }
+        Some(_) => return Err(ImportError::Diverged),
+        None => {}
+    }
+
+    match object.as_ref().map(|object| object.state) {
+        // Content-addressed, so a repeated upload after a crash writes identical bytes.
+        None | Some(ObjectState::Pending) => {
+            store.put_object(&legacy.object_key, legacy.bytes.clone(), MEDIA_FIGCRAFT).await.map_err(ImportError::Store)?;
+        }
+        Some(ObjectState::Verified) => {}
+        Some(_) => return Err(ImportError::ObjectRejected),
+    }
+    if object.is_none() {
+        let new = NewObject {
+            id: planned.id,
+            kind: ObjectKind::Library,
+            object_key: legacy.object_key.clone(),
+            sha256: legacy.sha256,
+            size_bytes: size,
+            media_type: MEDIA_FIGCRAFT.to_owned(),
+            producer_version: PRODUCER_VERSION.to_owned(),
+        };
+        register_object(&mut tx, store.bucket_name(), &new).await.map_err(object_error)?;
+    }
+    match verify_object(&mut tx, store, planned.id).await.map_err(object_error)? {
+        Some(Verification::Verified(_)) => {}
+        Some(Verification::Rejected(..)) => {
+            tx.commit().await.map_err(db)?;
+            return Err(ImportError::ObjectRejected);
+        }
+        None => return Err(ImportError::Database),
+    }
+    sqlx::query(concat!(
+        "INSERT INTO library_versions (id, tenant_id, library_id, version, object_id, sha256, published_by) ",
+        "VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5::uuid, $6, $7::uuid)"
+    ))
+    .bind(identity.version_id.to_string())
+    .bind(tx.tenant_id().to_string())
+    .bind(identity.library_id.to_string())
+    .bind(version)
+    .bind(planned.id.to_string())
+    .bind(legacy.sha256.as_slice())
+    .bind(plan.target.principal_id.to_string())
+    .execute(tx.connection())
+    .await
+    .map_err(db)?;
+    add_reference(&mut tx, planned.id, OwnerKind::LibraryVersion, identity.version_id).await.map_err(db)?;
+    tx.commit().await.map_err(db)?;
+    Ok(ImportStatus::Created)
+}
+
+fn plugin_error(error: PluginStoreError) -> ImportError {
+    match error {
+        PluginStoreError::InvalidBundle(_)
+        | PluginStoreError::InvalidManifest(_)
+        | PluginStoreError::VersionMismatch
+        | PluginStoreError::IdMismatch
+        | PluginStoreError::TooLarge
+        | PluginStoreError::InvalidPluginName
+        | PluginStoreError::InvalidVersion => ImportError::PluginRejected,
+        PluginStoreError::Conflict | PluginStoreError::InvalidState | PluginStoreError::ObjectConflict => ImportError::Diverged,
+        PluginStoreError::VerificationFailed => ImportError::ObjectRejected,
+        PluginStoreError::Store(store) => ImportError::Store(store),
+        _ => ImportError::Database,
+    }
+}
+
+fn lowercase_hex_digest(text: &str) -> bool {
+    text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+/// Check a plugin plan entry and re-read its bundle, bounded.
+pub(crate) fn read_plugin(plan: &MigrationPlan, planned: &PluginPlan, root: &Path) -> Result<LegacyBlob, ImportError> {
+    let tenant = plan.target.tenant_id;
+    let object = &planned.object;
+    let sha_hex = object.sha256.as_deref().filter(|sha| lowercase_hex_digest(sha)).ok_or(ImportError::InvalidPlanEntry)?;
+    if object.kind != PlannedObjectKind::Plugin
+        || object.source != format!("plugins/{sha_hex}.bin")
+        || object.bucket != plan.target.bucket
+        || !valid_plugin_name(&planned.legacy_id)
+        || !keys::plugin_version_valid(&planned.version)
+        || planned.plugin_id != derived_id(tenant, &["plugin", &planned.legacy_id])
+    {
+        return Err(ImportError::InvalidPlanEntry);
+    }
+    let max = u64::try_from(MAX_PLUGIN_BYTES).unwrap_or(0);
+    if object.size_bytes > max {
+        return Err(ImportError::PluginRejected);
+    }
+    let bytes = read_bounded(&root.join(&object.source), max)?.ok_or(ImportError::LegacyUnreadable)?;
+    let sha256: [u8; 32] = Sha256::digest(&bytes).into();
+    if u64::try_from(bytes.len()).ok() != Some(object.size_bytes) || crate::object_metadata::hex_digest(&sha256) != sha_hex {
+        return Err(ImportError::LegacyChanged);
+    }
+    let object_key = keys::plugin(tenant, planned.plugin_id, &planned.version, &sha256).ok_or(ImportError::InvalidPlanEntry)?;
+    if !valid_key(&object_key) || object.object_key.as_deref() != Some(object_key.as_str()) {
+        return Err(ImportError::InvalidPlanEntry);
+    }
+    Ok(LegacyBlob { bytes, sha256, object_key })
+}
+
+/// Import one planned plugin bundle in one transaction: the `plugins` row with the plan's id
+/// (publisher [`IMPORT_PUBLISHER`], name = legacy id), then
+/// `plugin_store::install_plugin_version`, which validates the bundle and stores its manifest.
+async fn import_plugin(
+    pool: &PgPool,
+    store: &ObjectStore,
+    plan: &MigrationPlan,
+    planned: &PluginPlan,
+    root: &Path,
+) -> Result<ImportStatus, ImportError> {
+    if plan.target.bucket != store.bucket_name() {
+        return Err(ImportError::BucketMismatch);
+    }
+    let legacy = read_plugin(plan, planned, root)?;
+    let name = PluginName { publisher: IMPORT_PUBLISHER, name: &planned.legacy_id };
+    let mut tx = begin(pool, plan).await?;
+    let mut wrote = false;
+    match crate::plugin_store::get_plugin(&mut tx, planned.plugin_id).await.map_err(plugin_error)? {
+        Some(plugin) => {
+            if plugin.publisher != IMPORT_PUBLISHER || plugin.name != planned.legacy_id || plugin.state != PluginState::Active {
+                return Err(ImportError::Diverged);
+            }
+        }
+        None => {
+            // Another live plugin with this name would take the bundle under a different id.
+            if crate::plugin_store::find_plugin(&mut tx, name).await.map_err(plugin_error)?.is_some() {
+                return Err(ImportError::Diverged);
+            }
+            sqlx::query("INSERT INTO plugins (id, tenant_id, publisher, name) VALUES ($1::uuid, $2::uuid, $3, $4)")
+                .bind(planned.plugin_id.to_string())
+                .bind(tx.tenant_id().to_string())
+                .bind(IMPORT_PUBLISHER)
+                .bind(&planned.legacy_id)
+                .execute(tx.connection())
+                .await
+                .map_err(db)?;
+            wrote = true;
+        }
+    }
+    if let Some(existing) = crate::plugin_store::get_manifest(&mut tx, planned.plugin_id, &planned.version).await.map_err(plugin_error)? {
+        if existing.version.sha256 != legacy.sha256 || existing.version.state != PluginVersionState::Verified {
+            return Err(ImportError::Diverged);
+        }
+        if wrote {
+            tx.commit().await.map_err(db)?;
+            return Ok(ImportStatus::Resumed);
+        }
+        tx.rollback().await.map_err(db)?;
+        return Ok(ImportStatus::AlreadyComplete);
+    }
+    let installed = crate::plugin_store::install_plugin_version(&mut tx, store, name, &planned.version, &legacy.bytes, PRODUCER_VERSION)
+        .await
+        .map_err(plugin_error)?;
+    if installed.plugin.id != planned.plugin_id || installed.object.object_key != legacy.object_key {
+        return Err(ImportError::Diverged);
+    }
+    tx.commit().await.map_err(db)?;
+    Ok(ImportStatus::Created)
+}
+
+// ---------------------------------------------------------------------------------------------
 // Cutover verification (S3-019)
 // ---------------------------------------------------------------------------------------------
 
@@ -681,6 +1105,20 @@ pub enum VerifyCode {
     ReplayCorrupt,
     /// Replay succeeded but yields other batches than the legacy log.
     ReplayMismatch,
+    /// No `libraries` row with the plan's id.
+    LibraryMissing,
+    /// The library is not active, has an owning team or another source document.
+    LibraryMismatch,
+    /// No `plugins` row with the plan's id.
+    PluginMissing,
+    /// The plugin has another publisher or name, or is not active.
+    PluginMismatch,
+    /// No library or plugin version row for the planned version.
+    VersionMissing,
+    /// The version row names another id, object or digest, or is not verified.
+    VersionMismatch,
+    /// The stored library or plugin bytes differ from the legacy file.
+    ContentMismatch,
 }
 
 /// One planned document's verification.
@@ -700,11 +1138,12 @@ pub struct DocumentVerification {
 pub enum NotImportedKind {
     /// A document the plan excluded.
     ExcludedDocument,
-    /// A document's share links (`links.json`).
+    /// A document's share links (`links.json`); never imported until the share-token tables of
+    /// S4-005 exist.
     Links,
-    /// A planned library file (library import is later work).
+    /// A planned library file that did not pass verification.
     Library,
-    /// A planned plugin bundle (plugin import is later work).
+    /// A planned plugin bundle that did not pass verification.
     Plugin,
     /// A library file or plugin the plan deferred.
     Deferred,
@@ -725,8 +1164,14 @@ pub struct NotImported {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ImportVerification {
     pub documents: Vec<DocumentVerification>,
+    /// Planned library files, in plan order.
+    #[serde(default)]
+    pub libraries: Vec<ResourceVerification>,
+    /// Planned plugin bundles, in plan order.
+    #[serde(default)]
+    pub plugins: Vec<ResourceVerification>,
     pub not_imported: Vec<NotImported>,
-    /// Every planned document passed and nothing was left behind.
+    /// Every planned document, library file and plugin passed and nothing was left behind.
     pub cutover_ready: bool,
 }
 
@@ -747,6 +1192,7 @@ pub async fn verify_import(
         return Err(ImportError::BucketMismatch);
     }
     let mut documents = Vec::with_capacity(plan.documents.len());
+    let mut libraries = Vec::new();
     let mut not_imported = Vec::new();
     for entry in &plan.documents {
         documents.push(verify_document(transaction, store, plan, entry, root, limits).await?);
@@ -759,12 +1205,16 @@ pub async fn verify_import(
             });
         }
         for library in &entry.libraries {
-            not_imported.push(NotImported {
-                kind: NotImportedKind::Library,
-                source: library.source.clone(),
-                legacy_document: Some(entry.legacy_id.clone()),
-                count: 1,
-            });
+            let verification = verify_library(transaction, store, plan, entry, library, root).await?;
+            if !verification.passed {
+                not_imported.push(NotImported {
+                    kind: NotImportedKind::Library,
+                    source: library.source.clone(),
+                    legacy_document: Some(entry.legacy_id.clone()),
+                    count: 1,
+                });
+            }
+            libraries.push(verification);
         }
     }
     for excluded in &plan.excluded {
@@ -775,8 +1225,13 @@ pub async fn verify_import(
             count: 1,
         });
     }
+    let mut plugins = Vec::with_capacity(plan.plugins.len());
     for plugin in &plan.plugins {
-        not_imported.push(NotImported { kind: NotImportedKind::Plugin, source: plugin.object.source.clone(), legacy_document: None, count: 1 });
+        let verification = verify_plugin(transaction, store, plan, plugin, root).await?;
+        if !verification.passed {
+            not_imported.push(NotImported { kind: NotImportedKind::Plugin, source: plugin.object.source.clone(), legacy_document: None, count: 1 });
+        }
+        plugins.push(verification);
     }
     for deferred in &plan.deferred {
         not_imported.push(NotImported {
@@ -786,8 +1241,174 @@ pub async fn verify_import(
             count: 1,
         });
     }
-    let cutover_ready = not_imported.is_empty() && documents.iter().all(|document| document.passed);
-    Ok(ImportVerification { documents, not_imported, cutover_ready })
+    let cutover_ready = not_imported.is_empty()
+        && documents.iter().all(|document| document.passed)
+        && libraries.iter().chain(&plugins).all(|resource| resource.passed);
+    Ok(ImportVerification { documents, libraries, plugins, not_imported, cutover_ready })
+}
+
+/// One planned library file's or plugin bundle's verification.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ResourceVerification {
+    /// `library` or `plugin`.
+    pub kind: NotImportedKind,
+    /// Legacy path.
+    pub source: String,
+    /// The library's document, or the plugin's legacy id.
+    pub legacy_id: String,
+    pub version: String,
+    pub passed: bool,
+    pub failures: Vec<VerifyCode>,
+}
+
+impl ResourceVerification {
+    fn new(kind: NotImportedKind, source: &str, legacy_id: &str, version: String, failures: std::collections::BTreeSet<VerifyCode>) -> Self {
+        let failures: Vec<VerifyCode> = failures.into_iter().collect();
+        Self { kind, source: source.to_owned(), legacy_id: legacy_id.to_owned(), version, passed: failures.is_empty(), failures }
+    }
+}
+
+fn legacy_failure(error: ImportError, failures: &mut std::collections::BTreeSet<VerifyCode>) -> Result<(), ImportError> {
+    match error {
+        ImportError::InvalidPlanEntry => return Err(error),
+        ImportError::LegacyUnreadable => failures.insert(VerifyCode::LegacyUnreadable),
+        _ => failures.insert(VerifyCode::LegacyChanged),
+    };
+    Ok(())
+}
+
+/// Check an object row, its stored bytes and (when re-read) the legacy bytes.
+async fn check_object(
+    store: &ObjectStore,
+    object: Option<crate::object_metadata::ObjectRecord>,
+    kind: ObjectKind,
+    key_ok: impl Fn(&str) -> bool,
+    size_bytes: u64,
+    legacy: Option<&LegacyBlob>,
+    failures: &mut std::collections::BTreeSet<VerifyCode>,
+) {
+    let Some(object) = object else {
+        failures.insert(VerifyCode::ObjectMissing);
+        return;
+    };
+    let shape_ok = object.kind == kind
+        && object.bucket == store.bucket_name()
+        && key_ok(&object.object_key)
+        && u64::try_from(object.size_bytes).ok() == Some(size_bytes)
+        && legacy.is_none_or(|legacy| legacy.object_key == object.object_key && legacy.sha256 == object.sha256);
+    if object.state != ObjectState::Verified || !shape_ok {
+        failures.insert(VerifyCode::ObjectNotVerified);
+    }
+    match store.get_object(&object.object_key, size_bytes).await {
+        Ok(bytes) => {
+            if <[u8; 32]>::from(Sha256::digest(&bytes)) != object.sha256 {
+                failures.insert(VerifyCode::ObjectBytesMismatch);
+            }
+            if legacy.is_some_and(|legacy| legacy.bytes != bytes) {
+                failures.insert(VerifyCode::ContentMismatch);
+            }
+        }
+        Err(ObjectStoreError::NotFound | ObjectStoreError::TooLarge) => {
+            failures.insert(VerifyCode::ObjectBytesMismatch);
+        }
+        Err(_) => {
+            failures.insert(VerifyCode::StoreUnavailable);
+        }
+    }
+}
+
+async fn verify_library(
+    tx: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    plan: &MigrationPlan,
+    entry: &DocumentPlan,
+    planned: &PlannedObject,
+    root: &Path,
+) -> Result<ResourceVerification, ImportError> {
+    let identity = library_identity(plan, entry, planned)?;
+    let mut failures = std::collections::BTreeSet::new();
+    let legacy = match read_library(plan, planned, &identity, root) {
+        Ok(legacy) => Some(legacy),
+        Err(error) => {
+            legacy_failure(error, &mut failures)?;
+            None
+        }
+    };
+    match crate::libraries::get_library(tx, identity.library_id).await.map_err(db)? {
+        None => {
+            failures.insert(VerifyCode::LibraryMissing);
+        }
+        Some(library) => {
+            if library.state != LibraryState::Active || library.source_document_id != Some(entry.document.id) || library.owning_team_id.is_some() {
+                failures.insert(VerifyCode::LibraryMismatch);
+            }
+        }
+    }
+    let version = i64::try_from(identity.version).map_err(|_| ImportError::InvalidPlanEntry)?;
+    match library_version_row(tx, identity.library_id, version).await? {
+        None => {
+            failures.insert(VerifyCode::VersionMissing);
+        }
+        Some((id, object_id, sha256)) => {
+            let same = id == identity.version_id.to_string()
+                && object_id == planned.id.to_string()
+                && legacy.as_ref().is_none_or(|legacy| sha256.as_slice() == legacy.sha256.as_slice());
+            if !same {
+                failures.insert(VerifyCode::VersionMismatch);
+            }
+        }
+    }
+    let object = get_object(tx, planned.id).await.map_err(object_error)?;
+    let key_ok = |key: &str| key.starts_with(&planned.key_prefix) && key.ends_with(&planned.key_suffix);
+    check_object(store, object, ObjectKind::Library, key_ok, planned.size_bytes, legacy.as_ref(), &mut failures).await;
+    Ok(ResourceVerification::new(NotImportedKind::Library, &planned.source, &entry.legacy_id, identity.version.to_string(), failures))
+}
+
+async fn verify_plugin(
+    tx: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    plan: &MigrationPlan,
+    planned: &PluginPlan,
+    root: &Path,
+) -> Result<ResourceVerification, ImportError> {
+    let mut failures = std::collections::BTreeSet::new();
+    let legacy = match read_plugin(plan, planned, root) {
+        Ok(legacy) => Some(legacy),
+        Err(error) => {
+            legacy_failure(error, &mut failures)?;
+            None
+        }
+    };
+    match crate::plugin_store::get_plugin(tx, planned.plugin_id).await.map_err(|_| ImportError::Database)? {
+        None => {
+            failures.insert(VerifyCode::PluginMissing);
+        }
+        Some(plugin) => {
+            if plugin.publisher != IMPORT_PUBLISHER || plugin.name != planned.legacy_id || plugin.state != PluginState::Active {
+                failures.insert(VerifyCode::PluginMismatch);
+            }
+        }
+    }
+    let planned_sha = planned.object.sha256.as_deref().unwrap_or_default();
+    match crate::plugin_store::get_manifest(tx, planned.plugin_id, &planned.version).await {
+        Ok(None) => {
+            failures.insert(VerifyCode::VersionMissing);
+        }
+        Ok(Some(stored)) => {
+            if stored.version.state != PluginVersionState::Verified || crate::object_metadata::hex_digest(&stored.version.sha256) != planned_sha {
+                failures.insert(VerifyCode::VersionMismatch);
+            }
+            let object = get_object(tx, stored.version.object_id).await.map_err(object_error)?;
+            let key_ok = |key: &str| planned.object.object_key.as_deref() == Some(key);
+            check_object(store, object, ObjectKind::Plugin, key_ok, planned.object.size_bytes, legacy.as_ref(), &mut failures).await;
+        }
+        Err(PluginStoreError::CorruptRow) => {
+            failures.insert(VerifyCode::VersionMismatch);
+        }
+        Err(PluginStoreError::InvalidVersion) => return Err(ImportError::InvalidPlanEntry),
+        Err(_) => return Err(ImportError::Database),
+    }
+    Ok(ResourceVerification::new(NotImportedKind::Plugin, &planned.object.source, &planned.legacy_id, planned.version.clone(), failures))
 }
 
 async fn verify_document(

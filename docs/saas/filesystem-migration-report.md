@@ -271,9 +271,52 @@ imports and crash rehearsal. Event rows carry `events.actor_principal_id` and th
 fencing token. Replay of an imported document starts at the snapshot sequence; there are no
 event rows at or below it.
 
-Not imported yet: library files, links (token hashes) and plugin bundles. Plugins need a
-publisher and a manifest, which the legacy index doesn't have. These are reported by cutover
-verification and block cutover until a later import covers them.
+#### Library files
+
+After a document imports, `import_plan` imports each planned `files/<id>/library-<n>.bin` in
+one transaction per file, and reports it in `libraries` (`created`, `resumed` or
+`already_complete`, or an error). A library whose document failed is `document_not_imported`;
+a run with `stop_after` before `libraries` skips them. The file is re-read bounded (at most
+`MAX_LIBRARY_BYTES`, never a link) and must still have the planned size, then is validated as a
+`.figcraft` archive (`library_rejected` otherwise). The legacy version number is kept:
+`library-3.bin` becomes version 3 even when versions 1 and 2 never existed.
+`libraries::publish_library_version` always takes `max + 1` and a random object id, so the import
+has a narrow path of its own that writes:
+
+- a `libraries` row with the plan's id (`derived_id(tenant, ["library", legacy id])`), active, no
+  owning team, `source_document_id` = the imported document, named after the document;
+- the object at the plan's id and key (`keys::library`), uploaded, registered and verified;
+- a `library_versions` row (`derived_id(tenant, ["library_version", legacy id, n])`,
+  `published_by` = the plan's principal) and its `library_version` object reference.
+
+A rerun finds the version row and writes nothing. A version row at that number with another id,
+object or digest, or a library row that is archived, team-owned or sourced from another
+document, is `diverged`. A plan entry whose source, key prefix or object id does not re-derive
+from the legacy id is `invalid_plan_entry`, so an edited plan can't read outside `files/<id>/`.
+
+No `external_mappings` rows are written for libraries or plugins: the table's `resource_kind`
+check admits only `tenant`, `workspace`, `project`, `document` and `principal`. Their ids are
+derived from the legacy ids, so the plan itself is the mapping. Recording them needs a migration
+that widens the check (deferred).
+
+#### Plugin bundles
+
+Plugins are imported on a full run (no `stop_after`) and reported in `plugins`. The legacy index
+has no publisher and no manifest, so every imported plugin is published by
+`figcraft-server-import` (`legacy_import::IMPORT_PUBLISHER`) under its legacy id as its name, and
+`plugin_store::install_plugin_version` reads and checks the manifest from the bundle. The import
+first creates the `plugins` row with the plan's id (`derived_id(tenant, ["plugin", legacy id])`);
+the store then finds that row by name, so the bundle lands at the plan's `object_key`. The object row's id is the store's own, not the
+plan's `object.id`. The bundle must still have the indexed size and SHA-256 (`legacy_changed`
+otherwise). A bundle the store refuses (layout, manifest, a manifest `version` other than the
+indexed one, a manifest `id` other than the plugin's other versions) is `plugin_rejected`. A live
+plugin with that publisher and name under another id is `diverged`. A rerun finds the verified
+version with the same digest and writes nothing.
+
+#### Not imported
+
+Share links are not imported. They need the share-token tables of S4-005; until then each
+document's `links` stay in `not_imported` and block cutover.
 
 ### Cutover verification
 
@@ -298,9 +341,22 @@ planned document it reports `passed` and a sorted list of fixed `failures` codes
 - `replay_corrupt`: `read_events` found a bad checksum, bad decoding or a gap.
 - `replay_mismatch`: the replayed batches differ from the log's replayable batches.
 
-`not_imported` lists, by kind, what the import does not carry yet: each document's `links`,
-planned `library` files and `plugin` bundles, `deferred` items and `excluded_document`s.
-`cutover_ready` is true only when every document passed and `not_imported` is empty.
+`libraries` and `plugins` hold one entry per planned library file and plugin bundle, each with
+`passed` and sorted `failures`. They reuse `legacy_unreadable`, `legacy_changed`, `object_missing`,
+`object_not_verified`, `object_bytes_mismatch` and `store_unavailable`, and add:
+
+- `library_missing`, `library_mismatch`: no library row with the plan's id, or one that is not
+  active, is team-owned or names another source document.
+- `plugin_missing`, `plugin_mismatch`: no plugin row with the plan's id, or another publisher,
+  name or a non-active state.
+- `version_missing`, `version_mismatch`: no version row for the planned version, or one with
+  another id, object or digest, or (plugins) not `verified`.
+- `content_mismatch`: the stored bytes differ from the legacy file.
+
+`not_imported` lists, by kind, what the import does not carry: each document's `links`, the
+`library` files and `plugin` bundles that did not pass verification, `deferred` items and
+`excluded_document`s. A verified library or plugin is not listed. `cutover_ready` is true only
+when every document, library file and plugin passed and `not_imported` is empty.
 
 Probe: `crates/cloud-storage/tests/legacy_import.rs` with `deploy/saas/legacy-import-preflight.sql`
 and `legacy-import-cleanup.sql` (fixture tenant `ad000000-…-000000000001`).

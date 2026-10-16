@@ -381,3 +381,172 @@ async fn verification_passes_a_clean_import_and_detects_tampering() -> TestResul
     pool.close().await;
     Ok(())
 }
+
+/// A `.figcraft`-shaped library archive, unique to `nonce`.
+fn library_archive(nonce: &str) -> Vec<u8> {
+    use std::io::Write;
+    let mut buf = std::io::Cursor::new(Vec::new());
+    let mut z = zip::ZipWriter::new(&mut buf);
+    let deflated = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    z.start_file("document.json", deflated).unwrap();
+    z.write_all(format!(r#"{{"format":"figcraft","version":1,"pages":[{{"name":"{nonce}","children":[]}}]}}"#).as_bytes()).unwrap();
+    z.start_file("library/manifest.json", deflated).unwrap();
+    z.write_all(br#"{"id":"lib","name":"Library"}"#).unwrap();
+    z.finish().unwrap();
+    buf.into_inner()
+}
+
+/// A plugin bundle in the `FCPLUGB1` layout.
+fn plugin_bundle(manifest: &str) -> Vec<u8> {
+    let mut out = b"FCPLUGB1".to_vec();
+    for part in [manifest.as_bytes(), b"\0asm\x01\0\0\0".as_slice()] {
+        out.extend(u32::try_from(part.len()).unwrap().to_le_bytes());
+        out.extend(part);
+    }
+    out.extend(0_u32.to_le_bytes());
+    out
+}
+
+fn hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Remove the library and plugin objects a plan imported from the bucket.
+async fn delete_resources(store: &ObjectStore, plan: &MigrationPlan, pool: &PgPool) -> TestResult {
+    let mut tx = begin(pool).await?;
+    for library in plan.documents.iter().flat_map(|d| &d.libraries) {
+        if let Some(object) = figcraft_cloud_storage::object_metadata::get_object(&mut tx, library.id).await? {
+            store.delete_object(&object.object_key).await?;
+        }
+    }
+    tx.rollback().await?;
+    for plugin in &plan.plugins {
+        if let Some(key) = &plugin.object.object_key {
+            let _ = store.delete_object(key).await;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn libraries_and_plugins_import_once_verify_and_detect_tampering() -> TestResult {
+    use figcraft_cloud_storage::legacy_import::IMPORT_PUBLISHER;
+    use figcraft_cloud_storage::plugin_store::{PluginName, find_plugin};
+    let Some((pool, store)) = probe().await? else {
+        return Ok(());
+    };
+    let f = Fixture::new();
+    let (lib, bad) = (f.id("lib"), f.id("badlib"));
+    f.document(&lib, 2, &[Journal::Accepted(accepted(3))], Some(b"[]"));
+    // Legacy versions need not be dense: they keep their numbers.
+    f.write(&format!("files/{lib}/library-1.bin"), &library_archive(&format!("{lib}-1")));
+    f.write(&format!("files/{lib}/library-3.bin"), &library_archive(&format!("{lib}-3")));
+    f.document(&bad, 2, &[], Some(b"[]"));
+    f.write(&format!("files/{bad}/library-1.bin"), b"not a figcraft archive");
+    let plugin_id = f.id("plug");
+    let bundle = plugin_bundle(r#"{"id":"org.example.legacy","name":"Legacy","main":"p.wasm","version":"1.0.0","api":1}"#);
+    let sha = hex(&bundle);
+    f.write(&format!("plugins/{sha}.bin"), &bundle);
+    f.write("plugins/index.json", format!(r#"[{{"id":"{plugin_id}","version":"1.0.0","bytes":{},"sha256":"{sha}"}}]"#, bundle.len()).as_bytes());
+    let plan = f.plan();
+    assert!(plan.executable, "{:?}", plan.blockers);
+    assert!(plan.deferred.is_empty(), "{:?}", plan.deferred);
+    let lib_plan = plan.documents.iter().find(|d| d.legacy_id == lib).unwrap();
+    assert_eq!(lib_plan.libraries.len(), 2);
+    assert_eq!(plan.plugins.len(), 1);
+    let limits = ScanLimits::default();
+    let verify = || async {
+        let mut tx = begin(&pool).await?;
+        let verification = verify_import(&mut tx, &store, &plan, &f.root, &limits).await?;
+        tx.rollback().await?;
+        Ok::<_, Box<dyn std::error::Error>>(verification)
+    };
+
+    // Before the import every library and the plugin are missing and listed as not imported.
+    let before = verify().await?;
+    assert!(before.libraries.iter().all(|l| l.failures.contains(&VerifyCode::LibraryMissing) && l.failures.contains(&VerifyCode::VersionMissing)));
+    assert_eq!(before.plugins[0].failures, [VerifyCode::PluginMissing, VerifyCode::VersionMissing]);
+    assert_eq!(before.not_imported.iter().filter(|n| n.kind == NotImportedKind::Library).count(), 3);
+    assert_eq!(before.not_imported.iter().filter(|n| n.kind == NotImportedKind::Plugin).count(), 1);
+
+    let options = ImportOptions::default();
+    let first = import_plan(&pool, &store, &plan, &f.root, &limits, &options).await?;
+    assert!(first.documents.iter().all(|d| d.result.is_ok()), "{first:?}");
+    let results: Vec<_> = first.libraries.iter().map(|l| (l.legacy_document.clone(), l.version, l.result)).collect();
+    assert_eq!(
+        results,
+        [
+            (bad.clone(), 1, Err(ImportError::LibraryRejected)),
+            (lib.clone(), 1, Ok(ImportStatus::Created)),
+            (lib.clone(), 3, Ok(ImportStatus::Created)),
+        ]
+    );
+    assert_eq!(first.plugins.iter().map(|p| p.result).collect::<Vec<_>>(), [Ok(ImportStatus::Created)]);
+    assert!(!first.all_succeeded());
+
+    // The library keeps the legacy version numbers; the plugin is published by the importer.
+    let mut tx = begin(&pool).await?;
+    let library_id = first.libraries[1].library_id;
+    let library = figcraft_cloud_storage::libraries::get_library(&mut tx, library_id).await?.unwrap();
+    assert_eq!(library.source_document_id, Some(lib_plan.document.id));
+    let versions = figcraft_cloud_storage::libraries::list_versions(&mut tx, library_id, None, 10).await?;
+    assert_eq!(versions.iter().map(|v| v.version).collect::<Vec<_>>(), [3, 1]);
+    let plugin = find_plugin(&mut tx, PluginName { publisher: IMPORT_PUBLISHER, name: &plugin_id }).await?.unwrap();
+    assert_eq!(plugin.id, plan.plugins[0].plugin_id);
+    let manifest = figcraft_cloud_storage::plugin_store::get_manifest(&mut tx, plugin.id, "1.0.0").await?.unwrap();
+    assert_eq!(manifest.manifest["id"], "org.example.legacy");
+    tx.rollback().await?;
+
+    // A rerun writes nothing.
+    let second = import_plan(&pool, &store, &plan, &f.root, &limits, &options).await?;
+    assert!(second.libraries.iter().filter(|l| l.legacy_document == lib).all(|l| l.result == Ok(ImportStatus::AlreadyComplete)), "{second:?}");
+    assert_eq!(second.plugins[0].result, Ok(ImportStatus::AlreadyComplete));
+
+    // Imported libraries and the plugin verify and leave not_imported; the rejected one stays.
+    let clean = verify().await?;
+    assert!(clean.documents.iter().all(|d| d.passed), "{clean:?}");
+    assert!(clean.plugins.iter().all(|p| p.passed), "{:?}", clean.plugins);
+    let passed: Vec<_> = clean.libraries.iter().map(|l| (l.legacy_id.clone(), l.passed)).collect();
+    assert_eq!(passed, [(bad.clone(), false), (lib.clone(), true), (lib.clone(), true)]);
+    let left: Vec<_> = clean.not_imported.iter().map(|n| (n.kind, n.legacy_document.clone())).collect();
+    assert_eq!(left, [(NotImportedKind::Library, Some(bad.clone()))]);
+    assert!(!clean.cutover_ready);
+
+    // A hand-edited plan cannot point a library outside its document folder.
+    let mut hostile = plan.clone();
+    for document in &mut hostile.documents {
+        for library in &mut document.libraries {
+            library.source = format!("files/{bad}/../{lib}/library-1.bin");
+        }
+    }
+    let refused = import_plan(&pool, &store, &hostile, &f.root, &limits, &options).await?;
+    assert!(refused.libraries.iter().all(|l| l.result == Err(ImportError::InvalidPlanEntry)), "{refused:?}");
+
+    // Library bytes overwritten in the bucket (same size) and a changed legacy plugin bundle.
+    let mut tx = begin(&pool).await?;
+    let object = figcraft_cloud_storage::object_metadata::get_object(&mut tx, lib_plan.libraries[1].id).await?.unwrap();
+    tx.rollback().await?;
+    let mut bytes = store.get_object(&object.object_key, 1 << 20).await?;
+    if let Some(last) = bytes.last_mut() {
+        *last ^= 0xff;
+    }
+    store.put_object(&object.object_key, bytes, &object.media_type).await?;
+    let mut changed = bundle.clone();
+    if let Some(last) = changed.last_mut() {
+        *last ^= 0x01;
+    }
+    f.write(&format!("plugins/{sha}.bin"), &changed);
+    let tampered = verify().await?;
+    let library = tampered.libraries.iter().find(|l| l.legacy_id == lib && l.version == "3").unwrap();
+    assert_eq!(library.failures, [VerifyCode::ObjectBytesMismatch, VerifyCode::ContentMismatch]);
+    assert_eq!(tampered.plugins[0].failures, [VerifyCode::LegacyChanged]);
+    let left = tampered.not_imported.iter().filter(|n| matches!(n.kind, NotImportedKind::Library | NotImportedKind::Plugin)).count();
+    assert_eq!(left, 3);
+    assert!(!tampered.cutover_ready);
+
+    delete_resources(&store, &plan, &pool).await?;
+    delete_snapshots(&store, &plan, &pool).await?;
+    pool.close().await;
+    Ok(())
+}
