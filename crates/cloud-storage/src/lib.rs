@@ -15,6 +15,7 @@ pub mod migration_plan;
 pub mod object_metadata;
 pub mod object_references;
 pub mod objects;
+pub mod plugin_store;
 pub mod snapshots;
 pub mod uploads;
 pub mod validation;
