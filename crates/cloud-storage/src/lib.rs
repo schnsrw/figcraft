@@ -5,6 +5,7 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 pub mod audit;
 pub mod bucket_admin;
+pub mod document_snapshots;
 pub mod downloads;
 pub mod events;
 pub mod external_mappings;
