@@ -153,6 +153,9 @@ pub enum EventRepositoryError {
     /// The caller's fencing token is not the document's current one: another sequencer claimed
     /// the document since (or the token was never issued). The caller must stop writing.
     StaleFence,
+    /// A stored event failed verification on read: its checksum, encoding or inner sequence is
+    /// wrong, or the committed log has a gap. Replay stops rather than skip history.
+    Corrupt,
     Conflict,
     Constraint,
     Database,
@@ -298,6 +301,138 @@ pub async fn append_events(
     Ok(appended)
 }
 
+/// Most events one replay page returns, whatever the caller asks for.
+pub const MAX_REPLAY_EVENTS: usize = 1000;
+
+/// Largest payload total one replay page returns, whatever the caller asks for. A page always
+/// carries at least one event when one is due, so a single event up to
+/// [`MAX_EVENT_PAYLOAD_BYTES`] can exceed a smaller budget.
+pub const MAX_REPLAY_BYTES: usize = 32 * 1024 * 1024;
+
+/// One committed event read back from the log, verified and decoded.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplayedEvent {
+    pub seq: i64,
+    pub fencing_token: i64,
+    pub actor: PrincipalId,
+    pub batch: Accepted,
+}
+
+/// One page of replay. `events` are consecutive from the requested sequence; `current_seq` is the
+/// document's committed sequence when the page was read.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReplayPage {
+    pub events: Vec<ReplayedEvent>,
+    pub current_seq: i64,
+    after_seq: i64,
+}
+
+impl ReplayPage {
+    /// The sequence to pass as `after_seq` for the next page: the last returned event, or the
+    /// requested sequence when the page is empty.
+    #[must_use]
+    pub fn next_after_seq(&self) -> i64 {
+        self.events.last().map_or(self.after_seq, |event| event.seq)
+    }
+
+    /// Whether committed events remain after this page. Callers loop until this is false.
+    #[must_use]
+    pub fn has_more(&self) -> bool {
+        self.next_after_seq() < self.current_seq
+    }
+}
+
+/// `seq`, `fencing_token`, `actor_principal_id` (as text), `payload`, `checksum`.
+type StoredEventRow = (i64, i64, String, Vec<u8>, Vec<u8>);
+
+/// Read a document's committed events with `seq > after_seq`, in order, as one bounded page.
+///
+/// The page holds at most `max_events` (clamped to [`MAX_REPLAY_EVENTS`]; zero is
+/// `InvalidInput`) and at most `max_bytes` of payload (clamped to [`MAX_REPLAY_BYTES`]), except
+/// that it always holds the next event when one exists, so a caller looping on
+/// [`ReplayPage::next_after_seq`] always progresses. Both caps are applied in SQL: event sizes are
+/// summed from `octet_length` before any payload is fetched, so an oversized page is never
+/// transferred. Reads stop at the document's `current_seq`, which an append advances in the
+/// same transaction as its events, so only committed history is replayed.
+///
+/// Every row is verified with [`decode_event`] (checksum before decode) and the page must
+/// continue `after_seq` without gaps; a failure is `Corrupt` and returns no events. A negative
+/// `after_seq` is `InvalidInput`; one beyond the committed sequence is `SequenceConflict`
+/// carrying it, because the caller claims history the log does not have.
+pub async fn read_events(
+    transaction: &mut TenantTransaction<'_>,
+    document_id: CloudDocumentId,
+    after_seq: i64,
+    max_events: usize,
+    max_bytes: usize,
+) -> Result<ReplayPage, EventRepositoryError> {
+    if after_seq < 0 || max_events == 0 {
+        return Err(EventRepositoryError::InvalidInput);
+    }
+    let limit = i64::try_from(max_events.min(MAX_REPLAY_EVENTS)).map_err(|_| EventRepositoryError::InvalidInput)?;
+    let budget = i64::try_from(max_bytes.min(MAX_REPLAY_BYTES)).map_err(|_| EventRepositoryError::InvalidInput)?;
+    let tenant_id = transaction.tenant_id();
+
+    let current: Option<(i64,)> = sqlx::query_as("SELECT current_seq FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid")
+        .bind(tenant_id.to_string())
+        .bind(document_id.to_string())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(event_database_error)?;
+    let Some((current_seq,)) = current else {
+        return Err(EventRepositoryError::NotFound);
+    };
+    if after_seq > current_seq {
+        return Err(EventRepositoryError::SequenceConflict { current: current_seq });
+    }
+    if after_seq == current_seq {
+        return Ok(ReplayPage { events: Vec::new(), current_seq, after_seq });
+    }
+
+    // `page` picks the next rows by sequence and size only; payloads are joined in afterwards for
+    // the prefix that fits the budget (and always the first row).
+    let rows: Vec<StoredEventRow> = sqlx::query_as(
+        "WITH page AS ( \
+             SELECT seq, octet_length(payload)::bigint AS size FROM document_events \
+             WHERE tenant_id = $1::uuid AND document_id = $2::uuid AND seq > $3 AND seq <= $4 \
+             ORDER BY seq LIMIT $5 \
+         ), sized AS ( \
+             SELECT seq, sum(size) OVER (ORDER BY seq) AS running, row_number() OVER (ORDER BY seq) AS position FROM page \
+         ) \
+         SELECT event.seq, event.fencing_token, event.actor_principal_id::text, event.payload, event.checksum \
+         FROM sized JOIN document_events event \
+           ON event.tenant_id = $1::uuid AND event.document_id = $2::uuid AND event.seq = sized.seq \
+         WHERE sized.running <= $6 OR sized.position = 1 \
+         ORDER BY event.seq",
+    )
+    .bind(tenant_id.to_string())
+    .bind(document_id.to_string())
+    .bind(after_seq)
+    .bind(current_seq)
+    .bind(limit)
+    .bind(budget)
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(event_database_error)?;
+
+    // Events up to `current_seq` were committed with it, so an empty page here is missing history.
+    if rows.is_empty() || rows.len() > max_events.min(MAX_REPLAY_EVENTS) {
+        return Err(EventRepositoryError::Corrupt);
+    }
+    let mut events = Vec::with_capacity(rows.len());
+    let mut expected = after_seq;
+    for (seq, fencing_token, actor, payload, checksum) in rows {
+        expected = expected.checked_add(1).ok_or(EventRepositoryError::Corrupt)?;
+        if seq != expected {
+            return Err(EventRepositoryError::Corrupt);
+        }
+        let batch = decode_event(tenant_id, document_id, seq, &payload, &checksum).map_err(|_| EventRepositoryError::Corrupt)?;
+        let actor = actor.parse().map_err(|_| EventRepositoryError::Corrupt)?;
+        events.push(ReplayedEvent { seq, fencing_token, actor, batch });
+    }
+    Ok(ReplayPage { events, current_seq, after_seq })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -415,5 +550,17 @@ mod tests {
             }
             let _ = decode_event(tenant, document, 3, &mutated, &event_checksum(tenant, document, 3, &mutated));
         }
+    }
+
+    #[test]
+    fn replay_page_reports_where_to_resume_and_whether_more_remains() {
+        let actor: PrincipalId = "10000000-0000-4000-8000-000000000003".parse().unwrap();
+        let empty = ReplayPage { events: Vec::new(), current_seq: 7, after_seq: 7 };
+        assert_eq!((empty.next_after_seq(), empty.has_more()), (7, false));
+        let event = |seq: i64| ReplayedEvent { seq, fencing_token: 1, actor, batch: batch(u64::try_from(seq).unwrap()) };
+        let partial = ReplayPage { events: vec![event(3), event(4)], current_seq: 7, after_seq: 2 };
+        assert_eq!((partial.next_after_seq(), partial.has_more()), (4, true));
+        let last = ReplayPage { events: vec![event(5), event(6), event(7)], current_seq: 7, after_seq: 4 };
+        assert_eq!((last.next_after_seq(), last.has_more()), (7, false));
     }
 }
