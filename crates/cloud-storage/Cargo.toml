@@ -19,6 +19,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 crc32fast = { workspace = true }
 sha2 = { workspace = true }
+# S3-014: hand-signed bucket versioning/lifecycle requests (`rusty_s3::signing::sign` takes a
+# `jiff` timestamp), `Content-MD5` for lifecycle bodies and bounded XML parsing.
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+md-5 = "0.11"
+base64 = { workspace = true }
+roxmltree = "0.21"
 
 [dev-dependencies]
 zip = { workspace = true }

@@ -191,22 +191,12 @@ services:
       retries: 5
       start_period: 20s
 
+  # S3-014: the cloud image's explicit `--init-object-store` creates the bucket if missing,
+  # enables and verifies versioning and applies the lifecycle rules through the S3 API, then
+  # reads every setting back. It is idempotent and never runs as part of normal startup.
   seaweedfs-init:
-    image: ${SEAWEEDFS_IMAGE:?D-001 requires a reviewed SeaweedFS image reference}
-    entrypoint: ["/bin/sh", "-ec"]
-    environment:
-      S3_BUCKET: ${S3_BUCKET:-figcraft}
-    command:
-      - |
-        bucket="$$S3_BUCKET"
-        test "$${#bucket}" -ge 3 && test "$${#bucket}" -le 63
-        case "$$bucket" in *[!a-z0-9.-]*|.*|*.) exit 1;; esac
-        printf 's3.bucket.versioning -name %s -enable\n' "$$bucket" |
-          weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888
-        status=$$(printf 's3.bucket.versioning -name %s\n' "$$bucket" |
-          weed shell -master=seaweedfs:9333 -filer=seaweedfs:8888)
-        printf '%s\n' "$$status"
-        printf '%s\n' "$$status" | grep -Fq 'Versioning: Enabled'
+    <<: *cloud-settings
+    command: ["--init-object-store"]
     depends_on:
       seaweedfs:
         condition: service_healthy

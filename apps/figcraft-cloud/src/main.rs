@@ -16,6 +16,7 @@ enum Arguments {
     Help,
     CheckReady,
     Migrate,
+    InitObjectStore,
     ProvisionDatabaseRoles,
     Role(Option<CloudRole>),
 }
@@ -43,6 +44,13 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
                 Err("--migrate cannot be combined with other arguments")
             };
         }
+        if argument == "--init-object-store" {
+            return if role.is_none() && args.next().is_none() {
+                Ok(Arguments::InitObjectStore)
+            } else {
+                Err("--init-object-store cannot be combined with other arguments")
+            };
+        }
         if argument == "--provision-db-roles" {
             return if role.is_none() && args.next().is_none() {
                 Ok(Arguments::ProvisionDatabaseRoles)
@@ -68,7 +76,7 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
 
 fn usage() {
     println!(
-        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --provision-db-roles\n\nDefaults to --role all."
+        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n\nDefaults to --role all."
     );
 }
 
@@ -148,6 +156,67 @@ fn run_migrations() -> ExitCode {
     }
 }
 
+/// Create the configured bucket if missing, enable and verify versioning, and apply the lifecycle
+/// rules. Explicit only: normal startup never changes the bucket.
+fn run_object_store_init() -> ExitCode {
+    use figcraft_cloud_storage::bucket_admin::{self, BucketInitError, BucketOutcome, LifecycleOutcome, VersioningOutcome};
+
+    let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
+    let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
+    let Ok(config) = CloudConfig::parse(settings) else {
+        eprintln!("figcraft-cloud: invalid cloud configuration");
+        return ExitCode::from(2);
+    };
+    let Some(store) = config.object_store_settings().and_then(|settings| figcraft_cloud_storage::objects::ObjectStore::new(&settings).ok()) else {
+        eprintln!("figcraft-cloud: S3_ENDPOINT, S3_BUCKET, S3_ACCESS_KEY and S3_SECRET_KEY must be set and valid for object store initialization");
+        return ExitCode::from(2);
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        eprintln!("figcraft-cloud: unable to initialize object store runtime");
+        return ExitCode::FAILURE;
+    };
+    match runtime.block_on(bucket_admin::initialize_bucket(&store, &bucket_admin::LifecyclePolicy::default())) {
+        Ok(report) => {
+            let bucket = match report.bucket {
+                BucketOutcome::Created => "created",
+                BucketOutcome::AlreadyExisted => "already existed",
+            };
+            let versioning = match report.versioning {
+                VersioningOutcome::Enabled { .. } => "enabled and verified",
+                VersioningOutcome::AlreadyEnabled => "already enabled",
+            };
+            let lifecycle = match report.lifecycle {
+                LifecycleOutcome::Applied => "applied and verified",
+                LifecycleOutcome::Replaced => "replaced and verified",
+                LifecycleOutcome::AlreadyCorrect => "already correct",
+                LifecycleOutcome::Unsupported => "unsupported by this store",
+            };
+            println!("figcraft-cloud: object store bucket {bucket}; versioning {versioning}; lifecycle {lifecycle}");
+            if report.lifecycle == LifecycleOutcome::Unsupported {
+                eprintln!("figcraft-cloud: warning: staging uploads expire only through the application sweep on this store");
+            }
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            let message = match error {
+                BucketInitError::InvalidPolicy => "the lifecycle policy is invalid",
+                BucketInitError::Unreachable => "the object store is unreachable",
+                BucketInitError::Unauthorized => "the object store refused the credentials or permission",
+                BucketInitError::BucketOwnedElsewhere => "the bucket name belongs to another account",
+                BucketInitError::BucketMissing => "the bucket disappeared during initialization",
+                BucketInitError::VersioningNotEnabled => "bucket versioning did not read back as enabled",
+                BucketInitError::ForeignLifecycleRules => "the bucket has lifecycle rules FigCraft did not write; remove or rename them first",
+                BucketInitError::LifecycleRejected => "the object store rejected the lifecycle configuration",
+                BucketInitError::LifecycleNotApplied => "the lifecycle configuration did not read back as written",
+                BucketInitError::MalformedResponse => "the object store returned an unexpected response body",
+                BucketInitError::Unexpected => "the object store returned an unexpected response",
+            };
+            eprintln!("figcraft-cloud: object store initialization failed: {message}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn schema_is_ready(database_url: Option<&str>) -> bool {
     let Some(database_url) = database_url else {
         return false;
@@ -181,6 +250,7 @@ fn main() -> ExitCode {
             Ok(false) | Err(_) => ExitCode::FAILURE,
         },
         Ok(Arguments::Migrate) => run_migrations(),
+        Ok(Arguments::InitObjectStore) => run_object_store_init(),
         Ok(Arguments::ProvisionDatabaseRoles) => run_role_provisioning(),
         Ok(Arguments::Role(cli_role)) => {
             let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
@@ -267,6 +337,14 @@ mod tests {
         assert_eq!(arguments(&["--migrate"]), Ok(Arguments::Migrate));
         assert!(arguments(&["--migrate", "--role", "api"]).is_err());
         assert!(arguments(&["--role", "api", "--migrate"]).is_err());
+    }
+
+    #[test]
+    fn object_store_initialization_command_is_standalone() {
+        assert_eq!(arguments(&["--init-object-store"]), Ok(Arguments::InitObjectStore));
+        assert!(arguments(&["--init-object-store", "--role", "api"]).is_err());
+        assert!(arguments(&["--role", "api", "--init-object-store"]).is_err());
+        assert!(arguments(&["--init-object-store", "--migrate"]).is_err());
     }
 
     #[test]
