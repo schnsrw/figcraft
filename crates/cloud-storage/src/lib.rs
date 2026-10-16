@@ -3,6 +3,7 @@
 use figcraft_cloud_domain::TenantId;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
+pub mod assets;
 pub mod audit;
 pub mod bucket_admin;
 pub mod document_snapshots;
