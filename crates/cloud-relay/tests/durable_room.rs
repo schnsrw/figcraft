@@ -119,6 +119,10 @@ async fn accepted_batches_are_committed_before_they_are_confirmed() -> Result<()
     // A base the committed batches do not apply over is refused rather than served.
     let wrong_base = Document::new("Without the frame");
     assert!(matches!(DurableRoom::open(pool.clone(), tenant, document_id, wrong_base, "", Limits::default()).await, Err(RoomError::Replay)));
+    // The failed replay quarantined the document: even the right base is now refused until an
+    // operator clears it (the fixture cleanup resets the document).
+    let (base, _) = document()?;
+    assert!(matches!(DurableRoom::open(pool.clone(), tenant, document_id, base, "", Limits::default()).await, Err(RoomError::Quarantined)));
 
     pool.close().await;
     Ok(())

@@ -27,6 +27,8 @@ type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult<T = ()> = Result<T, BoxError>;
 
 const AGE_TENANT: &str = "ab000000-0000-4000-8000-000000000001";
+/// The fixture principal that places retention holds.
+const PLACER: &str = "ab000000-0000-4000-8000-000000000009";
 const POINTER_TENANT: &str = "ab000000-0000-4000-8000-000000000002";
 const EXPORT_TENANT: &str = "ab000000-0000-4000-8000-000000000003";
 const CRASH_TENANT: &str = "ab000000-0000-4000-8000-000000000004";
@@ -220,7 +222,7 @@ async fn age_references_and_holds_protect_and_a_dry_run_changes_nothing() -> Tes
     let (document, hold) = (Uuid::new_v4(), Uuid::new_v4());
     let mut scoped = begin(&probe.pool, AGE_TENANT).await?;
     add_reference(&mut scoped, referenced.id, OwnerKind::Document, document).await?;
-    place_retention_hold(&mut scoped, held.id, hold).await?;
+    place_retention_hold(&mut scoped, held.id, hold, PLACER.parse()?, "S3 probe hold").await?;
     scoped.commit().await?;
     assert_eq!(probe.raw.versions(&layered.key).await?, 3);
 

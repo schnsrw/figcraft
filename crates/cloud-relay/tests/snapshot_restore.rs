@@ -5,6 +5,7 @@ use figcraft_cloud_storage::document_snapshots::{Pointer, StoredSnapshot, store_
 use figcraft_cloud_storage::events::EventRepositoryError;
 use figcraft_cloud_storage::metadata::create_document;
 use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
+use figcraft_cloud_storage::quarantine::{QuarantineReason, clear_quarantine, quarantine_reason};
 use figcraft_cloud_storage::validation::MEDIA_SNAPSHOT;
 use figcraft_collab::message::{Access, ClientMsg};
 use figcraft_collab::{Change, Client, Json, Limits, Prop, Server};
@@ -93,6 +94,20 @@ async fn corrupt(store: &ObjectStore, key: &str) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
+async fn quarantined(pool: &PgPool, document: CloudDocumentId) -> Result<Option<QuarantineReason>, Box<dyn std::error::Error>> {
+    let mut transaction = begin_tenant_transaction(pool, TENANT.parse()?).await.map_err(|error| format!("begin tenant: {error:?}"))?;
+    let reason = quarantine_reason(&mut transaction, document).await?;
+    transaction.rollback().await?;
+    Ok(reason)
+}
+
+async fn clear(pool: &PgPool, document: CloudDocumentId) -> Result<(), Box<dyn std::error::Error>> {
+    let mut transaction = begin_tenant_transaction(pool, TENANT.parse()?).await.map_err(|error| format!("begin tenant: {error:?}"))?;
+    clear_quarantine(&mut transaction, document, ACTOR.parse()?).await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
 /// The state pure replay of the whole log over the base document produces.
 async fn replayed(pool: &PgPool, tenant: TenantId, document: CloudDocumentId) -> Result<Server, Box<dyn std::error::Error>> {
     let (base, _) = base()?;
@@ -133,6 +148,13 @@ async fn rooms_recover_from_the_latest_verified_snapshot() -> Result<(), Box<dyn
         DurableRoom::open(pool.clone(), tenant, document, Document::new("Without the frame"), "", Limits::default()).await,
         Err(RoomError::Replay)
     ));
+    // That failed replay quarantined the document; recovery refuses it until an operator clears it.
+    assert_eq!(quarantined(&pool, document).await?, Some(QuarantineReason::ReplayFailed));
+    assert!(matches!(
+        DurableRoom::recover(pool.clone(), &store, tenant, document, base()?.0, "", Limits::default()).await,
+        Err(RoomError::Quarantined)
+    ));
+    clear(&pool, document).await?;
 
     // A newer snapshot is preferred; once its object is corrupted in the bucket it is never used
     // and recovery falls back to the preceding one.
@@ -159,6 +181,9 @@ async fn rooms_recover_from_the_latest_verified_snapshot() -> Result<(), Box<dyn
         DurableRoom::recover(pool.clone(), &store, tenant, document, Document::new("Without the frame"), "", Limits::default()).await,
         Err(RoomError::Replay)
     ));
+    // No snapshot re-verified and the log does not restore the document: quarantined as an
+    // unverifiable snapshot chain.
+    assert_eq!(quarantined(&pool, document).await?, Some(QuarantineReason::SnapshotChainUnverifiable));
 
     // Another tenant cannot open the document at all, so none of its snapshots are read.
     assert!(matches!(

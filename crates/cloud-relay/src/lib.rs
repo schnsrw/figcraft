@@ -12,13 +12,23 @@
 //!
 //! [`DurableRoom::recover`] restores the room from the document's latest verified snapshot (S3-008,
 //! `figcraft_cloud_storage::document_snapshots`) and replays only the events after it.
+//!
+//! A quarantined document (`figcraft_cloud_storage::quarantine`) is never opened: both
+//! [`DurableRoom::open`] and [`DurableRoom::recover`] refuse it with [`RoomError::Quarantined`]
+//! before claiming it, so its current owner is not fenced. When opening fails because the durable
+//! history cannot be restored (a log gap or corrupt event, or a log that does not replay to the
+//! committed sequence) the document is quarantined in its own committed transaction before the
+//! error is returned, so no later open serves it until an operator clears the quarantine.
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
-use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::document_snapshots::{SnapshotStoreError, restore_latest_snapshot_with};
-use figcraft_cloud_storage::events::{EventRepositoryError, MAX_REPLAY_BYTES, MAX_REPLAY_EVENTS, append_events, claim_sequencer, read_events};
+use figcraft_cloud_storage::events::{
+    EventRepositoryError, MAX_REPLAY_BYTES, MAX_REPLAY_EVENTS, SequencerClaim, append_events, claim_sequencer, read_events,
+};
 use figcraft_cloud_storage::objects::ObjectStore;
+use figcraft_cloud_storage::quarantine::{QuarantineError, QuarantineReason, quarantine_document, quarantine_reason};
 use figcraft_cloud_storage::snapshots::SnapshotRecord;
+use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
 use figcraft_collab::message::{Access, ClientMsg, Hello, ServerMsg};
 use figcraft_collab::{Document, Journal, Limits, Outgoing, Server};
 use sqlx::PgPool;
@@ -43,6 +53,8 @@ pub enum RoomError {
     /// Reading the document's snapshots failed in a way that says nothing about their bytes (the
     /// store or database is unavailable); no older snapshot is substituted.
     Snapshot(SnapshotStoreError),
+    /// The document is quarantined for operator repair and is not served.
+    Quarantined,
 }
 
 impl std::fmt::Display for RoomError {
@@ -66,6 +78,10 @@ pub struct DurableRoom {
     snapshot: Option<(Uuid, i64)>,
 }
 
+/// What a restore attempt found: the restored snapshot and server, if any, and whether any
+/// snapshot was tried and passed over.
+type Restored = (Option<(SnapshotRecord, Server)>, bool);
+
 /// The newest verified snapshot of `document_id` at or below `claimed_seq` that re-verifies and
 /// restores a server.
 async fn restore_server(
@@ -76,7 +92,7 @@ async fn restore_server(
     claimed_seq: i64,
     token: &str,
     limits: Limits,
-) -> Result<Option<(SnapshotRecord, Server)>, RoomError> {
+) -> Result<Restored, RoomError> {
     let mut transaction = begin_tenant_transaction(pool, tenant_id).await.map_err(|_| RoomError::Begin)?;
     let restore = restore_latest_snapshot_with(&mut transaction, store, document_id, |state| {
         let within = i64::try_from(state.seq).is_ok_and(|seq| seq <= claimed_seq);
@@ -85,7 +101,46 @@ async fn restore_server(
     .await
     .map_err(RoomError::Snapshot)?;
     transaction.rollback().await.map_err(|_| RoomError::Begin)?;
-    Ok(restore.restored)
+    Ok((restore.restored, !restore.skipped.is_empty()))
+}
+
+/// Why a failed open means the durable history cannot be restored, or `None` for a failure that
+/// says nothing about the history (an outage, a refusal, a missing document).
+fn quarantine_cause(error: RoomError, snapshots_skipped: bool) -> Option<QuarantineReason> {
+    match error {
+        RoomError::Replay if snapshots_skipped => Some(QuarantineReason::SnapshotChainUnverifiable),
+        RoomError::Replay => Some(QuarantineReason::ReplayFailed),
+        RoomError::Open(EventRepositoryError::Corrupt) => Some(QuarantineReason::LogCorrupt),
+        _ => None,
+    }
+}
+
+/// Whether rows are missing from `document_id`'s log in `(after, current]`, which tells a gap from
+/// a corrupt event when replay reports `Corrupt`. A failed check is reported as no gap, so the
+/// document is still quarantined as corrupt.
+async fn log_has_gap(transaction: &mut TenantTransaction<'_>, document_id: CloudDocumentId, after: i64, current: i64) -> bool {
+    let present: Result<i64, _> =
+        sqlx::query_scalar("SELECT count(*) FROM document_events WHERE tenant_id = $1::uuid AND document_id = $2::uuid AND seq > $3 AND seq <= $4")
+            .bind(transaction.tenant_id().to_string())
+            .bind(document_id.to_string())
+            .bind(after)
+            .bind(current)
+            .fetch_one(transaction.connection())
+            .await;
+    present.is_ok_and(|present| current.checked_sub(after).is_some_and(|expected| present < expected))
+}
+
+/// Quarantine `document_id` in its own committed transaction. A failure here is not reported: the
+/// open already failed, and the next open will diagnose (and try to quarantine) again.
+async fn quarantine(pool: &PgPool, tenant_id: TenantId, document_id: CloudDocumentId, reason: QuarantineReason) {
+    let Ok(mut transaction) = begin_tenant_transaction(pool, tenant_id).await else {
+        return;
+    };
+    if quarantine_document(&mut transaction, document_id, reason).await.is_ok() {
+        let _ = transaction.commit().await;
+    } else {
+        let _ = transaction.rollback().await;
+    }
 }
 
 impl DurableRoom {
@@ -140,35 +195,76 @@ impl DurableRoom {
         limits: Limits,
     ) -> Result<Self, RoomError> {
         let mut transaction = begin_tenant_transaction(&pool, tenant_id).await.map_err(|_| RoomError::Begin)?;
+        match quarantine_reason(&mut transaction, document_id).await {
+            Ok(None) | Err(QuarantineError::NotFound) => {}
+            Ok(Some(_)) => return Err(RoomError::Quarantined),
+            Err(_) => return Err(RoomError::Open(EventRepositoryError::Database)),
+        }
         let claim = claim_sequencer(&mut transaction, document_id).await.map_err(RoomError::Open)?;
         transaction.commit().await.map_err(|_| RoomError::Commit)?;
 
-        let restored = match store {
+        let (restored, snapshots_skipped) = match store {
             Some(store) => restore_server(&pool, store, tenant_id, document_id, claim.current_seq, token, limits).await?,
-            None => None,
+            None => (None, false),
         };
+        match Self::replay_from(&pool, tenant_id, document_id, &claim, restored, base, token, limits).await {
+            Ok((server, snapshot)) => {
+                let mut room = Self::from_parts(pool, tenant_id, document_id, claim.fencing_token, server);
+                room.snapshot = snapshot;
+                Ok(room)
+            }
+            Err((error, gap)) => {
+                let reason = if gap { Some(QuarantineReason::LogGap) } else { quarantine_cause(error, snapshots_skipped) };
+                if let Some(reason) = reason {
+                    quarantine(&pool, tenant_id, document_id, reason).await;
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Replay the log after the restored snapshot (or over `base`) up to the claimed sequence. An
+    /// error carries whether it was a gap: the log ends before the committed sequence.
+    #[allow(clippy::too_many_arguments)]
+    async fn replay_from(
+        pool: &PgPool,
+        tenant_id: TenantId,
+        document_id: CloudDocumentId,
+        claim: &SequencerClaim,
+        restored: Option<(SnapshotRecord, Server)>,
+        base: Document,
+        token: &str,
+        limits: Limits,
+    ) -> Result<(Server, Option<(Uuid, i64)>), (RoomError, bool)> {
         let (mut server, snapshot, mut after) = match restored {
             Some((record, server)) => (server, Some((record.id, record.seq)), record.seq),
             None => (Server::new(base, token, limits), None, 0),
         };
+        let failed = |error| (error, false);
         while after < claim.current_seq {
-            let mut transaction = begin_tenant_transaction(&pool, tenant_id).await.map_err(|_| RoomError::Begin)?;
-            let page = read_events(&mut transaction, document_id, after, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES).await.map_err(RoomError::Open)?;
-            transaction.rollback().await.map_err(|_| RoomError::Begin)?;
+            let mut transaction = begin_tenant_transaction(pool, tenant_id).await.map_err(|_| failed(RoomError::Begin))?;
+            let page = match read_events(&mut transaction, document_id, after, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES).await {
+                Ok(page) => page,
+                Err(EventRepositoryError::Corrupt) => {
+                    let gap = log_has_gap(&mut transaction, document_id, after, claim.current_seq).await;
+                    let _ = transaction.rollback().await;
+                    return Err((RoomError::Open(EventRepositoryError::Corrupt), gap));
+                }
+                Err(error) => return Err(failed(RoomError::Open(error))),
+            };
+            transaction.rollback().await.map_err(|_| failed(RoomError::Begin))?;
             if page.events.is_empty() {
-                return Err(RoomError::Open(EventRepositoryError::Corrupt));
+                return Err((RoomError::Open(EventRepositoryError::Corrupt), true));
             }
             after = page.next_after_seq();
             for event in page.events.into_iter().take_while(|event| event.seq <= claim.current_seq) {
-                server.replay(Journal::Accepted(event.batch)).map_err(|_| RoomError::Replay)?;
+                server.replay(Journal::Accepted(event.batch)).map_err(|_| failed(RoomError::Replay))?;
             }
         }
         if i64::try_from(server.seq()).ok() != Some(claim.current_seq) {
-            return Err(RoomError::Replay);
+            return Err(failed(RoomError::Replay));
         }
-        let mut room = Self::from_parts(pool, tenant_id, document_id, claim.fencing_token, server);
-        room.snapshot = snapshot;
-        Ok(room)
+        Ok((server, snapshot))
     }
 
     /// A room over `server`, which must already hold the document's committed state through its
