@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (20/21) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 20 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -418,7 +418,38 @@ the same commit as the completed task.
   unique-violation leak; a rolled-back reservation passes the key to exactly one waiter; racing
   completions store one response, which every retry replays. A removed `FOR UPDATE` is caught by the
   probe; the tests read their starting seq/token so they rerun safely on the same fixture.
-- [ ] **S2-020** Add failure-injection tests for commit, connection loss and retry boundaries.
+- [x] **S2-020** Add failure-injection tests for commit, connection loss and retry boundaries.
+  Evidence: Real PostgreSQL, runtime role. Faults are injected by pg_terminate_backend from a second
+  runtime connection, with the victim found by pg_backend_pid or by a per-run application_name, or
+  by the victim's own SET LOCAL lock_timeout / statement_timeout. Every wait polls pg_stat_activity
+  against a 30s deadline; no sleep is used for synchronisation.
+  crates/cloud-storage/tests/failure_injection.rs: (1) kill after append_events and before COMMIT:
+  commit returns Err, current_seq/fencing_token/rows are unchanged, the killed backend holds 0
+  pg_locks, the same batch retried on a fresh connection lands exactly once (read_events returns the
+  identical ReplayedEvent {seq, token, actor, batch}), and a second retry is
+  SequenceConflict{current: seq}. (2) kill while queued on the document row FOR UPDATE behind a
+  gate, with a second writer queued behind the victim: the victim gets Err(Database), nothing is
+  written, the writer is still blocked until the gate rolls back, then commits seq+1 and the log
+  stays exact. (3) lost acknowledgement: committed, retry refused with SequenceConflict{current ==
+  the batch's own seq}; read_events returns exactly the sent batch (a run-unique batch_id, so a
+  rival batch would not match); rows == current_seq, no duplicate. (4) lock_timeout=50ms on append
+  and statement_timeout=50ms on claim_sequencer both give Err(Database); the aborted transaction
+  refuses further statements; a COMMIT sent anyway is a rollback on the server; seq and token do not
+  move, no lock is left, and the owner's append goes through after the gate. (5) idempotency: a
+  reservation killed before commit, or rolled back, leaves the key free (Reserved again); a
+  committed reservation whose completing transaction is killed stays pending, so retries get
+  InFlight; the committed completion is replayed byte for byte, completing again is InvalidState,
+  and a different request hash is Conflict. crates/cloud-relay/tests/room_failure_injection.rs: (6)
+  DurableRoom on a one-connection pool tagged with application_name. An idle pooled connection
+  killed between receives is replaced transparently (the room is not poisoned and the batch
+  commits). A connection killed while the room's append waits on the gated row lock gives
+  Err(Append(Database)): no Outgoing, the room is poisoned, server().seq() is one ahead of durable,
+  the next receive is Poisoned, nothing is written. DurableRoom::open on the same pool replays only
+  committed batches (the frame name is the last committed one, the token has advanced, the last
+  event is the committed batch_id). Fixture: prefix 98,
+  deploy/saas/failure-injection-{preflight,cleanup}.sql, rerun-safe (tests read their starting
+  seq/token from the database). Ran 2 reruns plus 1 fresh run, all green; fmt and clippy -D warnings
+  clean.
 - [x] **S2-021** Build a read-only scanner for the existing filesystem server data directory and a
   migration report format.
   Evidence: `figcraft-cloud-storage::legacy_scan::scan_data_directory` inventories a stopped
@@ -441,8 +472,44 @@ the same commit as the completed task.
 
 ### S2 gate
 
-- [ ] **S2-GATE** Create, edit, restart and restore a document using PostgreSQL metadata/events;
+- [x] **S2-GATE** Create, edit, restart and restore a document using PostgreSQL metadata/events;
   prove a failed commit is never confirmed and replay reaches the accepted state.
+  Evidence: `crates/cloud-relay/tests/s2_gate.rs` (`create_edit_restart_and_restore_a_document`) is
+  one end-to-end probe that uses only public APIs. It runs as figcraft_runtime against the fixture
+  `deploy/saas/s2-gate-{preflight,cleanup}.sql`. The preflight creates only tenant 99…01 and
+  principal 99…09. The cleanup is admin-only and removes document_events, audit_events, documents,
+  projects, workspaces, members, tenant and principal by tenant, so the probe can rerun. Create: the
+  workspace (991…), project (992…) and document (993…) are created through
+  `metadata::create_{workspace,project,document}`. `audit::record_audit_event` records
+  document.create/rename/archive/restore, and the probe asserts 4 audit rows for the document. Edit:
+  a `DurableRoom::open` over a fixed base (a page plus a frame) admits two editors and a viewer.
+  Each is a real `figcraft_collab::Client` built from its Welcome and edits with `Client::edit`.
+  Every Outgoing is routed to the clients and their follow-ups are sent back. The editors make 5
+  batches: 2 creates and 3 property sets (name, opacity+visible). The viewer's batch is refused
+  (Reject) and is never confirmed or written. The broadcast batches equal `read_events` exactly, in
+  order, and current_seq equals the event count (5). Every client's `confirmed().snapshot()` equals
+  `server.replica().snapshot()`. Restart: the room is dropped and reopened over the same base. The
+  replica snapshot equals the one before the restart, seq equals the committed current_seq, and the
+  fencing token went up. A failed commit is never confirmed: (1) A second open fences the restored
+  room. Its next edit returns `Err(Append(StaleFence))` and the room is poisoned. (2) A room uses a
+  1-connection pool with a unique `application_name`. While a tenant transaction holds `SELECT … FOR
+  UPDATE` on the document row, its append waits on that lock. The probe finds that backend through
+  `pg_stat_activity` (`wait_event_type = 'Lock'`) and kills it with `pg_terminate_backend`.
+  `receive` then returns `Err(Append(Database))` with no Outgoing and the room is poisoned. In both
+  cases committed stays (5,5), neither batch is in `read_events`, and a fresh open's snapshot equals
+  the confirmed state ("Gate frame" and "Card" survive, not "Fenced" or "Lost"). Later edits
+  continue gap-free (seq 6). Rename and archive: `rename_document` then `archive_document` (state
+  Archived). The live room's next edit returns `Err(Append(InvalidState))`, `DurableRoom::open`
+  returns `Err(Open(InvalidState))`, and committed is unchanged. Restore: after `restore_document`
+  (Active) the document opens again with the identical snapshot, seq 6 and the new name. Final
+  checks: the durable log equals every confirmed batch, and confirmed seqs are 1..=6 with no gaps.
+  Procedure: documented in `docs/saas/deployment-operations.md` under "S2 gate procedure". Result:
+  passes on reruns against schema 20261016000005. `crates/cloud-storage/tests/migration_upgrade.rs`
+  covers the roadmap's remaining exit criterion: a scratch database migrated through an exact copy
+  of every migration but the newest is refused by the binary's readiness range, upgrades with the
+  embedded `migrate_database` (SQLx verifying the applied files' checksums), reruns as a no-op, and
+  ends with the same columns as a database migrated from empty. All S2 probes run in the disposable
+  Compose smoke.
 
 ## S3 — S3-compatible objects and migration
 
@@ -856,3 +923,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S2-015: added `claim_sequencer` and a current-fencing-token check in the append under the document row lock. S2 reaches 16/21. |
 | 2026-10-17 | S2-016/S2-019/S2-021: added bounded checksum-verified event replay, multi-connection PostgreSQL race probes for sequence, fencing and idempotency, and a read-only filesystem-server scanner with a versioned migration report (three parallel worktree agents, merged and verified together). S2 reaches 19/21. |
 | 2026-10-17 | S2-018: added `DurableRoom`, committing accepted batches under the fencing token before confirming or broadcasting them and reopening rooms by fenced takeover plus checksum-verified replay. S2 reaches 20/21. |
+| 2026-10-17 | S2-020/S2-GATE: added connection-kill, lock-wait, lost-acknowledgement, timeout, idempotency-boundary and room-level failure injection; the end-to-end create/edit/restart/restore gate probe; and a previous-schema upgrade probe. S2 complete (21/21) and its gate passes. |

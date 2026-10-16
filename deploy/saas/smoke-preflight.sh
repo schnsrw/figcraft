@@ -159,6 +159,7 @@ if [[ ! "$postgres_port" =~ ^[0-9]+$ ]]; then
   exit 1
 fi
 printf 'postgres://figcraft_runtime:%s@127.0.0.1:%s/figcraft\n' "$runtime_password" "$postgres_port" > "$test_dir/host_database_url"
+printf 'postgres://figcraft:%s@127.0.0.1:%s/figcraft\n' "$postgres_password" "$postgres_port" > "$test_dir/host_admin_database_url"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
   cargo test --locked -p figcraft-cloud-storage --test tenant_transaction -- --nocapture
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
@@ -223,6 +224,22 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
   cargo test --locked -p figcraft-cloud-relay --test durable_room -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/durable-room-cleanup.sql" > "$test_dir/durable-room-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/failure-injection-preflight.sql" > "$test_dir/failure-injection-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test failure_injection -- --nocapture --test-threads=1
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-relay --test room_failure_injection -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/failure-injection-cleanup.sql" > "$test_dir/failure-injection-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/s2-gate-preflight.sql" > "$test_dir/s2-gate-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-relay --test s2_gate -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/s2-gate-cleanup.sql" > "$test_dir/s2-gate-cleanup.log"
+FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE="$test_dir/host_admin_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test migration_upgrade -- --nocapture
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-a.log" 2>&1 &
 migration_a=$!
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-b.log" 2>&1 &
@@ -299,4 +316,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
