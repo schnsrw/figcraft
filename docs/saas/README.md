@@ -30,6 +30,7 @@ auditing and operations.
 | [Enterprise proposal review](proposal-review.md) | Source-audited disposition of the supplied PRD/HLD/LLD and its repository-specific corrections |
 | [Roadmap](roadmap.md) | Milestones, dependencies, estimates and exit gates |
 | [Filesystem migration report](filesystem-migration-report.md) | Read-only `figcraft-server` data-directory scanner and the versioned migration report format (S2-021) |
+| [Object store client decision](object-store-client-decision.md) | S3-compatible client choice (`rusty-s3` signing over `reqwest`/Rustls/ring), licences and alternatives (S3-001) |
 | [Task tracker](tracker.md) | Complete checkbox inventory for implementation and release readiness |
 
 ## Architecture decisions

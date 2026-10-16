@@ -58,6 +58,7 @@ chmod 644 "$test_dir"/*
 {
   printf 'services:\n  gateway:\n    ports:\n      - "127.0.0.1::8080"\n'
   printf '  postgres:\n    ports:\n      - "127.0.0.1::5432"\n'
+  printf '  seaweedfs:\n    ports:\n      - "127.0.0.1::8333"\n'
   printf 'secrets:\n'
   for secret in admin_database_url migration_database_url database_url migrator_password runtime_password redis_url postgres_password redis_password redis_conf s3_access_key s3_secret_key oidc_client_secret session_signing_key seaweedfs_s3_config; do
     filename=$secret
@@ -162,6 +163,18 @@ printf 'postgres://figcraft_runtime:%s@127.0.0.1:%s/figcraft\n' "$runtime_passwo
 printf 'postgres://figcraft:%s@127.0.0.1:%s/figcraft\n' "$postgres_password" "$postgres_port" > "$test_dir/host_admin_database_url"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
   cargo test --locked -p figcraft-cloud-storage --test tenant_transaction -- --nocapture
+seaweedfs_binding=$("${compose[@]}" port seaweedfs 8333)
+seaweedfs_port=${seaweedfs_binding##*:}
+if [[ ! "$seaweedfs_port" =~ ^[0-9]+$ ]]; then
+  printf 'Expected a disposable loopback SeaweedFS S3 port\n' >&2
+  exit 1
+fi
+mkdir -p "$test_dir/s3"
+printf 'http://127.0.0.1:%s\n' "$seaweedfs_port" > "$test_dir/s3/s3_endpoint"
+cp "$test_dir/s3_access_key" "$test_dir/s3/s3_access_key"
+cp "$test_dir/s3_secret_key" "$test_dir/s3/s3_secret_key"
+FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test object_store -- --nocapture
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   -c 'DROP TABLE public.tenant_context_probe' > "$test_dir/tenant-context-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
@@ -316,4 +329,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection; object-store connectivity, credential and bucket checks.\n'

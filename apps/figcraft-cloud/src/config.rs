@@ -41,6 +41,10 @@ pub(super) struct CloudConfig {
     environment: Environment,
     public_url: Option<String>,
     oidc_issuer: Option<String>,
+    s3_endpoint: Option<String>,
+    s3_region: Option<String>,
+    s3_bucket: Option<String>,
+    s3_force_path_style: bool,
     mounted_secrets: BTreeSet<&'static str>,
 }
 
@@ -53,6 +57,10 @@ impl Default for CloudConfig {
             environment: Environment::Development,
             public_url: None,
             oidc_issuer: None,
+            s3_endpoint: None,
+            s3_region: None,
+            s3_bucket: None,
+            s3_force_path_style: false,
             mounted_secrets: BTreeSet::new(),
         }
     }
@@ -138,6 +146,16 @@ impl CloudConfig {
                 }
                 "FIGCRAFT_PUBLIC_URL" => config.public_url = Some(value.to_string()),
                 "OIDC_ISSUER" => config.oidc_issuer = Some(value.to_string()),
+                "S3_ENDPOINT" => config.s3_endpoint = Some(value.to_string()),
+                "S3_REGION" => config.s3_region = Some(value.to_string()),
+                "S3_BUCKET" => config.s3_bucket = Some(value.to_string()),
+                "S3_FORCE_PATH_STYLE" => {
+                    config.s3_force_path_style = match value {
+                        "true" => true,
+                        "false" => false,
+                        _ => return Err("invalid S3_FORCE_PATH_STYLE; expected true or false"),
+                    };
+                }
                 _ if let Some((name, from_file)) = secret_setting(key) => {
                     if !seen_secrets.insert(name) {
                         return Err("secret may be configured only once");
@@ -158,6 +176,19 @@ impl CloudConfig {
 
     pub(super) fn database_url(&self) -> Option<&str> {
         self.secrets.get("DATABASE_URL").map(|secret| secret.0.as_str())
+    }
+
+    /// Object-store settings when every part is configured. Values are validated when the client
+    /// is built, not here.
+    pub(super) fn object_store_settings(&self) -> Option<figcraft_cloud_storage::objects::ObjectStoreSettings> {
+        Some(figcraft_cloud_storage::objects::ObjectStoreSettings {
+            endpoint: self.s3_endpoint.clone()?,
+            region: self.s3_region.clone().unwrap_or_else(|| "us-east-1".to_string()),
+            bucket: self.s3_bucket.clone()?,
+            access_key: self.secrets.get("S3_ACCESS_KEY")?.as_str().to_string(),
+            secret_key: self.secrets.get("S3_SECRET_KEY")?.as_str().to_string(),
+            path_style: self.s3_force_path_style,
+        })
     }
 
     fn validate_production(&self) -> Result<(), &'static str> {
@@ -266,6 +297,29 @@ mod tests {
     #[test]
     fn defaults_are_local_single_tenant_and_all_roles() {
         assert_eq!(CloudConfig::parse([]), Ok(CloudConfig::default()));
+    }
+
+    #[test]
+    fn object_store_settings_need_endpoint_bucket_and_both_keys() {
+        let full = [
+            ("S3_ENDPOINT", "http://seaweedfs:8333"),
+            ("S3_BUCKET", "figcraft"),
+            ("S3_ACCESS_KEY", "FCkey"),
+            ("S3_SECRET_KEY", "secret"),
+            ("S3_FORCE_PATH_STYLE", "true"),
+        ];
+        let settings = CloudConfig::parse(full).unwrap().object_store_settings().unwrap();
+        assert_eq!(
+            (settings.endpoint.as_str(), settings.region.as_str(), settings.bucket.as_str()),
+            ("http://seaweedfs:8333", "us-east-1", "figcraft")
+        );
+        assert!(settings.path_style);
+        for missing in 0..4 {
+            let partial: Vec<_> = full.iter().enumerate().filter(|(index, _)| *index != missing).map(|(_, setting)| *setting).collect();
+            assert_eq!(CloudConfig::parse(partial).unwrap().object_store_settings(), None);
+        }
+        assert!(CloudConfig::parse([("S3_FORCE_PATH_STYLE", "yes")]).is_err());
+        assert!(!CloudConfig::parse([("S3_FORCE_PATH_STYLE", "false")]).unwrap().s3_force_path_style);
     }
 
     #[test]

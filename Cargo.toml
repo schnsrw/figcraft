@@ -43,6 +43,9 @@ proptest = "1"
 imbl = { version = "7", features = ["serde"] }
 postcard = { version = "1", default-features = false, features = ["alloc"] }
 sqlx = { version = "0.9", default-features = false, features = ["macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+# S3-001: SigV4 signing and presigning without I/O (BSD-2-Clause), sent with reqwest over rustls/ring.
+rusty-s3 = "0.10"
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 tokio = { version = "1", features = ["net", "rt", "time"] }
 
 # rendering / formats

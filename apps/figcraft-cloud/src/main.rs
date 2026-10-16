@@ -158,6 +158,18 @@ fn schema_is_ready(database_url: Option<&str>) -> bool {
     runtime.block_on(figcraft_cloud_storage::check_schema_version(database_url, MIN_SUPPORTED_SCHEMA_VERSION, MAX_SUPPORTED_SCHEMA_VERSION)).is_ok()
 }
 
+/// One signed `HeadBucket` against the configured store; unconfigured or unusable settings are
+/// not ready.
+fn object_store_is_ready(settings: Option<figcraft_cloud_storage::objects::ObjectStoreSettings>) -> bool {
+    let Some(store) = settings.and_then(|settings| figcraft_cloud_storage::objects::ObjectStore::new(&settings).ok()) else {
+        return false;
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        return false;
+    };
+    runtime.block_on(store.check_connectivity()).is_ok()
+}
+
 fn main() -> ExitCode {
     match parse_arguments(env::args_os().skip(1)) {
         Ok(Arguments::Help) => {
@@ -180,10 +192,15 @@ fn main() -> ExitCode {
             if let Some(role) = cli_role {
                 config.role = role;
             }
-            let ready = schema_is_ready(config.database_url());
-            if !ready {
+            let schema_ready = schema_is_ready(config.database_url());
+            if !schema_ready {
                 eprintln!("figcraft-cloud: database schema is unavailable or unsupported; readiness will fail");
             }
+            let objects_ready = object_store_is_ready(config.object_store_settings());
+            if !objects_ready {
+                eprintln!("figcraft-cloud: object store is unconfigured, unreachable or refused the bucket check; readiness will fail");
+            }
+            let ready = schema_ready && objects_ready;
             match health::serve(config.role, ready) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => {

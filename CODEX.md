@@ -126,7 +126,9 @@ the continuation point, a blocker or a major decision changes.
    S2 is complete (all 21 tasks and its gate); see `docs/saas/postgres-client-decision.md`, the
    `--migrate` and `--provision-db-roles` commands, cloud-storage migrations, transaction helper
    and metadata/document/external-mapping/idempotency/audit/snapshot repositories. Continue with
-   Next is S3 (S3-compatible objects and migration), starting with its first dependency-ready task.
+   S3 is in progress: S3-001 adds `figcraft-cloud-storage::objects` (`rusty-s3` signing over
+   `reqwest`/Rustls/ring; see `docs/saas/object-store-client-decision.md`) and an object-store
+   readiness check. Continue with S3-002 (object, reference and upload-reservation migrations).
    Open S2 follow-ups: a typed retryable/timeout error variant (timeouts and lost connections all
    map to `Database` today), expiry/takeover of stale pending idempotency keys, and snapshot
    restore in `DurableRoom::open` once S3 objects exist.

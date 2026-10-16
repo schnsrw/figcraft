@@ -117,7 +117,9 @@ resource limits.
 The current cloud scaffold exposes `/healthz`, `/readyz` and `/startupz` on port 8081, plus
 diagnostic `/api/v1/healthz` and `/ws/v1/health` transport routes. Liveness and startup indicate
 that the process health server is running; readiness becomes HTTP 200 when its listener is bound
-and the SQLx migration ledger has the supported schema version. It does not yet report
+and the SQLx migration ledger has the supported schema version, and (since S3-001) one signed
+`HeadBucket` request at startup proved the configured S3-compatible endpoint is reachable, accepts
+the mounted credentials and has the bucket. It does not yet report
 authorization or document-operation readiness. Its shell-free `--check-ready` command probes the
 local readiness endpoint for the distroless container health check. Do not treat transport
 readiness as a healthy SaaS product deployment.

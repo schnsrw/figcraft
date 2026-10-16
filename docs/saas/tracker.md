@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (1/20) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -20,7 +20,7 @@ the same commit as the completed task.
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
-| S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
+| S3 Object storage and migration | in progress | 1 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -515,8 +515,20 @@ the same commit as the completed task.
 
 ### Object repository
 
-- [ ] **S3-001** Implement S3-compatible object client configuration and connectivity checks.
+- [x] **S3-001** Implement S3-compatible object client configuration and connectivity checks.
   Depends on S1-GATE and S2-GATE.
+  Evidence: `object-store-client-decision.md` records the product owner's choice of `rusty-s3`
+  SigV4 signing sent with `reqwest` over Rustls/`ring` and compiled-in webpki roots (no OpenSSL,
+  `aws-lc-rs` or OS store), with licences and alternatives. `figcraft-cloud-storage::objects`
+  validates endpoint (http/https, host, no credentials, query, fragment or path), region, bucket
+  name and credentials before building a client with redirects and proxies disabled and connect and
+  total timeouts; credentials are never formatted and errors are fixed categories.
+  `check_connectivity` sends one signed `HeadBucket`. The cloud binary now keeps `S3_ENDPOINT`,
+  `S3_REGION`, `S3_BUCKET` and a strictly parsed `S3_FORCE_PATH_STYLE`, and readiness requires the
+  supported schema and a passing object-store check. Unit tests cover settings validation,
+  redaction and an unreachable endpoint; the SeaweedFS probe in the Compose smoke distinguishes
+  success, a wrong secret or key (`Unauthorized`), a missing bucket (`BucketMissing`) and a closed
+  port (`Unreachable`).
 - [ ] **S3-002** Create object, reference and upload-reservation migrations.
 - [ ] **S3-003** Implement tenant-scoped immutable object metadata and checksum verification.
 - [ ] **S3-004** Implement staging upload reservations with method, key, size, type and expiry.
@@ -924,3 +936,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S2-016/S2-019/S2-021: added bounded checksum-verified event replay, multi-connection PostgreSQL race probes for sequence, fencing and idempotency, and a read-only filesystem-server scanner with a versioned migration report (three parallel worktree agents, merged and verified together). S2 reaches 19/21. |
 | 2026-10-17 | S2-018: added `DurableRoom`, committing accepted batches under the fencing token before confirming or broadcasting them and reopening rooms by fenced takeover plus checksum-verified replay. S2 reaches 20/21. |
 | 2026-10-17 | S2-020/S2-GATE: added connection-kill, lock-wait, lost-acknowledgement, timeout, idempotency-boundary and room-level failure injection; the end-to-end create/edit/restart/restore gate probe; and a previous-schema upgrade probe. S2 complete (21/21) and its gate passes. |
+| 2026-10-17 | S3-001: chose `rusty-s3` + `reqwest` (Rustls/ring) for S3-compatible storage, added the validated object-store client and a signed `HeadBucket` readiness check. S3 reaches 1/20. |

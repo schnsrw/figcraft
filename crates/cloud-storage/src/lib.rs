@@ -9,6 +9,7 @@ pub mod external_mappings;
 pub mod idempotency;
 pub mod legacy_scan;
 pub mod metadata;
+pub mod objects;
 pub mod snapshots;
 
 /// A SQLx transaction bound to one trusted tenant identifier.
