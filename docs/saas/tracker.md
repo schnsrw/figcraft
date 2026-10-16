@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (16/21) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 in progress (19/21) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 16 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 19 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -359,7 +359,22 @@ the same commit as the completed task.
   disposable PostgreSQL probe covers unclaimed tokens, an in-transaction takeover, a not-yet-issued
   token, per-row token provenance, refused claims, and an old owner's late append after a takeover
   committed in another transaction. The distributed lease that decides who may claim remains S5.
-- [ ] **S2-016** Implement bounded event replay from a requested sequence.
+- [x] **S2-016** Implement bounded event replay from a requested sequence.
+  Evidence: `figcraft_cloud_storage::events::read_events` returns a `ReplayPage` of committed
+  batches with `seq > after_seq`, each decoded with `decode_event` (checksum checked before
+  decoding) and returned with its seq, fencing token and actor. The page holds at most
+  `MAX_REPLAY_EVENTS` (1000, clamped) events and a byte budget (clamped to `MAX_REPLAY_BYTES`). The
+  budget comes from a SQL window sum of `octet_length(payload)`, so payloads past the cut are never
+  fetched, and the next event is always returned so replay keeps moving. Reads stop at
+  `documents.current_seq`. A gap, a bad checksum or payload, or a missing row below `current_seq` is
+  `Corrupt`. A negative `after_seq` is `InvalidInput`. An `after_seq` past `current_seq` is
+  `SequenceConflict { current }`. A document the tenant cannot see is `NotFound`.
+  `next_after_seq`/`has_more` drive the caller's loop. The `event_replay` probe commits a chain
+  through `claim_sequencer` + `append_events` and replays it four ways: from 0, from the middle,
+  from current (empty), and as cross-tenant `NotFound`. It also pages with a count cap of 2 and with
+  0-byte, 1-byte and exact-two-payload budgets. Inside rolled-back transactions it plants damaged
+  rows (wrong checksum, checksummed garbage, a payload moved from another document, a gap, a missing
+  row, a bad row after a good one) and checks each is `Corrupt`.
 - [x] **S2-017** Implement snapshot metadata registration without object bytes.
   Evidence: `figcraft-cloud-storage::snapshots` adds `register_snapshot` (inserts a `'pending'`
   row referencing `object_id`/`checksum`/`size_bytes` only — the bytes themselves are later S3
@@ -375,10 +390,40 @@ the same commit as the completed task.
 
 ### Verification and migration input
 
-- [ ] **S2-019** Add PostgreSQL concurrency tests for sequence, fencing and idempotency races.
+- [x] **S2-019** Add PostgreSQL concurrency tests for sequence, fencing and idempotency races.
+  Evidence: `crates/cloud-storage/tests/event_concurrency.rs` races real PostgreSQL connections on a
+  4-worker multi-thread runtime over committed fixture data: a gate transaction holds the contended
+  row or insert lock and the test waits on `pg_stat_activity` until every racer is blocked before
+  releasing it, so no sleep stands in for synchronisation and every wait is bounded. Eight
+  same-sequence appenders commit exactly once (the rest get `SequenceConflict`), and four retrying
+  writers build an exact gap-free `1..=current_seq` log. A takeover orders strictly against an
+  in-flight append (it lands first, or a later append is fenced with `StaleFence`, and a rolled-back
+  takeover fences nobody). A free-running owner writes exactly up to the seq the takeover claimed
+  at, and every row carries the token current at its commit. Concurrent reservations of one key give
+  one `Reserved` with the rest `InFlight`, or `Conflict` for different requests, with no
+  unique-violation leak; a rolled-back reservation passes the key to exactly one waiter; racing
+  completions store one response, which every retry replays. A removed `FOR UPDATE` is caught by the
+  probe; the tests read their starting seq/token so they rerun safely on the same fixture.
 - [ ] **S2-020** Add failure-injection tests for commit, connection loss and retry boundaries.
-- [ ] **S2-021** Build a read-only scanner for the existing filesystem server data directory and a
+- [x] **S2-021** Build a read-only scanner for the existing filesystem server data directory and a
   migration report format.
+  Evidence: `figcraft-cloud-storage::legacy_scan::scan_data_directory` inventories a stopped
+  `figcraft-server` data directory without changing it: no writes, renames, locks or deletes, no
+  symlink following, only the fixed layout descended, and every read, listing, log record and
+  problem capped by `ScanLimits`. It reimplements just the `FCSN` snapshot and `FCLG` journal
+  framing (CRC-32, wire-encoded `SessionState`/`Journal`), with no dependency on the server app.
+  Logs are streamed one record at a time; each record is counted by kind and checked against the
+  server's replay rules (already applied, replayable, sequence break), and torn, damaged,
+  undecodable and stale-generation logs are classified. It also reads meta, links, libraries, usage,
+  root lists and plugin bundles (by size and SHA-256), but never copies secrets, token hashes or
+  addresses into the report. The versioned, serde `MigrationReport` (format 1) carries totals,
+  per-document ready/degraded/blocked status, `last_accepted_seq` and stable snake_case problem
+  codes, each with a fixed severity. `filesystem-migration-report.md` documents every field, what
+  blocks migration, the parts it leaves unparsed (library archives, replay of the changes
+  themselves) and how the S3 import will consume the report. Unit tests include a never-crash sweep
+  over every truncation, byte flip and random garbage. The tempdir probe covers a healthy directory,
+  damage classification, an unchanged tree after scanning, symlink escapes, plugin hash mismatches,
+  caps and bad roots. No database or migration was needed.
 
 ### S2 gate
 
@@ -795,3 +840,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S2-013: defined durable event payloads as the existing collaboration `Accepted` wire form with a domain-separated SHA-256 checksum bound to tenant, document and sequence. S2 reaches 14/21. |
 | 2026-10-17 | S2-014: added the locked, gap-free event append and a trigger keeping document sequence and fencing token monotonic; readiness advanced to schema version 20261016000005. S2 reaches 15/21. |
 | 2026-10-17 | S2-015: added `claim_sequencer` and a current-fencing-token check in the append under the document row lock. S2 reaches 16/21. |
+| 2026-10-17 | S2-016/S2-019/S2-021: added bounded checksum-verified event replay, multi-connection PostgreSQL race probes for sequence, fencing and idempotency, and a read-only filesystem-server scanner with a versioned migration report (three parallel worktree agents, merged and verified together). S2 reaches 19/21. |

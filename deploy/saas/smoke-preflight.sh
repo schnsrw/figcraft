@@ -205,6 +205,18 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
   cargo test --locked -p figcraft-cloud-storage --test event_repository -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/event-repository-cleanup.sql" > "$test_dir/event-repository-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/event-replay-preflight.sql" > "$test_dir/event-replay-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test event_replay -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/event-replay-cleanup.sql" > "$test_dir/event-replay-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/concurrency-preflight.sql" > "$test_dir/concurrency-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test event_concurrency -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/concurrency-cleanup.sql" > "$test_dir/concurrency-cleanup.log"
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-a.log" 2>&1 &
 migration_a=$!
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-b.log" 2>&1 &
@@ -281,4 +293,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
