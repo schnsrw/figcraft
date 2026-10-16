@@ -333,6 +333,62 @@ PostgreSQL or object-store backup.
 9. Re-enable outbound webhooks and AI providers.
 10. Record recovery point, lost interval if any and verification evidence.
 
+## Backup and restore
+
+A FigCraft Cloud backup has two halves that are only useful together: a PostgreSQL dump and a
+manifest of the object versions that were current when the dump was taken. Object keys are
+content-addressed but a key can still be overwritten or deleted, so the manifest records
+version ids, not just keys. The bucket must be versioned (`initialize_bucket` enables it) and its
+noncurrent-version retention (30 days by default) bounds how old a restorable backup can be.
+
+### Taking a backup
+
+1. Dump the database from one consistent snapshot as the administrator:
+   `pg_dump --format=custom --no-owner --no-privileges --file=figcraft-<utc>.dump "$ADMIN_URL"`.
+   `pg_dump` exports every table from one repeatable-read snapshot, so no extra lock is needed.
+2. Record the schema version: `SELECT MAX(version) FROM _sqlx_migrations WHERE success`.
+3. Immediately after the dump, list object versions per tenant prefix (`GET /<bucket>?versions&prefix=tenants/<tenant>/`,
+   every page until `IsTruncated` is false) and store `(key, versionId, ETag, Size, IsLatest)` with
+   the dump. Versions created between the dump and the listing are harmless: the manifest is
+   filtered to the keys the dump's `objects` rows name, and restore selects the newest version
+   whose bytes match the row's `sha256` and `size_bytes`.
+4. Store the dump, schema version and manifest together, encrypted, in a separate failure domain.
+
+### Restoring
+
+The order matters, because each step is checked against the previous one.
+
+1. Create an empty database and migrate it with the same binary release's
+   `figcraft-cloud --migrate` up to the backed-up schema version; `check_schema_version` must
+   report exactly that version. A dump is never restored into a different schema version.
+2. Load data only: `pg_restore --data-only --disable-triggers --single-transaction --dbname=…`
+   as the administrator. `documents.current_snapshot_id` and `document_snapshots` reference each
+   other, so either disable triggers for the load (as above) or load `documents` without the
+   pointer and set it after `document_snapshots`, which is what the S3-020 probe does.
+   Run `provision_database_roles` afterwards so the runtime role's grants cover the restored tables.
+3. For every `objects` row in a live state, find the manifest version for its key and `GET
+   ?versionId=` it; its SHA-256 and size must equal the row. If the key's current version differs
+   (the object was overwritten or deleted after the backup), copy the backed-up version back as
+   current before enabling traffic. A row with no matching retained version is reported, never
+   silently dropped.
+4. Replay every restored document's events with `read_events` to its `current_seq`; replay
+   verifies each event's checksum and contiguity.
+5. Continue with step 5 of [Restore](#restore) (Redis, workers, traffic).
+
+What must match after a restore: the schema version; the table set (every application table is in
+the dump); each document's `current_seq`, `fencing_token` and `current_snapshot_id`; each live
+object's key, `sha256` and `size_bytes` against the bytes of the manifest version; snapshot rows
+against their objects. Anything written after the backup point (events, objects, rows, deletes) is
+absent and is the recorded lost interval. A restored document's sequencer resumes with a new
+claim, which advances the restored fencing token, so a writer from before the restore cannot
+append.
+
+`crates/cloud-storage/tests/backup_restore.rs` (S3-020) exercises this end to end against
+PostgreSQL and the versioned bucket: it backs up a document (every application table from one
+repeatable-read transaction, plus the version manifest), mutates both halves, restores into a
+second migrated database and proves the backed-up state comes back and the mutations do not.
+Fixtures: `deploy/saas/backup-restore-preflight.sql` and `backup-restore-cleanup.sql`.
+
 ## Scaling thresholds
 
 Scale API replicas on CPU, request latency and database-pool saturation. Scale relay replicas on
