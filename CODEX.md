@@ -70,7 +70,8 @@ the continuation point, a blocker or a major decision changes.
   remain later work. S2-010/S2-011/S2-012/S2-017 add external mapping, idempotency-key, append-only
   audit and snapshot metadata repositories (implemented as four parallel subagent tasks, each
   owning only its own new files, with this session wiring `lib.rs` and the Compose smoke script
-  afterward); S2 reaches 13/21. Production RLS policies remain S4-014 work, and durable collaboration is
+  afterward). S2-013 defines event payloads as the collaboration `Accepted` wire form with a
+  tenant/document/sequence-bound SHA-256 checksum (`figcraft-cloud-storage::events`); S2 reaches 14/21. Production RLS policies remain S4-014 work, and durable collaboration is
   still pending. The cloud image builds with workspace Rust 1.95 (SQLx declares MSRV 1.94).
 - `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
@@ -117,10 +118,10 @@ the continuation point, a blocker or a major decision changes.
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
    `docs/saas/dependency-images.md`. S1-018 and S1-GATE pass their transport and startup criteria.
-   S2-001 through S2-012 and S2-017 are complete; see `docs/saas/postgres-client-decision.md`, the
+   S2-001 through S2-013 and S2-017 are complete; see `docs/saas/postgres-client-decision.md`, the
    `--migrate` and `--provision-db-roles` commands, cloud-storage migrations, transaction helper
    and metadata/document/external-mapping/idempotency/audit/snapshot repositories. Continue with
-   the S2-013..S2-016/S2-018 collaboration-event chain (sequential: each depends on the previous),
+   the S2-014..S2-016/S2-018 collaboration-event chain (sequential: each depends on the previous),
    then S2-019..S2-021 (concurrency/failure tests and the filesystem migration scanner).
    Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
 3. Update task evidence and milestone counts in the same commit as each completed task.

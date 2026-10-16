@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (13/21) · **Last updated:** 2026-10-16
+> **Status:** S1 complete (22/22); S2 in progress (14/21) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 13 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 14 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -322,8 +322,20 @@ the same commit as the completed task.
 
 ### Collaboration event persistence
 
-- [ ] **S2-013** Define encoded event storage and checksum format using existing collaboration
+- [x] **S2-013** Define encoded event storage and checksum format using existing collaboration
   messages.
+  Evidence: `figcraft-cloud-storage::events` stores each accepted batch as its existing
+  collaboration wire form (`figcraft_collab::message::encode` of `Accepted`), the same value the
+  filesystem server journals as `Journal::Accepted`, so no second document format exists. The
+  32-byte checksum is SHA-256 over a versioned domain tag, the tenant and document UUID bytes, the
+  big-endian sequence, the payload length and the payload, so intact bytes copied to another row,
+  document or tenant fail verification. `decode_event` checks size and checksum before decoding
+  and rejects a payload whose inner sequence differs from its row; `encode_event` refuses sequences
+  outside `1..=i64::MAX` and payloads over the table's 16 MiB limit. Unit tests pin the checksum
+  frame byte for byte and cover round trip, relocation, bit flips, truncated checksums, sequence
+  bounds, oversize payloads, checksummed garbage and a mutation sweep. The format is documented in
+  `data-tenancy-integration.md`. Client-id issue and refusals stay session state, not events. No
+  migration was needed.
 - [ ] **S2-014** Implement atomic sequence allocation with unique `(tenant, document, seq)`.
 - [ ] **S2-015** Implement append transaction that validates current fencing token.
 - [ ] **S2-016** Implement bounded event replay from a requested sequence.
@@ -759,3 +771,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S2-009: added document create/read/rename/archive/restore/soft-delete repositories and a `deleted_at` grace-period migration advancing readiness to version 20261016000003; fixed two pre-existing Compose smoke defects (unreadable `umask 077` secrets under a nonroot container user, and a stale cloud schema-version constant) found while verifying it end-to-end. |
 | 2026-10-16 | S2-010/S2-011/S2-012/S2-017: added external mapping, idempotency-key, append-only audit and snapshot metadata repositories in parallel (each in its own new module/test/fixture files, with the coordinating session wiring `lib.rs` and the Compose smoke script afterward); `20261016000004_external_mappings.sql` advanced readiness to version 20261016000004. S2 reaches 13/21. |
 | 2026-10-17 | S2-010 fix: granted the runtime role access to `external_mappings` (its repository probe failed with a permission error in the full Compose smoke); `role-preflight.sql` now requires migrator ownership and runtime `SELECT` on every public table, so a future table missing from the grant list fails the smoke. |
+| 2026-10-17 | S2-013: defined durable event payloads as the existing collaboration `Accepted` wire form with a domain-separated SHA-256 checksum bound to tenant, document and sequence. S2 reaches 14/21. |

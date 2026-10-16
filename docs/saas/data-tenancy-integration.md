@@ -78,6 +78,15 @@ RLS policy work must account for membership-based tenant discovery before a tena
 Required constraints include unique `(tenant_id, document_id, seq)` events, monotonic document
 sequence updates and one active snapshot pointer belonging to the same document and tenant.
 
+An event row stores one batch the collaboration server accepted. `payload` is that batch's existing
+collaboration wire form (`figcraft_collab::message::encode` of `Accepted`: the wire-version byte,
+then postcard), at most 16 MiB. `checksum` is SHA-256 over
+`"figcraft.cloud.document-event.v1\0" || tenant_id (16 bytes) || document_id (16 bytes) || seq
+(i64 big-endian) || payload length (u64 big-endian) || payload`, so a payload moved to another
+row, document or tenant fails verification. Readers verify the checksum before decoding and reject a
+payload whose inner sequence differs from its row. Client-id issue and refusals are session state,
+not events. The codec is `figcraft-cloud-storage::events`.
+
 ### Objects and assets
 
 | Table | Required fields |
