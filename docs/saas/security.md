@@ -1,6 +1,6 @@
 # SaaS security
 
-> **Status:** target controls · **Last updated:** 2026-10-16
+> **Status:** target controls · **Last updated:** 2026-10-17
 
 ## Security objectives
 
@@ -88,6 +88,47 @@
 - Expire abandoned staging objects.
 - Keep malware scanning pluggable for enterprise policy without treating it as a replacement for
   safe parsing.
+
+### Upload validation budgets
+
+`figcraft-cloud-storage::validation::validate` runs on staged bytes before promotion. It reads
+headers and container directories only (no pixel decoding, no decompression) and refuses with a
+fixed reason code (`media_mismatch`, `pixel_budget`, `compression_ratio`, `unsafe_name`, …) that
+is safe to return to clients and audit records. `Budgets::DEFAULT`, which plans may only tighten:
+
+| Budget | Default | Applies to |
+|---|---|---|
+| Upload size | 512 MiB | every upload |
+| Pixels (width × height) | 100 MP | PNG `IHDR`, first JPEG `SOFn`, WebP `VP8 `/`VP8L`/`VP8X`, GIF logical screen |
+| Width or height | 65 535 | images; zero is refused |
+| Decoded bytes | 512 MiB (4 bytes a pixel, 8 at 16-bit depth) | images |
+| Entries | 50 000 (32 plugin assets) | `.figcraft` zips, plugin bundles |
+| Entry size | 512 MiB declared uncompressed (256 KiB manifest, 16 MiB module) | zips, plugin bundles |
+| Expanded bytes | 2 GiB declared uncompressed in total | zips |
+| Compression ratio | 250:1 for entries above 1 MiB | zips |
+| Entry name | 255 bytes | zips (plugin asset names: 64) |
+
+- Accepted types are `image/png`, `image/jpeg`, `image/webp`, `image/gif`,
+  `application/x-figcraft` (documents and published libraries) and
+  `application/x-figcraft-plugin`. The declared type is matched without ASCII case and must agree
+  with the magic bytes; parameters are refused.
+- SVG and PDF are refused: both carry scripts, external references and (SVG) XML entities, and a
+  header check cannot make them safe. SVG enters through the client's importer, which converts it
+  to document nodes; a sanitizing server path would need a full parser and is not offered.
+- PNG `IHDR` must be the first chunk with a matching CRC and a legal depth and colour type. WebP
+  must span the upload exactly and start with a key frame header. JPEG segment walks stop after
+  1 024 segments; a zero height (deferred to `DNL`) is refused.
+- Zips are read from the end-of-central-directory record, which must end the upload exactly
+  (comment included) and follow the directory directly. Every entry must be stored or deflate,
+  unencrypted and not zip64; its local header must repeat the central name and method; entries
+  must be disjoint and the first must start at byte 0, which refuses overlap bombs and prepended
+  polyglots. Names must be UTF-8 relative paths without control characters, `\`, `:`, empty, `.`
+  or `..` segments, and unique without ASCII case. A `.figcraft` must contain `document.json`.
+- Plugin bundles (`FCPLUGB1`) are uncompressed: the manifest must be UTF-8, the module must start
+  with the WebAssembly version 1 header, asset names follow the plugin crate's plain-name rule and
+  no bytes may follow the last asset.
+- Declared sizes are claims. Readers that later decompress or decode still enforce the same
+  limits while streaming, so a lying header cannot expand past them.
 
 ## AI controls
 

@@ -21,6 +21,7 @@ crc32fast = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]
+zip = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 
 [lints]
