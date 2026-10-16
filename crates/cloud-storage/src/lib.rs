@@ -8,6 +8,7 @@ pub mod bucket_admin;
 pub mod downloads;
 pub mod events;
 pub mod external_mappings;
+pub mod garbage_collection;
 pub mod idempotency;
 pub mod legacy_scan;
 pub mod metadata;
