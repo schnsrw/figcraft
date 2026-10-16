@@ -233,7 +233,7 @@ A library file or plugin is deferred (`deferred[].reason`) when it is:
 - `library_name_invalid`: any other name, or a repeated version.
 - `empty`.
 - `plugin_bundle_invalid`: the bundle is missing or doesn't match the index.
-- `plugin_version_not_integer`: the plugin key layout takes a `u64` version, while server plugin
-  versions are free text.
+- `plugin_version_invalid`: the plugin version cannot be a key segment: 1–64 lowercase letters,
+  digits, `.` and `-`, starting with a letter or digit (for example `1.2.0` or `2.0.0-beta.1`).
 - `plugin_id_invalid`, `plugin_digest_invalid`, `plugin_duplicate`, `size_out_of_range` or
   `limit_reached`.

@@ -140,8 +140,8 @@ pub enum DeferralReason {
     Empty,
     /// The plugin bundle is missing or does not match the index.
     PluginBundleInvalid,
-    /// The plugin version is not a decimal integer, which the plugin key layout requires.
-    PluginVersionNotInteger,
+    /// The plugin version cannot be a key segment (see `keys::plugin_version_valid`).
+    PluginVersionInvalid,
     /// The plugin id is empty or too long.
     PluginIdInvalid,
     /// The plugin digest is not 64 lowercase hexadecimal characters.
@@ -687,7 +687,7 @@ impl Planner<'_> {
                 Some(_) => format!("plugins/{}.bin", entry.sha256),
                 None => format!("plugins/index.json#{index}"),
             };
-            let version = entry.version.parse::<u64>().ok().filter(|_| entry.version.bytes().all(|byte| byte.is_ascii_digit()));
+            let version = keys::plugin_version_valid(&entry.version).then_some(entry.version.as_str());
             let id_valid = (1..=MAX_PLUGIN_ID_BYTES).contains(&entry.id.len());
             let reason = if index >= MAX_PLAN_PLUGINS {
                 Some(DeferralReason::LimitReached)
@@ -702,7 +702,7 @@ impl Planner<'_> {
             } else if !fits_bigint(entry.bytes) {
                 Some(DeferralReason::SizeOutOfRange)
             } else if version.is_none() {
-                Some(DeferralReason::PluginVersionNotInteger)
+                Some(DeferralReason::PluginVersionInvalid)
             } else if !seen.insert((entry.id.as_str(), version)) {
                 Some(DeferralReason::PluginDuplicate)
             } else {
@@ -711,7 +711,9 @@ impl Planner<'_> {
             match (reason, digest, version) {
                 (None, Some(digest), Some(version)) => {
                     let plugin_id = derived_id(tenant, &["plugin", &entry.id]);
-                    let key = keys::plugin(tenant, plugin_id, version, &digest);
+                    let Some(key) = keys::plugin(tenant, plugin_id, version, &digest) else {
+                        return Err(PlanError::IdDerivation);
+                    };
                     if !valid_key(&key) {
                         return Err(PlanError::IdDerivation);
                     }

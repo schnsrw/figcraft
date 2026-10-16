@@ -92,9 +92,22 @@ pub mod keys {
         format!("tenants/{tenant}/libraries/{library}/{version}-{}.figcraft", hex_digest(sha256))
     }
 
+    /// Whether `version` can be a plugin key segment: 1–64 lowercase letters, digits, `.` and `-`,
+    /// starting with a letter or digit (semantic versions such as `1.2.0` or `2.0.0-beta.1`; build
+    /// metadata after `+` is not part of a version's identity here).
     #[must_use]
-    pub fn plugin(tenant: TenantId, plugin: Uuid, version: u64, sha256: &[u8; 32]) -> String {
-        format!("tenants/{tenant}/plugins/{plugin}/{version}-{}.bin", hex_digest(sha256))
+    pub fn plugin_version_valid(version: &str) -> bool {
+        (1..=64).contains(&version.len())
+            && version.bytes().next().is_some_and(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+            && version.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-'))
+            && !version.contains("..")
+    }
+
+    /// The key of plugin `plugin`'s `version` bundle, or `None` when `version` is not a valid
+    /// segment ([`plugin_version_valid`]).
+    #[must_use]
+    pub fn plugin(tenant: TenantId, plugin: Uuid, version: &str, sha256: &[u8; 32]) -> Option<String> {
+        plugin_version_valid(version).then(|| format!("tenants/{tenant}/plugins/{plugin}/{version}-{}.bin", hex_digest(sha256)))
     }
 
     #[must_use]
@@ -317,12 +330,26 @@ mod tests {
             (keys::snapshot(tenant, document, 7, &digest), format!("{prefix}/documents/20000000-0000-4000-8000-000000000002/snapshots/7-{hex}.bin")),
             (keys::asset(tenant, &digest), format!("{prefix}/assets/{hex}")),
             (keys::library(tenant, id, 2, &digest), format!("{prefix}/libraries/30000000-0000-4000-8000-000000000003/2-{hex}.figcraft")),
-            (keys::plugin(tenant, id, 3, &digest), format!("{prefix}/plugins/30000000-0000-4000-8000-000000000003/3-{hex}.bin")),
+            (
+                keys::plugin(tenant, id, "1.2.0-beta.1", &digest).unwrap(),
+                format!("{prefix}/plugins/30000000-0000-4000-8000-000000000003/1.2.0-beta.1-{hex}.bin"),
+            ),
             (keys::thumbnail(tenant, document, 9), format!("{prefix}/thumbnails/20000000-0000-4000-8000-000000000002/9.webp")),
             (keys::staging(tenant, id), format!("{prefix}/staging/30000000-0000-4000-8000-000000000003")),
         ] {
             assert_eq!(key, expected);
             assert!(valid_key(&key), "{key}");
+        }
+    }
+
+    #[test]
+    fn plugin_versions_are_bounded_key_segments() {
+        for version in ["3", "1.2.0", "2.0.0-beta.1", "0.1"] {
+            assert!(keys::plugin_version_valid(version), "{version}");
+        }
+        for version in ["", "1..2", ".1", "-1", "1.2.0+build", "1/2", "V1", "1 2", &"1".repeat(65)] {
+            assert!(!keys::plugin_version_valid(version), "{version}");
+            assert_eq!(keys::plugin("10000000-0000-4000-8000-000000000001".parse().unwrap(), Uuid::nil(), version, &[0; 32]), None);
         }
     }
 

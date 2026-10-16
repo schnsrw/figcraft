@@ -140,7 +140,8 @@ fn mixed_report() -> MigrationReport {
             PluginSummary { id: "grid".into(), version: "3".into(), bytes: 64, sha256: "ab".repeat(32), bundle_present: true, bundle_valid: true },
             PluginSummary {
                 id: "notes".into(),
-                version: "1.2.0".into(),
+                // Build metadata is not part of a key segment, so this version is deferred.
+                version: "1.2.0+build".into(),
                 bytes: 70,
                 sha256: "cd".repeat(32),
                 bundle_present: true,
@@ -286,7 +287,7 @@ fn stale_logs_are_ignored_and_plugins_are_planned_or_deferred() {
     let key = grid.object.object_key.as_deref().unwrap();
     assert!(valid_key(key) && key.ends_with(&format!("/3-{}.bin", "ab".repeat(32))), "{key}");
     let reasons: BTreeSet<DeferralReason> = plan.deferred.iter().filter(|d| d.legacy_document.is_none()).map(|d| d.reason).collect();
-    assert_eq!(reasons, BTreeSet::from([DeferralReason::PluginVersionNotInteger, DeferralReason::PluginBundleInvalid]));
+    assert_eq!(reasons, BTreeSet::from([DeferralReason::PluginVersionInvalid, DeferralReason::PluginBundleInvalid]));
 }
 
 /// The JSON layout is part of the format: pin it, ids included.

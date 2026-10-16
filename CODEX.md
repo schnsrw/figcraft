@@ -55,7 +55,7 @@ the continuation point, a blocker or a major decision changes.
 - S1 is complete at 22/22 tasks and its cloud foundation gate passes. The cloud binary now serves
   `/api/v1/healthz` and diagnostic `/ws/v1/health` upgrades in the `api`, `relay` and `all` roles;
   `/readyz` checks transport startup and the SQLx schema-version range, not database-backed product
-  operations. S3-002 requires schema version `20261017000001`; Compose runs the one-shot
+  operations. The cloud binary requires schema version `20261017000002`; Compose runs the one-shot
   migration job before cloud roles. A disposable smoke starts each role from one image, checks
   web/API/WebSocket routing and rejects unsafe production settings. S2 is in progress: S2-001
   selects SQLx 0.9 with embedded SQL migrations, PostgreSQL advisory locking and Rustls; S2-002 adds explicit
