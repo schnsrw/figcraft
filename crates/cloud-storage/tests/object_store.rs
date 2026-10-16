@@ -37,3 +37,37 @@ async fn connectivity_check_distinguishes_reachability_credentials_and_bucket() 
     assert_eq!(ObjectStore::new(&closed_port)?.check_connectivity().await, Err(ObjectStoreError::Unreachable));
     Ok(())
 }
+
+#[tokio::test]
+async fn presigned_requests_upload_and_download_exactly_one_key() -> Result<(), Box<dyn std::error::Error>> {
+    let Some(settings) = settings()? else {
+        return Ok(());
+    };
+    let store = ObjectStore::new(&settings)?;
+    let key = format!("tenants/a0000000-0000-4000-8000-000000000001/staging/{}", figcraft_cloud_domain::Uuid::new_v4());
+    let body = b"presigned probe".to_vec();
+    // `reqwest::Client::new()` panics under `rustls-no-provider`: every client needs an explicit
+    // provider, as `ObjectStore` gives its own.
+    let tls = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()?
+        .with_root_certificates(rustls::RootCertStore::empty())
+        .with_no_client_auth();
+    let client = reqwest::Client::builder().tls_backend_preconfigured(tls).build()?;
+    let ttl = std::time::Duration::from_secs(60);
+
+    let put = store.presign_put(&key, ttl)?;
+    assert!(client.put(&put).body(body.clone()).send().await?.status().is_success());
+    let get = store.presign_get(&key, ttl)?;
+    assert_eq!(client.get(&get).send().await?.bytes().await?.as_ref(), body.as_slice());
+
+    // The signature covers the method and key: it cannot be reused for another key or method,
+    // and altering it is refused.
+    let other_key = get.replacen(&key, &format!("{key}-other"), 1);
+    assert!(!client.get(&other_key).send().await?.status().is_success());
+    assert!(!client.delete(&get).send().await?.status().is_success());
+    let tampered = get.replacen("X-Amz-Signature=", "X-Amz-Signature=0", 1);
+    assert!(!client.get(&tampered).send().await?.status().is_success());
+    assert_eq!(store.get_object(&key, 1024).await?, body);
+    store.delete_object(&key).await?;
+    Ok(())
+}

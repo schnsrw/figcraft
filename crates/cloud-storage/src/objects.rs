@@ -24,6 +24,8 @@ const SELF_SIGNED_TTL: Duration = Duration::from_secs(60);
 const MAX_SETTING_BYTES: usize = 2048;
 /// Longest object key this client signs (S3 allows 1024 bytes).
 pub const MAX_KEY_BYTES: usize = 1024;
+/// Longest validity of a presigned request handed to a client.
+pub const MAX_PRESIGN_TTL: Duration = Duration::from_secs(15 * 60);
 /// Largest body this client uploads or downloads in one request; larger objects need multipart
 /// transfer, which is not implemented.
 pub const MAX_SINGLE_TRANSFER_BYTES: u64 = 256 * 1024 * 1024;
@@ -88,9 +90,9 @@ impl fmt::Debug for ObjectStoreSettings {
 /// A configured S3-compatible bucket. Cloning shares one connection pool.
 #[derive(Clone)]
 pub struct ObjectStore {
-    client: reqwest::Client,
-    bucket: Arc<Bucket>,
-    credentials: Arc<Credentials>,
+    pub(crate) client: reqwest::Client,
+    pub(crate) bucket: Arc<Bucket>,
+    pub(crate) credentials: Arc<Credentials>,
 }
 
 impl fmt::Debug for ObjectStore {
@@ -184,6 +186,20 @@ impl ObjectStore {
         Ok(body)
     }
 
+    /// A presigned `PUT` for exactly `key`, valid for `ttl` (1 second to [`MAX_PRESIGN_TTL`]).
+    /// Callers must have reserved the key and authorized the uploader first.
+    pub fn presign_put(&self, key: &str, ttl: Duration) -> Result<String, ObjectStoreError> {
+        let ttl = presign_ttl(ttl)?;
+        Ok(self.signed_object_url(key, |bucket, credentials| bucket.put_object(Some(credentials), key).sign(ttl))?.into())
+    }
+
+    /// A presigned `GET` for exactly `key`, valid for `ttl` (1 second to [`MAX_PRESIGN_TTL`]).
+    /// Callers must have authorized the download first.
+    pub fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, ObjectStoreError> {
+        let ttl = presign_ttl(ttl)?;
+        Ok(self.signed_object_url(key, |bucket, credentials| bucket.get_object(Some(credentials), key).sign(ttl))?.into())
+    }
+
     /// Delete `key`. Deleting a missing key succeeds, as S3 does.
     pub async fn delete_object(&self, key: &str) -> Result<(), ObjectStoreError> {
         let url = self.signed_object_url(key, |bucket, credentials| bucket.delete_object(Some(credentials), key).sign(SELF_SIGNED_TTL))?;
@@ -208,6 +224,13 @@ pub fn valid_key(key: &str) -> bool {
     (1..=MAX_KEY_BYTES).contains(&key.len())
         && key.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'/' | b'.' | b'-' | b'_'))
         && key.split('/').all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn presign_ttl(ttl: Duration) -> Result<Duration, ObjectStoreError> {
+    if ttl < Duration::from_secs(1) || ttl > MAX_PRESIGN_TTL {
+        return Err(ObjectStoreError::InvalidConfig);
+    }
+    Ok(Duration::from_secs(ttl.as_secs()))
 }
 
 fn status_result(status: u16) -> Result<(), ObjectStoreError> {
@@ -363,6 +386,19 @@ mod tests {
         assert_eq!(store.delete_object("a//b").await, Err(ObjectStoreError::InvalidKey));
         assert_eq!(store.put_object("a/b", vec![1], "").await, Err(ObjectStoreError::InvalidConfig));
         assert_eq!(store.put_object("a/b", vec![1], "image/png").await, Err(ObjectStoreError::Unreachable));
+    }
+
+    #[test]
+    fn presigned_requests_name_one_key_and_a_bounded_expiry() {
+        let store = ObjectStore::new(&settings()).unwrap();
+        let get = store.presign_get("tenants/a/assets/ab", Duration::from_secs(300)).unwrap();
+        assert!(get.starts_with("http://seaweedfs:8333/figcraft/tenants/a/assets/ab?"), "{get}");
+        assert!(get.contains("X-Amz-Expires=300") && get.contains("X-Amz-Signature="), "{get}");
+        assert!(!get.contains("secret-value-123"));
+        assert!(store.presign_put("tenants/a/staging/x", MAX_PRESIGN_TTL).unwrap().contains("X-Amz-Expires=900"));
+        assert_eq!(store.presign_get("a/../b", Duration::from_secs(60)), Err(ObjectStoreError::InvalidKey));
+        assert_eq!(store.presign_put("a/b", MAX_PRESIGN_TTL + Duration::from_secs(1)), Err(ObjectStoreError::InvalidConfig));
+        assert_eq!(store.presign_get("a/b", Duration::from_millis(500)), Err(ObjectStoreError::InvalidConfig));
     }
 
     #[tokio::test]

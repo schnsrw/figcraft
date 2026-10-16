@@ -18,6 +18,9 @@ with [`reqwest`](https://crates.io/crates/reqwest) 0.13.
   Mozilla root store (`webpki-roots`), matching the workspace's existing TLS choice (`sqlx`'s
   `tls-rustls-ring-webpki`, `figcraft-collab-net`). No OpenSSL, no `aws-lc-rs`, and no OS
   certificate store is used at runtime.
+- Because no process-wide Rustls provider is installed, `reqwest::Client::new()` and an unconfigured
+  `Client::builder().build()` panic under `rustls-no-provider`. Every client must be built with
+  `tls_backend_preconfigured` and an explicit `ring` configuration, as `ObjectStore` does.
 - Redirects and proxies are disabled so a signed request reaches only the configured endpoint;
   every request has connect and total timeouts. Errors are fixed categories that never echo a
   URL, signature or response body.
