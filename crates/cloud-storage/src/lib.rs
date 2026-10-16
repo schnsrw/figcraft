@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod object_metadata;
 pub mod objects;
 pub mod snapshots;
+pub mod uploads;
 
 /// A SQLx transaction bound to one trusted tenant identifier.
 ///
