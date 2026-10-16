@@ -1581,10 +1581,14 @@ dependencies = [
 name = "figcraft-cloud-storage"
 version = "0.6.0"
 dependencies = [
+ "base64 0.22.1",
  "crc32fast",
  "figcraft-cloud-domain",
  "figcraft-collab",
+ "jiff",
+ "md-5",
  "reqwest",
+ "roxmltree 0.21.1",
  "rustls",
  "rusty-s3",
  "serde",
