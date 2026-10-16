@@ -1594,6 +1594,7 @@ dependencies = [
  "tokio",
  "url",
  "webpki-roots",
+ "zip",
 ]
 
 [[package]]

@@ -15,6 +15,7 @@ pub mod object_references;
 pub mod objects;
 pub mod snapshots;
 pub mod uploads;
+pub mod validation;
 
 /// A SQLx transaction bound to one trusted tenant identifier.
 ///
