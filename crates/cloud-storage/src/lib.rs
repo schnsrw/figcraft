@@ -9,6 +9,7 @@ pub mod downloads;
 pub mod events;
 pub mod external_mappings;
 pub mod idempotency;
+pub mod legacy_import;
 pub mod legacy_scan;
 pub mod metadata;
 pub mod migration_plan;

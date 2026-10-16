@@ -237,3 +237,43 @@ A library file or plugin is deferred (`deferred[].reason`) when it is:
   digits, `.` and `-`, starting with a letter or digit (for example `1.2.0` or `2.0.0-beta.1`).
 - `plugin_id_invalid`, `plugin_digest_invalid`, `plugin_duplicate`, `size_out_of_range` or
   `limit_reached`.
+
+## Import and cutover verification
+
+`legacy_import::import_plan` (S3-018) executes a dry-run plan against the stopped server's data
+directory. It refuses a plan with an unknown `format_version`, a `bucket` other than the store's,
+or any blocker, except `exclusion_approval_required` when the operator passes
+`approve_exclusions` after reviewing `excluded`. Excluded documents are never touched and are
+returned as `skipped`. One failing document does not stop the others.
+
+For each planned document, `import_document` first re-reads `snapshot.bin` and `log.bin`
+read-only. It never follows links and caps reads by `ScanLimits`. The snapshot must still decode
+at the planned sequence and size. The log's replayable accepted batches (same generation, after
+the snapshot sequence, consecutive, up to the first damaged record) must still number
+`events.count` and end at `document.current_seq`. Any difference is `legacy_changed`: rescan and
+replan. Then four stages run. Each stage is idempotent and is detected from existing rows:
+
+| Stage | Writes | Already done when |
+| --- | --- | --- |
+| `document` | `documents` row with the plan's id, name, workspace and project, `current_seq` = snapshot seq | the row exists (a different workspace, project or non-active state is `diverged`) |
+| `mapping` | `external_mappings` (`figcraft-server`, `document`, legacy id) | the mapping exists for the same id (another id is `diverged`) |
+| `snapshot` | content-addressed object (`keys::snapshot`, body = `SessionState` wire bytes), `objects` row registered and verified against the stored bytes, `document_snapshots` row registered and verified, a `document_snapshot` object reference, `current_snapshot_id` | object and snapshot rows are `verified` and the document points at the snapshot |
+| `events` | one sequencer claim, then `append_events` in chunks of at most 256 batches or 8 MiB of legacy record bytes, one transaction each | `documents.current_seq` equals the plan's last sequence |
+
+Events are appended only after the document's committed `current_seq`, so a rerun after a crash
+in any stage continues where the last commit left off and never duplicates or skips a batch. A
+`current_seq` below the snapshot or beyond the legacy log is `diverged`. A completed document
+reruns as `already_complete` and writes nothing: no claim, no upload. Each outcome reports
+whether this run created the document (`created`), added anything (`resumed`) or found
+everything in place, plus per-stage flags and counts (`events_appended`,
+`events_already_present`). `ImportOptions::stop_after` stops after a named stage, for staged
+imports and crash rehearsal. Event rows carry `events.actor_principal_id` and the new claim's
+fencing token. Replay of an imported document starts at the snapshot sequence; there are no
+event rows at or below it.
+
+Not imported yet: library files, links (token hashes) and plugin bundles. Plugins need a
+publisher and a manifest, which the legacy index doesn't have. These are reported by cutover
+verification and block cutover until a later import covers them.
+
+Probe: `crates/cloud-storage/tests/legacy_import.rs` with `deploy/saas/legacy-import-preflight.sql`
+and `legacy-import-cleanup.sql` (fixture tenant `ad000000-…-000000000001`).
