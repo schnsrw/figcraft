@@ -135,8 +135,9 @@ the continuation point, a blocker or a major decision changes.
    budgets, `--init-object-store` bucket initialization and the dry-run migration planner; S3 is at
    10/20; S3-008..S3-012, S3-015 and S3-016 add snapshot storage with
    `DurableRoom::recover` (snapshot first, then events), assets, libraries, plugins, exports and
-   thumbnails, garbage collection and reconciliation; S3 is at 17/20. Continue with S3-018..S3-020
-   and the gate. Testing policy: targeted suites per step and a quick scan before push; run the full
+   thumbnails, garbage collection and reconciliation; S3-018..S3-020 add the checkpointed legacy import, read-only cutover
+   verification and a backup/restore probe; S3 is complete (20/20) and its gate passes. Continue with
+   S4 (identity, tenancy and authorization), starting with its first dependency-ready task. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.
    Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
    plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight

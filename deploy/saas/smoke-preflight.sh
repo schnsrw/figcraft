@@ -182,6 +182,18 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_D
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/object-repository-cleanup.sql" > "$test_dir/object-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/legacy-import-preflight.sql" > "$test_dir/legacy-import-preflight.log"
+FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE="$test_dir/host_admin_database_url" FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test legacy_import -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/legacy-import-cleanup.sql" > "$test_dir/legacy-import-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/backup-restore-preflight.sql" > "$test_dir/backup-restore-preflight.log"
+FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE="$test_dir/host_admin_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test backup_restore -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/backup-restore-cleanup.sql" > "$test_dir/backup-restore-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/document-snapshot-preflight.sql" > "$test_dir/document-snapshot-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
   cargo test --locked -p figcraft-cloud-storage --test document_snapshots -- --nocapture --test-threads=1
@@ -399,4 +411,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection; object-store connectivity, credential and bucket checks; object read-back verification; upload reservations and validated promotion; authorized presigned downloads; references and retention holds; bucket versioning and lifecycle initialization; snapshot store and recovery; assets, libraries, plugins, exports and thumbnails; garbage collection; reconciliation.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection; object-store connectivity, credential and bucket checks; object read-back verification; upload reservations and validated promotion; authorized presigned downloads; references and retention holds; bucket versioning and lifecycle initialization; snapshot store and recovery; assets, libraries, plugins, exports and thumbnails; garbage collection; reconciliation; repeatable legacy import and cutover verification; backup and restore.\n'

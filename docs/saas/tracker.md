@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (17/20) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -20,7 +20,7 @@ the same commit as the completed task.
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
-| S3 Object storage and migration | in progress | 17 / 20 | Verified object storage and repeatable migration |
+| S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -1038,15 +1038,114 @@ the same commit as the completed task.
   the JSON format, pinned against `tests/migration_plan_golden.json`; - a 2,000-report pseudo-random
   sweep with hostile values, checking invariants: unique ids, valid keys, `BIGINT` bounds, `seq +
   count = current_seq`, totals. Unit tests add a junk-string sweep over the validators.
-- [ ] **S3-018** Implement repeatable filesystem-to-PostgreSQL/S3 migration with per-resource
+- [x] **S3-018** Implement repeatable filesystem-to-PostgreSQL/S3 migration with per-resource
   checkpoints.
-- [ ] **S3-019** Verify migrated snapshots, logs, links, libraries and plugins before cutover.
-- [ ] **S3-020** Add backup/restore integration test covering database and bucket versions.
+  Evidence: `legacy_import::import_plan` and `import_document`
+  (crates/cloud-storage/src/legacy_import.rs) run a `MigrationPlan` against a stopped legacy data
+  directory. A plan is refused if its format is unknown, its bucket differs from the store's, or it
+  has any blocker other than `exclusion_approval_required`, which
+  `ImportOptions::approve_exclusions` accepts. Excluded documents are never touched and come back as
+  `skipped`; one failing document does not stop the others. Each document's snapshot.bin and log.bin
+  are re-read read-only and bounded by `ScanLimits` (links refused, sizes capped). The snapshot must
+  still decode at the planned seq and size, and the log's replayable accepted batches (same
+  generation, after the snapshot seq, consecutive, stop at the first damaged record) must still
+  equal `events.count` and end at `document.current_seq`. Otherwise the result is `LegacyChanged`.
+  Four idempotent stages follow, each detected from existing rows. (1) Document: created with the
+  plan's derived id at `current_seq` = snapshot seq; an existing row is resumed, and another
+  workspace/project or a non-active row is `Diverged`. (2) The `figcraft-server` external mapping.
+  (3) Snapshot: the SessionState body is uploaded content-addressed under `keys::snapshot`, then
+  register_object + verify_object, register_snapshot + verify_snapshot, a `document_snapshot` object
+  reference and set_current_snapshot. An existing object with another digest is `LegacyChanged`, and
+  a rejected one is `SnapshotRejected`. (4) Events: one claim_sequencer, then append_events in
+  chunks of at most 256 batches or 8 MiB of legacy record bytes per transaction, only for seq > the
+  committed `current_seq`. So a resume never duplicates, and a seq below the snapshot or beyond the
+  log is `Diverged`. A rerun of a completed document writes nothing: no claim (the fencing token is
+  unchanged), no upload. Each per-document `ImportOutcome` gives Created, Resumed or
+  AlreadyComplete, per-stage flags, and `events_appended` / `events_already_present`. `stop_after`
+  stops after a named stage. The error enum is fixed and leaks nothing. The probe
+  (tests/legacy_import.rs, fixture tenant ad000000-…-0001, legacy ids with a per-run suffix,
+  uploaded objects deleted afterwards) writes a synthetic directory in the real FCSN/FCLG format,
+  then scans, plans and imports it. It checks that an unapproved plan is refused and the blocked
+  document (no links.json) is skipped; that the ready document gets 3 events which replay to the
+  legacy batches, plus a verified object and its mapping; that a rerun is AlreadyComplete with the
+  same fencing token; that after a crash past the snapshot stage with 2 of 5 events appended
+  externally, the rerun appends 3 with 2 already present, and the run after that is AlreadyComplete;
+  and that a changed log gives LegacyChanged and a removed snapshot gives LegacyUnreadable. The
+  section is in docs/saas/filesystem-migration-report.md under "Import and cutover verification".
+  Fixture files: deploy/saas/legacy-import-{preflight,cleanup}.sql.
+- [x] **S3-019** Verify migrated snapshots, logs, links, libraries and plugins before cutover.
+  Evidence: `legacy_import::verify_import(tx, store, plan, root, limits)` is read-only. It reads
+  verification states without changing them, takes a tenant transaction that the caller rolls back,
+  and re-reads PG, S3 and the legacy directory. Each planned document gets `passed` and sorted fixed
+  `VerifyCode`s: legacy_unreadable/changed, document_missing/mismatch, mapping_missing/mismatch,
+  sequence_mismatch, snapshot_row_missing, snapshot_not_verified, current_snapshot_mismatch,
+  object_missing, object_not_verified (key, size or digest differ from the legacy-derived values),
+  object_bytes_mismatch (stored bytes do not hash to the row), snapshot_content_mismatch (stored
+  bytes differ from the legacy SessionState body), store_unavailable, event_count_mismatch (count
+  and min/max of rows after the snapshot against the plan's range), replay_corrupt (read_events
+  finds a bad checksum, bad decoding or a gap) and replay_mismatch (replayed batches differ from the
+  legacy log). Replay is bounded by the planned count. `not_imported` lists links, planned
+  libraries, plugins, deferred items and excluded documents, and `cutover_ready` is true only when
+  every document passed and that list is empty. Probes: a clean import with links verifies, but
+  cutover is blocked by Links and ExcludedDocument; before import the only failure is
+  DocumentMissing; a links-free document gives cutover_ready true. Tampering is detected: deleting
+  event seq 5 as admin gives [EventCountMismatch, ReplayCorrupt]; overwriting the snapshot object's
+  bytes in S3 at the same size gives ObjectBytesMismatch and SnapshotContentMismatch; a legacy log
+  changed after import gives LegacyChanged.
+- [x] **S3-020** Add backup/restore integration test covering database and bucket versions.
+  Evidence: crates/cloud-storage/tests/backup_restore.rs: the admin URL creates the scratch database
+  figcraft_backup_source_ae (static SQL) and migrate_database runs on it. Using the main APIs, the
+  test then creates a principal, a tenant via create_tenant plus a member, a workspace, 2 projects
+  and a document with a per-run random id. It commits 3 events through
+  claim_sequencer/append_events, stores a snapshot object with unique bytes under keys::snapshot
+  (register_object, put_object, verify_object reaching Verified), and adds a verified snapshot row
+  set as current. Backup: the test first checks that its list of 30 tables equals every public table
+  except _sqlx_migrations, so a table added by a later migration fails the test instead of going
+  unrestored. It then exports each table from one REPEATABLE READ READ ONLY transaction (the same
+  snapshot behaviour as pg_dump) as a bounded json_agg(row_to_json) with at most 10k rows per table,
+  using literal macro-built SQL. For the bucket it signs a ListObjectVersions request with
+  rusty_s3::signing::sign (query parameters must be passed pre-sorted) and records (key, versionId,
+  ETag, Size, IsLatest), asserting a single real version id. Mutations after the backup: 2 more
+  events, an overwrite of the object key (creating a new version), a deleted project row and a newly
+  created document. Restore: a second database, figcraft_backup_restore_ae, is migrated and
+  check_schema_version must equal the source version. The rows are loaded in foreign-key order in
+  one transaction with json_populate_recordset. Documents load without current_snapshot_id and get
+  it back after the snapshots, so every foreign key is really checked. Assertions: read_events
+  replays exactly batches 1..3, current_seq is 3, and after_seq 4 gives SequenceConflict{current:3}.
+  The deleted project is back, the late document is absent and current_snapshot_id is restored. The
+  object row is still Verified. The key's current bytes no longer match its sha256, but GET
+  ?versionId=<backed-up> returns the original bytes, matching sha256 and size_bytes, and that
+  version is still listed as noncurrent with the same ETag. Re-putting those bytes makes reads by
+  key match again. A fresh claim_sequencer resumes at seq 3 with the backed-up fencing token + 1,
+  and the next append continues at seq 4 (rolled back). Cleanup runs whatever the outcome: every
+  version and delete marker under the per-run prefix is deleted, the test asserts the listing is
+  empty, and both scratch databases are dropped. Fixtures:
+  deploy/saas/backup-restore-{preflight,cleanup}.sql. The procedure is documented in the new "Backup
+  and restore" section of docs/saas/deployment-operations.md (pg_dump/pg_restore commands, version
+  manifest, restore order, what must match). Passes twice in a row, single-threaded.
 
 ### S3 gate
 
-- [ ] **S3-GATE** Verify cloud resources require no local persistent container directory, corrupt
+- [x] **S3-GATE** Verify cloud resources require no local persistent container directory, corrupt
   objects cannot replace verified state, abandoned staging data expires and migration is repeatable.
+  Evidence: Each criterion has automated evidence. No local persistent container directory:
+  `apps/figcraft-cloud/tests/compose_persistence.rs` parses `deploy/saas/compose.yaml` and fails if
+  any service other than PostgreSQL, Redis and SeaweedFS mounts a volume (the gateway mounts only
+  its read-only Caddyfile), and every stored type (snapshots S3-008, assets S3-009, libraries
+  S3-010, plugins S3-011, exports and thumbnails S3-012) is written through `ObjectStore` and
+  recorded as an `objects` row. Corrupt objects cannot replace verified state: `verify_object`
+  (S3-003) marks a row verified only after reading back matching size and SHA-256, rejected rows
+  never return to pending, upload completion (S3-005) rejects mismatched or invalid bytes before
+  promotion, and snapshot restore (S3-008) re-verifies on read and falls back past a corrupted
+  object, proven by flipping stored bytes. Abandoned staging data expires:
+  `uploads::expire_reservations` (S3-004) expires overdue reservations, garbage collection (S3-015)
+  deletes their staging keys including every version, and S3-014 tags staging uploads and installs a
+  lifecycle backstop. Migration is repeatable: the S3-018 probe reruns a completed import as
+  `AlreadyComplete` with an unchanged fencing token and resumes a crash after the snapshot stage
+  without duplicating events, and S3-019 verifies the result read-only before cutover. S3-020
+  restores a database backup and earlier bucket versions and reopens the document to the backed-up
+  sequence. Limits are recorded in `CODEX.md` (SeaweedFS lifecycle enforcement unverified, so the
+  sweep is authoritative; libraries, links and plugins are not yet imported and block cutover).
 
 ## S4 — Identity, tenancy and authorization
 
@@ -1428,3 +1527,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S3-003: added bounded object I/O, the content-addressed key layout and read-back SHA-256 verification of object metadata. S3 reaches 3/20. |
 | 2026-10-17 | S3-004..S3-007, S3-013, S3-014, S3-017: upload reservations and validated promotion, authorized presigned downloads, references and retention holds, content validation budgets, idempotent bucket/versioning/lifecycle initialization, and a dry-run migration planner (six parallel worktree agents, then integrated: tagged staging PUTs, completer check, validation before promotion, one FigCraft media-type set). S3 reaches 10/20. |
 | 2026-10-17 | S3-008..S3-012, S3-015, S3-016: snapshot store and snapshot-first room recovery, document assets, team-library versions, plugin bundles, exports and thumbnails on one shared schema migration (20261017000002), garbage collection with versioned deletes, and a read-only reconciliation report (seven parallel worktree agents; verified with targeted suites). S3 reaches 17/20. |
+| 2026-10-17 | S3-018/S3-019/S3-020/S3-GATE: repeatable checkpointed legacy import with read-only cutover verification, a database-and-bucket-version backup/restore probe, and a Compose no-local-persistence check. S3 complete (20/20) and its gate passes. |
