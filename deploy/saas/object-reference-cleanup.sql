@@ -1,0 +1,4 @@
+-- Remove only the synthetic S3-007 object-reference fixture rows from the disposable database.
+DELETE FROM public.object_references WHERE tenant_id IN ('a5000000-0000-4000-8000-000000000001', 'a5000000-0000-4000-8000-000000000002');
+DELETE FROM public.objects WHERE tenant_id IN ('a5000000-0000-4000-8000-000000000001', 'a5000000-0000-4000-8000-000000000002');
+DELETE FROM public.tenants WHERE id IN ('a5000000-0000-4000-8000-000000000001', 'a5000000-0000-4000-8000-000000000002');
