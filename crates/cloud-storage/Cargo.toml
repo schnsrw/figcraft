@@ -10,7 +10,9 @@ description = "Durable metadata and object storage adapters for FigCraft Cloud"
 figcraft-cloud-domain = { path = "../cloud-domain" }
 figcraft-collab = { workspace = true }
 sqlx = { workspace = true }
+serde = { workspace = true }
 serde_json = { workspace = true }
+crc32fast = { workspace = true }
 sha2 = { workspace = true }
 
 [dev-dependencies]

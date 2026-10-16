@@ -29,6 +29,7 @@ auditing and operations.
 | [Upstream synchronization](upstream-sync.md) | Fork strategy, conflict reduction, sync cadence and verification process |
 | [Enterprise proposal review](proposal-review.md) | Source-audited disposition of the supplied PRD/HLD/LLD and its repository-specific corrections |
 | [Roadmap](roadmap.md) | Milestones, dependencies, estimates and exit gates |
+| [Filesystem migration report](filesystem-migration-report.md) | Read-only `figcraft-server` data-directory scanner and the versioned migration report format (S2-021) |
 | [Task tracker](tracker.md) | Complete checkbox inventory for implementation and release readiness |
 
 ## Architecture decisions

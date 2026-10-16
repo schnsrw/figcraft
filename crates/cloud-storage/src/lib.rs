@@ -7,6 +7,7 @@ pub mod audit;
 pub mod events;
 pub mod external_mappings;
 pub mod idempotency;
+pub mod legacy_scan;
 pub mod metadata;
 pub mod snapshots;
 
