@@ -1562,6 +1562,7 @@ dependencies = [
  "figcraft-cloud-storage",
  "figcraft-collab",
  "figcraft-doc",
+ "serde_json",
  "sqlx",
  "tokio",
 ]

@@ -356,3 +356,35 @@ is a highly available production database.
 
 Each runbook identifies detection, immediate containment, customer impact, safe recovery,
 verification and post-incident evidence.
+
+## S2 gate procedure
+
+The S2 gate ("create, edit, restart and restore a document using PostgreSQL metadata/events; a
+failed commit is never confirmed and replay reaches the accepted state") is verified by one
+end-to-end probe, `crates/cloud-relay/tests/s2_gate.rs`, run against a migrated disposable
+database as the limited runtime role:
+
+1. As the administrator, load `deploy/saas/s2-gate-preflight.sql` (only the synthetic tenant
+   `99000000-…-0001` and its principal).
+2. Run `FIGCRAFT_TEST_DATABASE_URL_FILE=<runtime url file> cargo test -p figcraft-cloud-relay --test
+   s2_gate -- --test-threads=1`. Without the variable the probe skips, so a pass only counts when
+   the database ran.
+3. As the administrator, load `deploy/saas/s2-gate-cleanup.sql`, which removes every row under the
+   tenant (events and audit rows are append-only for the runtime role). The probe reruns after it.
+
+The probe uses public APIs only. It creates the workspace, project and document through the
+metadata repositories and audits the lifecycle (create, rename, archive, restore). Two editors and a
+viewer edit through a `DurableRoom`: creates and property sets are confirmed, and the viewer's batch
+is refused and writes nothing. The confirmed batches must equal `read_events` exactly, in order,
+with `current_seq` equal to the event count. The room is dropped and reopened over the same base,
+and the replayed replica snapshot and sequence must equal the state before the restart. Two commits
+are then made to fail: a sequencer fenced by a newer claim (`StaleFence`), and a room whose
+connection is terminated with `pg_terminate_backend` while its append waits on the document row
+(the connection is found through its unique `application_name`). Each `receive` must return an
+error with nothing to deliver, the room must be poisoned, neither batch may be in the log, and a
+fresh open must hold every confirmed batch and neither failed one. Finally the document is renamed
+and archived: the live room's next commit fails with `InvalidState`, `DurableRoom::open` refuses it,
+and after restore it opens again with its name and committed state intact.
+
+The Compose smoke (`deploy/saas/smoke-preflight.sh`) runs the same three steps; record the passing
+run as the gate's evidence in `docs/saas/tracker.md`.
