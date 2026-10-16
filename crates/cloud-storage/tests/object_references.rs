@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use figcraft_cloud_domain::{TenantId, Uuid};
 use figcraft_cloud_storage::object_metadata::{NewObject, ObjectKind, ObjectState, get_object, keys, register_object};
 use figcraft_cloud_storage::object_references::{
-    Change, DeletionStart, MAX_COLLECTABLE_PAGE, MAX_HOLDS_PER_OBJECT, MAX_REFERENCE_PAGE, MIN_COLLECTION_AGE, ObjectReferenceError, OwnerKind,
-    ReferenceCount, ReferenceOwner, add_reference, begin_object_deletion, collectable_objects, list_references, place_retention_hold,
-    reference_count, release_retention_hold, remove_reference,
+    Change, DeletionStart, MAX_COLLECTABLE_PAGE, MAX_HOLD_PAGE, MAX_HOLD_REASON_CHARS, MAX_HOLDS_PER_OBJECT, MAX_REFERENCE_PAGE, MIN_COLLECTION_AGE,
+    ObjectReferenceError, OwnerKind, ReferenceCount, ReferenceOwner, add_reference, begin_object_deletion, collectable_objects, list_references,
+    list_retention_holds, place_retention_hold, reference_count, release_retention_hold, remove_reference,
 };
 use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
 use sha2::{Digest, Sha256};
@@ -27,6 +27,8 @@ type TestResult<T = ()> = Result<T, BoxError>;
 
 const TENANT: &str = "a5000000-0000-4000-8000-000000000001";
 const OTHER_TENANT: &str = "a5000000-0000-4000-8000-000000000002";
+/// The fixture principal that places retention holds.
+const PLACER: &str = "a5000000-0000-4000-8000-000000000009";
 const BUCKET: &str = "figcraft";
 /// Concurrent reference/deletion pairs in the free-running race.
 const RACES: usize = 8;
@@ -137,8 +139,8 @@ async fn references_and_holds_are_idempotent_and_state_checked() -> TestResult {
     assert_eq!(add_reference(&mut scoped, pending, OwnerKind::Document, document).await?, Change::AlreadyApplied);
     assert_eq!(add_reference(&mut scoped, verified, OwnerKind::Document, document).await?, Change::Applied);
     assert_eq!(add_reference(&mut scoped, verified, OwnerKind::DocumentSnapshot, snapshot).await?, Change::Applied);
-    assert_eq!(place_retention_hold(&mut scoped, verified, hold).await?, Change::Applied);
-    assert_eq!(place_retention_hold(&mut scoped, verified, hold).await?, Change::AlreadyApplied);
+    assert_eq!(place_retention_hold(&mut scoped, verified, hold, PLACER.parse()?, "S3 probe hold").await?, Change::Applied);
+    assert_eq!(place_retention_hold(&mut scoped, verified, hold, PLACER.parse()?, "S3 probe hold").await?, Change::AlreadyApplied);
     assert_eq!(reference_count(&mut scoped, verified).await?, ReferenceCount { references: 2, holds: 1 });
     let listed: HashSet<ReferenceOwner> = list_references(&mut scoped, verified, MAX_REFERENCE_PAGE).await?.into_iter().collect();
     let expected: HashSet<ReferenceOwner> = [
@@ -170,13 +172,13 @@ async fn references_and_holds_are_idempotent_and_state_checked() -> TestResult {
     let deleting = object(&mut scoped, "deleting", Duration::ZERO).await?;
     let deleted = object(&mut scoped, "deleted", Duration::ZERO).await?;
     assert_eq!(add_reference(&mut scoped, rejected, OwnerKind::Asset, Uuid::new_v4()).await, Err(ObjectReferenceError::InvalidState));
-    assert_eq!(place_retention_hold(&mut scoped, rejected, hold).await?, Change::Applied);
+    assert_eq!(place_retention_hold(&mut scoped, rejected, hold, PLACER.parse()?, "S3 probe hold").await?, Change::Applied);
     for gone in [deleting, deleted] {
         assert_eq!(add_reference(&mut scoped, gone, OwnerKind::Asset, Uuid::new_v4()).await, Err(ObjectReferenceError::InvalidState));
-        assert_eq!(place_retention_hold(&mut scoped, gone, hold).await, Err(ObjectReferenceError::InvalidState));
+        assert_eq!(place_retention_hold(&mut scoped, gone, hold, PLACER.parse()?, "S3 probe hold").await, Err(ObjectReferenceError::InvalidState));
     }
     assert_eq!(add_reference(&mut scoped, Uuid::new_v4(), OwnerKind::Asset, document).await, Err(ObjectReferenceError::NotFound));
-    assert_eq!(place_retention_hold(&mut scoped, Uuid::new_v4(), hold).await, Err(ObjectReferenceError::NotFound));
+    assert_eq!(place_retention_hold(&mut scoped, Uuid::new_v4(), hold, PLACER.parse()?, "S3 probe hold").await, Err(ObjectReferenceError::NotFound));
     sqlx::query("UPDATE objects SET state = 'rejected' WHERE tenant_id = $1::uuid AND id = $2::uuid")
         .bind(TENANT)
         .bind(pending.to_string())
@@ -187,11 +189,14 @@ async fn references_and_holds_are_idempotent_and_state_checked() -> TestResult {
 
     // Holds per object are capped.
     for _ in 1..MAX_HOLDS_PER_OBJECT {
-        place_retention_hold(&mut scoped, rejected, Uuid::new_v4()).await?;
+        place_retention_hold(&mut scoped, rejected, Uuid::new_v4(), PLACER.parse()?, "S3 probe hold").await?;
     }
     assert_eq!(reference_count(&mut scoped, rejected).await?.holds, MAX_HOLDS_PER_OBJECT);
-    assert_eq!(place_retention_hold(&mut scoped, rejected, Uuid::new_v4()).await, Err(ObjectReferenceError::TooManyHolds));
-    assert_eq!(place_retention_hold(&mut scoped, rejected, hold).await?, Change::AlreadyApplied);
+    assert_eq!(
+        place_retention_hold(&mut scoped, rejected, Uuid::new_v4(), PLACER.parse()?, "S3 probe hold").await,
+        Err(ObjectReferenceError::TooManyHolds)
+    );
+    assert_eq!(place_retention_hold(&mut scoped, rejected, hold, PLACER.parse()?, "S3 probe hold").await?, Change::AlreadyApplied);
     scoped.rollback().await?;
 
     // Another tenant cannot see, reference, hold or delete this tenant's object.
@@ -200,7 +205,7 @@ async fn references_and_holds_are_idempotent_and_state_checked() -> TestResult {
     owner.commit().await?;
     let mut other = begin_as(&pool, OTHER_TENANT).await?;
     assert_eq!(add_reference(&mut other, committed, OwnerKind::Document, document).await, Err(ObjectReferenceError::NotFound));
-    assert_eq!(place_retention_hold(&mut other, committed, hold).await, Err(ObjectReferenceError::NotFound));
+    assert_eq!(place_retention_hold(&mut other, committed, hold, PLACER.parse()?, "S3 probe hold").await, Err(ObjectReferenceError::NotFound));
     assert_eq!(begin_object_deletion(&mut other, committed).await, Err(ObjectReferenceError::NotFound));
     assert_eq!(remove_reference(&mut other, committed, OwnerKind::Document, document).await?, Change::AlreadyApplied);
     assert!(collectable_objects(&mut other, MIN_COLLECTION_AGE, MAX_COLLECTABLE_PAGE).await?.iter().all(|candidate| candidate.id != committed));
@@ -225,7 +230,7 @@ async fn only_old_unreferenced_unheld_objects_are_collectable() -> TestResult {
     let referenced = object(&mut scoped, "verified", OLD).await?;
     add_reference(&mut scoped, referenced, OwnerKind::Thumbnail, Uuid::new_v4()).await?;
     let held = object(&mut scoped, "rejected", OLD).await?;
-    place_retention_hold(&mut scoped, held, Uuid::new_v4()).await?;
+    place_retention_hold(&mut scoped, held, Uuid::new_v4(), PLACER.parse()?, "S3 probe hold").await?;
     let fresh = object(&mut scoped, "verified", Duration::ZERO).await?;
     let nearly = object(&mut scoped, "verified", MIN_COLLECTION_AGE - hour).await?;
     let old_deleting = object(&mut scoped, "deleting", OLD).await?;
@@ -310,7 +315,7 @@ async fn a_reference_committed_first_blocks_deletion() -> TestResult {
         let id = committed_object(&pool).await?;
         let mut first = begin(&pool).await?;
         if hold {
-            assert_eq!(place_retention_hold(&mut first, id, Uuid::new_v4()).await?, Change::Applied);
+            assert_eq!(place_retention_hold(&mut first, id, Uuid::new_v4(), PLACER.parse()?, "S3 probe hold").await?, Change::Applied);
         } else {
             assert_eq!(add_reference(&mut first, id, OwnerKind::Document, Uuid::new_v4()).await?, Change::Applied);
         }
@@ -352,7 +357,7 @@ async fn a_deletion_marked_first_refuses_the_waiting_reference() -> TestResult {
                 let mut transaction = begin(&pool).await?;
                 pid_sender.send(backend_pid(&mut transaction).await?).map_err(|_| "pid receiver dropped")?;
                 let result = if hold {
-                    place_retention_hold(&mut transaction, id, Uuid::new_v4()).await
+                    place_retention_hold(&mut transaction, id, Uuid::new_v4(), PLACER.parse()?, "S3 probe hold").await
                 } else {
                     add_reference(&mut transaction, id, OwnerKind::Document, Uuid::new_v4()).await
                 };
@@ -437,6 +442,67 @@ async fn free_running_races_never_leave_a_reference_on_a_deleting_object() -> Te
             other => return Err(format!("exactly one racer must win, got {other:?}").into()),
         }
     }
+    pool.close().await;
+    Ok(())
+}
+
+/// S3 follow-up: a hold records who placed it and why, in the same transaction as its reference;
+/// release removes both; junk reasons, unknown principals and a hold id reused on another object
+/// are refused without writing anything.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn holds_record_their_placer_and_reason() -> TestResult {
+    let Some(pool) = pool().await? else {
+        return Ok(());
+    };
+    let placer: Uuid = PLACER.parse()?;
+    let (first, second) = (committed_object(&pool).await?, committed_object(&pool).await?);
+    let (hold, other_hold) = (Uuid::new_v4(), Uuid::new_v4());
+
+    let mut scoped = begin(&pool).await?;
+    assert_eq!(place_retention_hold(&mut scoped, first, hold, placer, "  Legal matter 17  ").await?, Change::Applied);
+    // Idempotent: the original placer and reason stay.
+    assert_eq!(place_retention_hold(&mut scoped, first, hold, placer, "a different reason").await?, Change::AlreadyApplied);
+    assert_eq!(place_retention_hold(&mut scoped, first, other_hold, placer, "Support case 9").await?, Change::Applied);
+    // One hold id names one hold on one object.
+    assert_eq!(place_retention_hold(&mut scoped, second, hold, placer, "Legal matter 17").await, Err(ObjectReferenceError::Conflict));
+    for junk in ["", "   ", "two\nlines", "nul\0", &"x".repeat(MAX_HOLD_REASON_CHARS + 1)] {
+        assert_eq!(place_retention_hold(&mut scoped, second, Uuid::new_v4(), placer, junk).await, Err(ObjectReferenceError::Constraint));
+    }
+    assert_eq!(
+        place_retention_hold(&mut scoped, second, Uuid::new_v4(), Uuid::new_v4(), "Unknown placer").await,
+        Err(ObjectReferenceError::Constraint)
+    );
+    assert_eq!(reference_count(&mut scoped, second).await?, ReferenceCount::default());
+    scoped.commit().await?;
+
+    let mut read = begin(&pool).await?;
+    let holds = list_retention_holds(&mut read, first, MAX_HOLD_PAGE).await?;
+    assert_eq!(
+        holds.iter().map(|held| (held.hold, held.object_id, held.placed_by, held.reason.as_str())).collect::<HashSet<_>>(),
+        [(hold, first, placer, "Legal matter 17"), (other_hold, first, placer, "Support case 9")].into_iter().collect()
+    );
+    assert_eq!(list_retention_holds(&mut read, first, 1).await?.len(), 1);
+    assert_eq!(list_retention_holds(&mut read, first, 0).await, Err(ObjectReferenceError::InvalidLimit));
+    assert_eq!(list_retention_holds(&mut read, first, MAX_HOLD_PAGE + 1).await, Err(ObjectReferenceError::InvalidLimit));
+    assert!(list_retention_holds(&mut read, second, MAX_HOLD_PAGE).await?.is_empty());
+    read.rollback().await?;
+    let mut other = begin_as(&pool, OTHER_TENANT).await?;
+    assert!(list_retention_holds(&mut other, first, MAX_HOLD_PAGE).await?.is_empty());
+    assert_eq!(release_retention_hold(&mut other, first, hold).await?, Change::AlreadyApplied);
+    other.rollback().await?;
+
+    // Release removes the reference and the record together; the hold id is then free again.
+    let mut scoped = begin(&pool).await?;
+    assert_eq!(release_retention_hold(&mut scoped, first, hold).await?, Change::Applied);
+    assert_eq!(release_retention_hold(&mut scoped, first, hold).await?, Change::AlreadyApplied);
+    assert_eq!(reference_count(&mut scoped, first).await?.holds, 1);
+    assert_eq!(list_retention_holds(&mut scoped, first, MAX_HOLD_PAGE).await?.len(), 1);
+    assert_eq!(place_retention_hold(&mut scoped, second, hold, placer, "Moved matter").await?, Change::Applied);
+    assert_eq!(release_retention_hold(&mut scoped, second, hold).await?, Change::Applied);
+    assert_eq!(release_retention_hold(&mut scoped, first, other_hold).await?, Change::Applied);
+    assert!(reference_count(&mut scoped, first).await?.is_unreferenced());
+    assert!(list_retention_holds(&mut scoped, first, MAX_HOLD_PAGE).await?.is_empty());
+    scoped.commit().await?;
     pool.close().await;
     Ok(())
 }

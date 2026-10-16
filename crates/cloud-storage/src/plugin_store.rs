@@ -20,9 +20,9 @@
 //!
 //! # Concurrency
 //!
-//! `plugins` has no unique `(tenant_id, publisher, name)` constraint, so plugin lookup-or-create
-//! takes a transaction-scoped advisory lock keyed by tenant, publisher and name before it looks.
-//! The plugin row is then locked `FOR UPDATE`, which serializes every install and withdrawal of one
+//! The partial unique index `plugins_live_publisher_name_idx` allows one live (not deleted) plugin
+//! per tenant, publisher and name, so plugin lookup-or-create is an `INSERT ... ON CONFLICT DO
+//! NOTHING` followed by a locking select (it replaced the S3-011 advisory lock). The plugin row is then locked `FOR UPDATE`, which serializes every install and withdrawal of one
 //! plugin; a concurrent first install of the same version in another plugin row is impossible, and
 //! any remaining unique violation is `Conflict` (retry). On any `Err` roll back: bytes written to
 //! the store before a failure are left for the garbage collector's untracked-key sweep.
@@ -407,20 +407,29 @@ pub struct Installed {
 
 /// Find the transaction tenant's live (not deleted) plugin called `name`, or create it `active`,
 /// and lock its row. A disabled plugin is returned as it is.
+///
+/// The insert relies on the partial unique index `plugins_live_publisher_name_idx`: a concurrent
+/// creator of the same name makes this insert wait for it and then do nothing, after which the
+/// select (a fresh READ COMMITTED snapshot) finds and locks the winner's row. If the row is gone by
+/// then (deleted in between, or invisible under a stricter isolation level) the call is `Conflict`
+/// and the caller may retry.
 async fn lock_or_create_plugin(transaction: &mut TenantTransaction<'_>, name: PluginName<'_>) -> Result<PluginRecord, PluginStoreError> {
     let tenant = transaction.tenant_id().to_string();
-    // Names cannot contain control characters, so `\n` separates the parts unambiguously.
-    let lock_key = format!("figcraft.plugin\n{tenant}\n{}\n{}", name.publisher, name.name);
-    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(lock_key)
-        .execute(transaction.connection())
-        .await
-        .map_err(database_error)?;
+    sqlx::query(concat!(
+        "INSERT INTO plugins (id, tenant_id, publisher, name) VALUES ($1::uuid, $2::uuid, $3, $4) ",
+        "ON CONFLICT (tenant_id, publisher, name) WHERE state <> 'deleted' DO NOTHING"
+    ))
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant)
+    .bind(name.publisher)
+    .bind(name.name)
+    .execute(transaction.connection())
+    .await
+    .map_err(database_error)?;
     let found: Option<PluginRow> = sqlx::query_as(concat!(
         "SELECT ",
         plugin_columns!(),
-        " FROM plugins WHERE tenant_id = $1::uuid AND publisher = $2 AND name = $3 AND state <> 'deleted' ",
-        "ORDER BY created_at, id LIMIT 1 FOR UPDATE"
+        " FROM plugins WHERE tenant_id = $1::uuid AND publisher = $2 AND name = $3 AND state <> 'deleted' FOR UPDATE"
     ))
     .bind(&tenant)
     .bind(name.publisher)
@@ -428,21 +437,7 @@ async fn lock_or_create_plugin(transaction: &mut TenantTransaction<'_>, name: Pl
     .fetch_optional(transaction.connection())
     .await
     .map_err(database_error)?;
-    if let Some(row) = found {
-        return plugin_record(row);
-    }
-    let row: PluginRow = sqlx::query_as(concat!(
-        "INSERT INTO plugins (id, tenant_id, publisher, name) VALUES ($1::uuid, $2::uuid, $3, $4) RETURNING ",
-        plugin_columns!()
-    ))
-    .bind(Uuid::new_v4().to_string())
-    .bind(&tenant)
-    .bind(name.publisher)
-    .bind(name.name)
-    .fetch_one(transaction.connection())
-    .await
-    .map_err(database_error)?;
-    plugin_record(row)
+    found.map(plugin_record).transpose()?.ok_or(PluginStoreError::Conflict)
 }
 
 /// The transaction tenant's plugin `id`, locked `FOR UPDATE`.

@@ -24,7 +24,7 @@ async fn probe() -> Result<Option<Probe>, Box<dyn std::error::Error>> {
         return Ok(None);
     };
     let database_url = std::fs::read_to_string(database_url_file)?;
-    let pool = PgPoolOptions::new().max_connections(2).connect(database_url.trim_end()).await?;
+    let pool = PgPoolOptions::new().max_connections(6).connect(database_url.trim_end()).await?;
     let read = |name: &str| -> Result<String, Box<dyn std::error::Error>> {
         Ok(std::fs::read_to_string(std::path::Path::new(&s3_directory).join(name))?.trim_end().to_string())
     };
@@ -333,5 +333,109 @@ async fn junk_bundles_names_and_blocked_keys_are_refused_without_writing() -> Re
     assert_eq!((filled.plugin.id, filled.object.id, filled.object.state), (plugin, registered.id, ObjectState::Verified));
     pending.rollback().await?;
     store.delete_object(&object.object_key).await?;
+    Ok(())
+}
+
+/// Wait until backend `pid` is blocked on a heavyweight lock (bounded, so a lost wake-up fails).
+async fn wait_until_blocked(pool: &PgPool, pid: i32) -> Result<(), Box<dyn std::error::Error>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        let waiting: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock')")
+            .bind(pid)
+            .fetch_one(pool)
+            .await?;
+        if waiting {
+            return Ok(());
+        }
+        if std::time::Instant::now() > deadline {
+            return Err("second creator never blocked on the live-name index".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// S3 follow-up regression: lookup-or-create relies on `plugins_live_publisher_name_idx`
+/// (`INSERT ... ON CONFLICT DO NOTHING`), so concurrent first installs of one new plugin name end
+/// on one plugin row instead of two, both when one creator waits behind another's uncommitted row
+/// and in a free-running race.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_first_installs_share_one_live_plugin_row() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((pool, settings)) = probe().await? else {
+        return Ok(());
+    };
+    let store = ObjectStore::new(&settings)?;
+    let tenant: TenantId = TENANT.parse()?;
+    let nonce = Uuid::new_v4().to_string();
+    let plugin_name = format!("Race {nonce}");
+    let name = PluginName { publisher: "Acme Probes", name: &plugin_name };
+    let mut written = Vec::new();
+
+    // Deterministic: the second creator blocks on the first's uncommitted row, then reuses it.
+    let first_bundle = bundle(&manifest("org.example.race", Some("1.0.0"), &nonce), &[]);
+    let second_bundle = bundle(&manifest("org.example.race", Some("2.0.0"), &nonce), &[]);
+    let mut first = begin(&pool, tenant).await?;
+    let first_installed = install_plugin_version(&mut first, &store, name, "1.0.0", &first_bundle, PRODUCER).await?;
+    written.push(first_installed.object.object_key.clone());
+    let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel::<i32>();
+    let racer = {
+        let (pool, store, plugin_name) = (pool.clone(), store.clone(), plugin_name.clone());
+        tokio::spawn(async move {
+            let mut second = begin_tenant_transaction(&pool, tenant).await.map_err(|_| PluginStoreError::Database)?;
+            let pid: i32 =
+                sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(second.connection()).await.map_err(|_| PluginStoreError::Database)?;
+            let _ = pid_sender.send(pid);
+            let name = PluginName { publisher: "Acme Probes", name: &plugin_name };
+            let installed = install_plugin_version(&mut second, &store, name, "2.0.0", &second_bundle, PRODUCER).await?;
+            second.commit().await.map_err(|_| PluginStoreError::Database)?;
+            Ok::<_, PluginStoreError>(installed)
+        })
+    };
+    wait_until_blocked(&pool, pid_receiver.await?).await?;
+    first.commit().await?;
+    let second_installed = racer.await??;
+    written.push(second_installed.object.object_key.clone());
+    assert_eq!(second_installed.plugin.id, first_installed.plugin.id);
+
+    // Free-running: several creators of another fresh name all land on one row.
+    let raced_name = format!("Race many {nonce}");
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(4));
+    let mut tasks = Vec::new();
+    for index in 0..4 {
+        let (pool, store, barrier, raced_name, nonce) = (pool.clone(), store.clone(), barrier.clone(), raced_name.clone(), nonce.clone());
+        tasks.push(tokio::spawn(async move {
+            let version = format!("{}.0.0", index + 1);
+            let bytes = bundle(&manifest("org.example.race", Some(&version), &nonce), &[]);
+            let mut transaction = begin_tenant_transaction(&pool, tenant).await.map_err(|_| PluginStoreError::Database)?;
+            barrier.wait().await;
+            let name = PluginName { publisher: "Acme Probes", name: &raced_name };
+            let installed = install_plugin_version(&mut transaction, &store, name, &version, &bytes, PRODUCER).await?;
+            transaction.commit().await.map_err(|_| PluginStoreError::Database)?;
+            Ok::<_, PluginStoreError>(installed)
+        }));
+    }
+    let mut plugins = std::collections::HashSet::new();
+    for task in tasks {
+        let installed = task.await??;
+        written.push(installed.object.object_key.clone());
+        plugins.insert(installed.plugin.id);
+    }
+    assert_eq!(plugins.len(), 1);
+
+    let mut read = begin(&pool, tenant).await?;
+    for checked in [plugin_name.as_str(), raced_name.as_str()] {
+        let live: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM plugins WHERE tenant_id = $1::uuid AND publisher = $2 AND name = $3 AND state <> 'deleted'")
+                .bind(tenant.to_string())
+                .bind("Acme Probes")
+                .bind(checked)
+                .fetch_one(read.connection())
+                .await?;
+        assert_eq!(live, 1, "{checked}");
+    }
+    assert_eq!(list_versions(&mut read, first_installed.plugin.id, false, MAX_VERSION_PAGE).await?.len(), 2);
+    read.rollback().await?;
+    for key in written {
+        store.delete_object(&key).await?;
+    }
     Ok(())
 }

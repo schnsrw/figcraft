@@ -133,6 +133,7 @@ async fn clear(probe: &Probe) -> TestResult {
     for tenant in [TENANT, OTHER_TENANT] {
         for statement in [
             "DELETE FROM upload_reservations WHERE tenant_id = $1::uuid",
+            "DELETE FROM retention_holds WHERE tenant_id = $1::uuid",
             "DELETE FROM object_references WHERE tenant_id = $1::uuid",
             "DELETE FROM objects WHERE tenant_id = $1::uuid",
         ] {
@@ -244,7 +245,7 @@ async fn plant(probe: &Probe) -> TestResult<Plants> {
         assert!(matches!(verify_object(&mut scoped, store, id).await?, Some(Verification::Verified(_))));
     }
     add_reference(&mut scoped, healthy, OwnerKind::Asset, Uuid::new_v4()).await?;
-    place_retention_hold(&mut scoped, held, Uuid::new_v4()).await?;
+    place_retention_hold(&mut scoped, held, Uuid::new_v4(), PRINCIPAL.parse()?, "S3 probe hold").await?;
 
     // A row with no bytes, forced verified: critical.
     let missing_bytes = unique("missing");

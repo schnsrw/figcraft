@@ -13,6 +13,7 @@ DELETE FROM public.document_snapshots WHERE tenant_id IN (SELECT id FROM gc_fixt
 DELETE FROM public.library_versions WHERE tenant_id IN (SELECT id FROM gc_fixture_tenants);
 DELETE FROM public.plugin_versions WHERE tenant_id IN (SELECT id FROM gc_fixture_tenants);
 DELETE FROM public.upload_reservations WHERE tenant_id IN (SELECT id FROM gc_fixture_tenants);
+DELETE FROM public.retention_holds WHERE tenant_id IN (SELECT id FROM gc_fixture_tenants);
 DELETE FROM public.object_references WHERE tenant_id IN (SELECT id FROM gc_fixture_tenants);
 DELETE FROM public.objects WHERE tenant_id IN (SELECT id FROM gc_fixture_tenants);
 DELETE FROM public.libraries WHERE tenant_id IN (SELECT id FROM gc_fixture_tenants);

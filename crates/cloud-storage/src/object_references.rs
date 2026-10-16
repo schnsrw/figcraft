@@ -14,8 +14,12 @@
 //! an operator audit record they write themselves, may call [`place_retention_hold`] or
 //! [`release_retention_hold`]. Tenant members, document editing, upload completion and the garbage
 //! collector must never place or release holds, and no tenant-facing route maps onto these
-//! functions. The hold id is the caller's own hold record (a legal matter or support case), so a
-//! hold can be placed on many objects and released object by object. Holds may be placed on
+//! functions. Each hold is recorded twice in one transaction: the `retention_hold` reference that
+//! keeps the object alive, and a `retention_holds` row naming the principal that placed it and a
+//! bounded reason (1..=[`MAX_HOLD_REASON_CHARS`] characters, no control characters), so release can
+//! be audited. `retention_holds` is keyed by `(tenant_id, id)`, so a hold id names one hold on one
+//! object: a legal matter covering many objects places one hold per object (naming the matter in
+//! the reason) and releases them object by object. Holds may be placed on
 //! `pending`, `verified` and `rejected` objects, because a hold preserves bytes rather than using
 //! them (a rejected upload may be evidence); ordinary references may not.
 //!
@@ -49,6 +53,10 @@ pub const MAX_REFERENCE_PAGE: u32 = 1000;
 pub const MAX_COLLECTABLE_PAGE: u32 = 1000;
 /// The most retention holds one object may carry.
 pub const MAX_HOLDS_PER_OBJECT: i64 = 64;
+/// The longest retention-hold reason, in characters after trimming (the `retention_holds` check).
+pub const MAX_HOLD_REASON_CHARS: usize = 500;
+/// The most rows one [`list_retention_holds`] call returns.
+pub const MAX_HOLD_PAGE: u32 = 1000;
 
 /// Who owns an ordinary reference, matching the `object_references.owner_kind` constraint minus
 /// `retention_hold`, which only the hold functions write.
@@ -235,27 +243,128 @@ pub async fn remove_reference(
     delete_reference(transaction, id, kind.as_str(), owner).await
 }
 
-/// Place retention hold `hold` on object `id` (operator and legal callers only; see the module
-/// documentation). Idempotent. Refused on a `deleting` or `deleted` object (`InvalidState`) and
-/// past [`MAX_HOLDS_PER_OBJECT`] (`TooManyHolds`).
-pub async fn place_retention_hold(transaction: &mut TenantTransaction<'_>, id: Uuid, hold: Uuid) -> Result<Change, ObjectReferenceError> {
+/// Whether `reason` is an acceptable retention-hold reason: 1..=[`MAX_HOLD_REASON_CHARS`]
+/// characters once trimmed, with no control characters (so it renders on one audit line).
+#[must_use]
+pub fn valid_hold_reason(reason: &str) -> bool {
+    let trimmed = reason.trim();
+    !trimmed.is_empty() && trimmed.chars().count() <= MAX_HOLD_REASON_CHARS && !reason.chars().any(char::is_control)
+}
+
+/// Place retention hold `hold` on object `id` on behalf of principal `placed_by`, for `reason`
+/// (operator and legal callers only; see the module documentation). The reference and the
+/// `retention_holds` row are written in the caller's transaction. Idempotent: an existing hold on
+/// this object is `AlreadyApplied` and keeps its original placer and reason. Refused with
+/// `Constraint` for an invalid reason ([`valid_hold_reason`]) or an unknown principal, `Conflict`
+/// when `hold` already names a hold on another object, `InvalidState` on a `deleting` or
+/// `deleted` object and `TooManyHolds` past [`MAX_HOLDS_PER_OBJECT`].
+pub async fn place_retention_hold(
+    transaction: &mut TenantTransaction<'_>,
+    id: Uuid,
+    hold: Uuid,
+    placed_by: Uuid,
+    reason: &str,
+) -> Result<Change, ObjectReferenceError> {
+    if !valid_hold_reason(reason) {
+        return Err(ObjectReferenceError::Constraint);
+    }
     // Exclusive, so concurrent holds on one object count each other and the cap holds.
     let state = lock_object_state(transaction, id, true).await?;
-    if reference_exists(transaction, id, RETENTION_HOLD, hold).await? {
-        return Ok(Change::AlreadyApplied);
+    let recorded: Option<String> = sqlx::query_scalar("SELECT object_id::text FROM retention_holds WHERE tenant_id = $1::uuid AND id = $2::uuid")
+        .bind(transaction.tenant_id().to_string())
+        .bind(hold.to_string())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(database_error)?;
+    let reference = reference_exists(transaction, id, RETENTION_HOLD, hold).await?;
+    let here = recorded.as_deref().map(|object| object == id.to_string());
+    match (here, reference) {
+        // A hold reference with no record predates `retention_holds` (an unattributed hold).
+        (Some(true) | None, true) => return Ok(Change::AlreadyApplied),
+        // A record without its reference, or one naming another object, is never written here.
+        (Some(true), false) | (Some(false), true) => return Err(ObjectReferenceError::CorruptRow),
+        (None | Some(false), false) => {}
     }
     if !matches!(state.as_str(), "pending" | "verified" | "rejected") {
         return Err(ObjectReferenceError::InvalidState);
     }
+    if here == Some(false) {
+        return Err(ObjectReferenceError::Conflict);
+    }
     if reference_count(transaction, id).await?.holds >= MAX_HOLDS_PER_OBJECT {
         return Err(ObjectReferenceError::TooManyHolds);
     }
+    let principal_known: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM principals WHERE id = $1::uuid)")
+        .bind(placed_by.to_string())
+        .fetch_one(transaction.connection())
+        .await
+        .map_err(database_error)?;
+    if !principal_known {
+        return Err(ObjectReferenceError::Constraint);
+    }
+    sqlx::query(concat!(
+        "INSERT INTO retention_holds (tenant_id, id, object_id, placed_by, reason) ",
+        "VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5)"
+    ))
+    .bind(transaction.tenant_id().to_string())
+    .bind(hold.to_string())
+    .bind(id.to_string())
+    .bind(placed_by.to_string())
+    .bind(reason.trim())
+    .execute(transaction.connection())
+    .await
+    .map_err(database_error)?;
     insert_reference(transaction, id, RETENTION_HOLD, hold).await
 }
 
-/// Release retention hold `hold` on object `id` (operator and legal callers only). Idempotent.
+/// Release retention hold `hold` on object `id` (operator and legal callers only), removing both
+/// its reference and its `retention_holds` row. Idempotent.
 pub async fn release_retention_hold(transaction: &mut TenantTransaction<'_>, id: Uuid, hold: Uuid) -> Result<Change, ObjectReferenceError> {
-    delete_reference(transaction, id, RETENTION_HOLD, hold).await
+    let records = sqlx::query("DELETE FROM retention_holds WHERE tenant_id = $1::uuid AND id = $2::uuid AND object_id = $3::uuid")
+        .bind(transaction.tenant_id().to_string())
+        .bind(hold.to_string())
+        .bind(id.to_string())
+        .execute(transaction.connection())
+        .await
+        .map_err(database_error)?
+        .rows_affected();
+    let reference = delete_reference(transaction, id, RETENTION_HOLD, hold).await?;
+    Ok(if records == 0 && reference == Change::AlreadyApplied { Change::AlreadyApplied } else { Change::Applied })
+}
+
+/// One retention hold on an object, with who placed it and why.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RetentionHold {
+    pub hold: Uuid,
+    pub object_id: Uuid,
+    pub placed_by: Uuid,
+    pub reason: String,
+}
+
+/// Up to `limit` (1..=[`MAX_HOLD_PAGE`]) of object `id`'s retention holds, oldest first, with
+/// their placer and reason.
+pub async fn list_retention_holds(transaction: &mut TenantTransaction<'_>, id: Uuid, limit: u32) -> Result<Vec<RetentionHold>, ObjectReferenceError> {
+    let limit = page_limit(limit, MAX_HOLD_PAGE)?;
+    let rows: Vec<(String, String, String)> = sqlx::query_as(concat!(
+        "SELECT id::text, placed_by::text, reason FROM retention_holds WHERE tenant_id = $1::uuid AND object_id = $2::uuid ",
+        "ORDER BY created_at, id LIMIT $3"
+    ))
+    .bind(transaction.tenant_id().to_string())
+    .bind(id.to_string())
+    .bind(limit)
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    rows.into_iter()
+        .map(|(hold, placed_by, reason)| {
+            Ok(RetentionHold {
+                hold: hold.parse().map_err(|_| ObjectReferenceError::CorruptRow)?,
+                object_id: id,
+                placed_by: placed_by.parse().map_err(|_| ObjectReferenceError::CorruptRow)?,
+                reason,
+            })
+        })
+        .collect()
 }
 
 /// How many ordinary references and retention holds an object has.
@@ -443,8 +552,20 @@ mod tests {
     }
 
     #[test]
+    fn hold_reasons_are_bounded_and_single_line() {
+        assert!(valid_hold_reason("Legal matter 2026-17"));
+        assert!(valid_hold_reason(&"é".repeat(MAX_HOLD_REASON_CHARS)));
+        assert!(valid_hold_reason(&format!("  {}  ", "x".repeat(MAX_HOLD_REASON_CHARS))));
+        for junk in ["", " ", "\t\n", "line\nbreak", "nul\0", "bell\u{7}", "\u{85}next"] {
+            assert!(!valid_hold_reason(junk), "{junk:?}");
+        }
+        assert!(!valid_hold_reason(&"x".repeat(MAX_HOLD_REASON_CHARS + 1)));
+        assert!(!valid_hold_reason(&"😀".repeat(MAX_HOLD_REASON_CHARS + 1)));
+    }
+
+    #[test]
     fn page_limits_are_bounded() {
-        for maximum in [MAX_REFERENCE_PAGE, MAX_COLLECTABLE_PAGE] {
+        for maximum in [MAX_REFERENCE_PAGE, MAX_COLLECTABLE_PAGE, MAX_HOLD_PAGE] {
             assert_eq!(page_limit(0, maximum), Err(ObjectReferenceError::InvalidLimit));
             assert_eq!(page_limit(maximum + 1, maximum), Err(ObjectReferenceError::InvalidLimit));
             assert_eq!(page_limit(u32::MAX, maximum), Err(ObjectReferenceError::InvalidLimit));
