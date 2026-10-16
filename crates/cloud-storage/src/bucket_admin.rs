@@ -220,6 +220,8 @@ pub enum LifecycleState {
     Rules(Vec<LifecycleRule>),
 }
 
+/// `Created` means this run's `CreateBucket` succeeded. Stores that answer an owner's repeated
+/// create with 200 (AWS in us-east-1, SeaweedFS) can let concurrent initializers all report it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BucketOutcome {
     Created,

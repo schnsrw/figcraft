@@ -162,7 +162,7 @@ fi
 printf 'postgres://figcraft_runtime:%s@127.0.0.1:%s/figcraft\n' "$runtime_password" "$postgres_port" > "$test_dir/host_database_url"
 printf 'postgres://figcraft:%s@127.0.0.1:%s/figcraft\n' "$postgres_password" "$postgres_port" > "$test_dir/host_admin_database_url"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test tenant_transaction -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test tenant_transaction -- --nocapture --test-threads=1
 seaweedfs_binding=$("${compose[@]}" port seaweedfs 8333)
 seaweedfs_port=${seaweedfs_binding##*:}
 if [[ ! "$seaweedfs_port" =~ ^[0-9]+$ ]]; then
@@ -174,29 +174,29 @@ printf 'http://127.0.0.1:%s\n' "$seaweedfs_port" > "$test_dir/s3/s3_endpoint"
 cp "$test_dir/s3_access_key" "$test_dir/s3/s3_access_key"
 cp "$test_dir/s3_secret_key" "$test_dir/s3/s3_secret_key"
 FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
-  cargo test --locked -p figcraft-cloud-storage --test object_store -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test object_store -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/object-repository-preflight.sql" > "$test_dir/object-repository-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
-  cargo test --locked -p figcraft-cloud-storage --test object_repository -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test object_repository -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/object-repository-cleanup.sql" > "$test_dir/object-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/upload-reservation-preflight.sql" > "$test_dir/upload-reservation-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
-  cargo test --locked -p figcraft-cloud-storage --test upload_reservations -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test upload_reservations -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/upload-reservation-cleanup.sql" > "$test_dir/upload-reservation-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/presigned-download-preflight.sql" > "$test_dir/presigned-download-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
-  cargo test --locked -p figcraft-cloud-storage --test presigned_downloads -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test presigned_downloads -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/presigned-download-cleanup.sql" > "$test_dir/presigned-download-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/object-reference-preflight.sql" > "$test_dir/object-reference-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test object_references -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test object_references -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/object-reference-cleanup.sql" > "$test_dir/object-reference-cleanup.log"
 FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
@@ -206,37 +206,37 @@ FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/metadata-repository-preflight.sql" > "$test_dir/metadata-repository-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test metadata_repositories -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test metadata_repositories -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/metadata-repository-cleanup.sql" > "$test_dir/metadata-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/document-repository-preflight.sql" > "$test_dir/document-repository-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test document_repositories -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test document_repositories -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/document-repository-cleanup.sql" > "$test_dir/document-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/external-mapping-repository-preflight.sql" > "$test_dir/external-mapping-repository-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test external_mapping_repository -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test external_mapping_repository -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/external-mapping-repository-cleanup.sql" > "$test_dir/external-mapping-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/idempotency-repository-preflight.sql" > "$test_dir/idempotency-repository-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test idempotency_repository -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test idempotency_repository -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/idempotency-repository-cleanup.sql" > "$test_dir/idempotency-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/audit-repository-preflight.sql" > "$test_dir/audit-repository-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test audit_repository -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test audit_repository -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/audit-repository-cleanup.sql" > "$test_dir/audit-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/snapshot-repository-preflight.sql" > "$test_dir/snapshot-repository-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test snapshot_repository -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test snapshot_repository -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/snapshot-repository-cleanup.sql" > "$test_dir/snapshot-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
@@ -278,7 +278,7 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/s2-gate-cleanup.sql" > "$test_dir/s2-gate-cleanup.log"
 FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE="$test_dir/host_admin_database_url" \
-  cargo test --locked -p figcraft-cloud-storage --test migration_upgrade -- --nocapture
+  cargo test --locked -p figcraft-cloud-storage --test migration_upgrade -- --nocapture --test-threads=1
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-a.log" 2>&1 &
 migration_a=$!
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-b.log" 2>&1 &

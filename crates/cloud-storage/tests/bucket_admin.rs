@@ -192,8 +192,10 @@ async fn concurrent_initializations_both_succeed() -> Probe {
     let (first, second) = tokio::join!(initialize_bucket(&left, &policy), initialize_bucket(&right, &policy));
     let outcome = (|| -> Probe {
         let (first, second) = (first?, second?);
-        let created = [first.bucket, second.bucket].iter().filter(|outcome| **outcome == BucketOutcome::Created).count();
-        assert!(created <= 1, "{first:?} {second:?}");
+        // Both may report `Created`: stores that answer an owner's repeated `CreateBucket` with 200
+        // (AWS in us-east-1, SeaweedFS) let two interleaved creates both succeed. What matters is
+        // that both succeed and the settled bucket is correct, checked below.
+        assert!([first.bucket, second.bucket].iter().all(|outcome| matches!(outcome, BucketOutcome::Created | BucketOutcome::AlreadyExisted)));
         for report in [first, second] {
             assert_ne!(report.lifecycle, LifecycleOutcome::Unsupported);
         }
