@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (8/21) · **Last updated:** 2026-10-16
+> **Status:** S1 complete (22/22); S2 in progress (9/21) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 8 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 9 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -274,8 +274,23 @@ the same commit as the completed task.
   context together. The disposable PostgreSQL integration probe covers two tenants, suspended
   membership, foreign-key rejection, cross-tenant reads and lists, and multiple pages over 100
   rows under the limited runtime role. Product authorization and HTTP cursors remain S4 work.
-- [ ] **S2-009** Implement document create, read, rename, archive, restore and soft-delete
+- [x] **S2-009** Implement document create, read, rename, archive, restore and soft-delete
   repositories.
+  Evidence: `figcraft-cloud-storage::metadata` adds a typed `DocumentRecord` with tenant-scoped
+  create/get, and rename/archive/restore/soft-delete transitions that are idempotent when the
+  document already satisfies the target state and reject other states as `InvalidState` rather
+  than a database error. `20261016000003_document_lifecycle.sql` adds a `deleted_at` grace-period
+  marker constrained to the `deleting` state only; finalizing a grace period into `deleted` and
+  scheduling object collection remain later work. The cloud binary's supported schema range
+  advanced to this version. The disposable PostgreSQL integration probe drives every transition
+  (including idempotent repeats, rejected transitions from a terminal `deleted` fixture row, missing
+  documents resolving to `None`, and a wrong-parent foreign-key rejection in its own transaction)
+  and confirms cross-tenant reads see nothing. The full S1/S2 Compose smoke passed end-to-end,
+  which also surfaced and fixed two pre-existing defects unrelated to this task's scope: the
+  disposable secrets `smoke-preflight.sh` wrote under `umask 077` were unreadable by the cloud
+  image's distroless nonroot container user (Compose bind-mounts `secrets.*.file` preserving host
+  permissions outside Swarm), and the cloud binary's hardcoded schema-version constants had not
+  been updated past S2-005.
 - [ ] **S2-010** Implement external mapping repository with tenant-scoped uniqueness.
 - [ ] **S2-011** Implement idempotency-key reservation, replay and mismatched-request rejection.
 - [ ] **S2-012** Implement append-only audit repository for foundational actions.
@@ -706,3 +721,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S2-006: provisioned separate migration/runtime PostgreSQL logins, transferred existing schema ownership, reconciled least-privilege grants and verified runtime DDL denial in Compose. |
 | 2026-10-16 | S2-007: added a typed tenant-scoped SQLx transaction helper and verified transaction-local context against a synthetic PostgreSQL RLS policy on a reused pooled connection. |
 | 2026-10-16 | S2-008: added tenant/workspace/project create and read repositories, membership-scoped tenant discovery and bounded keyset pagination, verified against synthetic cross-tenant PostgreSQL fixtures. |
+| 2026-10-16 | S2-009: added document create/read/rename/archive/restore/soft-delete repositories and a `deleted_at` grace-period migration advancing readiness to version 20261016000003; fixed two pre-existing Compose smoke defects (unreadable `umask 077` secrets under a nonroot container user, and a stale cloud schema-version constant) found while verifying it end-to-end. |

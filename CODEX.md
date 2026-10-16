@@ -55,7 +55,7 @@ the continuation point, a blocker or a major decision changes.
 - S1 is complete at 22/22 tasks and its cloud foundation gate passes. The cloud binary now serves
   `/api/v1/healthz` and diagnostic `/ws/v1/health` upgrades in the `api`, `relay` and `all` roles;
   `/readyz` checks transport startup and the SQLx schema-version range, not database-backed product
-  operations. S2-005 requires schema version `20261016000002`; Compose runs the one-shot
+  operations. S2-009 requires schema version `20261016000003`; Compose runs the one-shot
   migration job before cloud roles. A disposable smoke starts each role from one image, checks
   web/API/WebSocket routing and rejects unsafe production settings. S2 is in progress: S2-001
   selects SQLx 0.9 with embedded SQL migrations, PostgreSQL advisory locking and Rustls; S2-002 adds explicit
@@ -65,8 +65,10 @@ the continuation point, a blocker or a major decision changes.
   S2-006 provisions separate limited migrator/runtime database logins and reconciles grants before
   cloud starts. S2-007 adds a typed tenant-scoped transaction helper, verified against a synthetic
   RLS policy; S2-008 adds tenant, workspace and project repositories with bounded keyset pages.
-  Production RLS policies remain S4-014 work, and durable collaboration is still pending. The
-  cloud image builds with workspace Rust 1.95 (SQLx declares MSRV 1.94).
+  S2-009 adds document create/read/rename/archive/restore/soft-delete repositories and a
+  `deleted_at` grace-period column; finalizing a grace period into `deleted` and object collection
+  remain later work. Production RLS policies remain S4-014 work, and durable collaboration is
+  still pending. The cloud image builds with workspace Rust 1.95 (SQLx declares MSRV 1.94).
 - `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
   workspace, project, cloud-document, principal, object, job and request identifiers with strict
@@ -112,10 +114,11 @@ the continuation point, a blocker or a major decision changes.
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
    `docs/saas/dependency-images.md`. S1-018 and S1-GATE pass their transport and startup criteria.
-   S2-001 through S2-008 are complete; see `docs/saas/postgres-client-decision.md`, the
+   S2-001 through S2-009 are complete; see `docs/saas/postgres-client-decision.md`, the
    `--migrate` and `--provision-db-roles` commands, cloud-storage migrations, transaction helper
-   and metadata repositories. Continue with S2-009: implement document create, read, rename,
-   archive, restore and soft-delete repositories.
+   and metadata/document repositories. Continue with S2-010, S2-011 and S2-012: external mapping,
+   idempotency-key and audit repositories (independent of each other and of the S2-013..S2-018
+   collaboration-event chain, which should stay sequential).
    Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
 3. Update task evidence and milestone counts in the same commit as each completed task.
 

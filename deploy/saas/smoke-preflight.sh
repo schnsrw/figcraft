@@ -48,6 +48,13 @@ printf '%s\n' "$(openssl rand -hex 32)" > "$test_dir/session_signing_key"
 printf '{"identities":[{"name":"smoke","credentials":[{"accessKey":"%s","secretKey":"%s"}],"actions":["Admin","Read","Write","List"]}]}\n' \
   "$s3_access_key" "$s3_secret_key" > "$test_dir/seaweedfs-s3-config.json"
 
+# Docker Compose (outside Swarm) bind-mounts a `secrets.*.file` source preserving its exact host
+# permission bits, rather than normalizing them the way a Swarm-deployed secret would. The `umask
+# 077` above otherwise leaves these files unreadable by the distroless image's nonroot container
+# user (UID 65532), so every secret-consuming service would fail to start. `$test_dir` itself stays
+# private (mktemp -d created it 0700), so widening only these disposable, random-valued files is safe.
+chmod 644 "$test_dir"/*
+
 {
   printf 'services:\n  gateway:\n    ports:\n      - "127.0.0.1::8080"\n'
   printf '  postgres:\n    ports:\n      - "127.0.0.1::5432"\n'
@@ -131,8 +138,8 @@ if test "$(migration_ledger)" != t; then
 fi
 schema_version=$("${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -Atqc \
   "SELECT MAX(version) FROM public._sqlx_migrations WHERE success = TRUE")
-if test "$schema_version" != 20261016000002; then
-  printf 'Expected the S2-005 event and operations migration, got schema version %s\n' "$schema_version" >&2
+if test "$schema_version" != 20261016000003; then
+  printf 'Expected the S2-009 document lifecycle migration, got schema version %s\n' "$schema_version" >&2
   exit 1
 fi
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
@@ -162,6 +169,12 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
   cargo test --locked -p figcraft-cloud-storage --test metadata_repositories -- --nocapture
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/metadata-repository-cleanup.sql" > "$test_dir/metadata-repository-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/document-repository-preflight.sql" > "$test_dir/document-repository-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test document_repositories -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/document-repository-cleanup.sql" > "$test_dir/document-repository-cleanup.log"
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-a.log" 2>&1 &
 migration_a=$!
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-b.log" 2>&1 &
@@ -238,4 +251,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context and metadata repository isolation; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata and document lifecycle repository isolation; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'

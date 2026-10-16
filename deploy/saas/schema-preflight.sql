@@ -1,4 +1,4 @@
--- Synthetic S2-004/S2-005 integration checks. All inserted rows are rolled back.
+-- Synthetic S2-004/S2-005/S2-009 integration checks. All inserted rows are rolled back.
 BEGIN;
 
 CREATE FUNCTION pg_temp.expect_fk(statement TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
@@ -72,6 +72,12 @@ SELECT pg_temp.expect_constraint($sql$INSERT INTO identity_links (principal_id, 
     ('10000000-0000-4000-8000-000000000001', 'https://issuer.invalid', 'synthetic-user')$sql$);
 SELECT pg_temp.expect_constraint($sql$INSERT INTO documents (id, tenant_id, workspace_id, project_id, name, current_seq) VALUES
     ('60000000-0000-4000-8000-000000000003', '20000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 'Bad sequence', -1)$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO documents (id, tenant_id, workspace_id, project_id, name, deleted_at) VALUES
+    ('60000000-0000-4000-8000-000000000006', '20000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 'Bad deleted_at', now())$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO documents (id, tenant_id, workspace_id, project_id, name, state) VALUES
+    ('60000000-0000-4000-8000-000000000007', '20000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 'Bad deleting state', 'deleting')$sql$);
+INSERT INTO documents (id, tenant_id, workspace_id, project_id, name, state, deleted_at) VALUES
+    ('60000000-0000-4000-8000-000000000008', '20000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 'Valid deleting document', 'deleting', now());
 
 INSERT INTO documents (id, tenant_id, workspace_id, project_id, name) VALUES
     ('60000000-0000-4000-8000-000000000005', '20000000-0000-4000-8000-000000000001', '40000000-0000-4000-8000-000000000001', '50000000-0000-4000-8000-000000000001', 'Another document');

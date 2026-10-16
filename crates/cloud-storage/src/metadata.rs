@@ -1,10 +1,10 @@
-//! Tenant, workspace and project metadata repositories.
+//! Tenant, workspace, project and document metadata repositories.
 //!
 //! Every tenant-owned query derives its predicate from `TenantTransaction`, not a caller-supplied
 //! tenant parameter. Tenant discovery is the exception: it is scoped by an authenticated
 //! principal's active membership and must run before a tenant is selected.
 
-use figcraft_cloud_domain::{PrincipalId, ProjectId, ResourceState, TenantId, Uuid, WorkspaceId};
+use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, ProjectId, ResourceState, TenantId, Uuid, WorkspaceId};
 use sqlx::PgPool;
 use std::fmt;
 
@@ -18,6 +18,9 @@ pub enum RepositoryError {
     Constraint,
     Database,
     CorruptRow,
+    /// The row exists but its current lifecycle state does not permit the requested transition
+    /// (for example, renaming or archiving a document that is already being soft-deleted).
+    InvalidState,
 }
 
 impl fmt::Display for RepositoryError {
@@ -95,9 +98,20 @@ pub struct ProjectRecord {
     pub state: ResourceState,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DocumentRecord {
+    pub id: CloudDocumentId,
+    pub tenant_id: TenantId,
+    pub workspace_id: WorkspaceId,
+    pub project_id: ProjectId,
+    pub name: String,
+    pub state: ResourceState,
+}
+
 type TenantRow = (String, String, String, String, String, String);
 type WorkspaceRow = (String, String, Option<String>, String, String);
 type ProjectRow = (String, String, String, Option<String>, String, String);
+type DocumentRow = (String, String, String, String, String, String);
 
 fn state(value: &str) -> Result<ResourceState, RepositoryError> {
     match value {
@@ -138,6 +152,17 @@ fn project(row: ProjectRow) -> Result<ProjectRecord, RepositoryError> {
         tenant_id: row.1.parse().map_err(|_| RepositoryError::CorruptRow)?,
         workspace_id: row.2.parse().map_err(|_| RepositoryError::CorruptRow)?,
         owning_team_id: row.3.map(|value| Uuid::parse_str(&value).map_err(|_| RepositoryError::CorruptRow)).transpose()?,
+        name: row.4,
+        state: state(&row.5)?,
+    })
+}
+
+fn document(row: DocumentRow) -> Result<DocumentRecord, RepositoryError> {
+    Ok(DocumentRecord {
+        id: row.0.parse().map_err(|_| RepositoryError::CorruptRow)?,
+        tenant_id: row.1.parse().map_err(|_| RepositoryError::CorruptRow)?,
+        workspace_id: row.2.parse().map_err(|_| RepositoryError::CorruptRow)?,
+        project_id: row.3.parse().map_err(|_| RepositoryError::CorruptRow)?,
         name: row.4,
         state: state(&row.5)?,
     })
@@ -321,9 +346,161 @@ pub async fn list_projects(
     Ok(page(rows.into_iter().map(project).collect::<Result<Vec<_>, _>>()?, size, |item| item.id))
 }
 
+pub async fn create_document(
+    transaction: &mut TenantTransaction<'_>,
+    id: CloudDocumentId,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+    name: &str,
+) -> Result<DocumentRecord, RepositoryError> {
+    let row: DocumentRow = sqlx::query_as(
+        "INSERT INTO documents (id, tenant_id, workspace_id, project_id, name) \
+         VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5) \
+         RETURNING id::text, tenant_id::text, workspace_id::text, project_id::text, name, state",
+    )
+    .bind(id.to_string())
+    .bind(transaction.tenant_id().to_string())
+    .bind(workspace_id.to_string())
+    .bind(project_id.to_string())
+    .bind(name)
+    .fetch_one(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    document(row)
+}
+
+pub async fn get_document(transaction: &mut TenantTransaction<'_>, id: CloudDocumentId) -> Result<Option<DocumentRecord>, RepositoryError> {
+    let row: Option<DocumentRow> = sqlx::query_as(
+        "SELECT id::text, tenant_id::text, workspace_id::text, project_id::text, name, state \
+         FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(id.to_string())
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    row.map(document).transpose()
+}
+
+/// Resolve why a conditional document update matched zero rows: the document does not exist
+/// (`Ok(None)`), it already satisfies `settled` (the transition is idempotent), or it is in some
+/// other state that does not permit the transition (`Err(InvalidState)`).
+fn settle_or_reject_transition(existing: Option<DocumentRecord>, settled: ResourceState) -> Result<Option<DocumentRecord>, RepositoryError> {
+    match existing {
+        Some(record) if record.state == settled => Ok(Some(record)),
+        Some(_) => Err(RepositoryError::InvalidState),
+        None => Ok(None),
+    }
+}
+
+/// Rename a document. Permitted from `active` or `archived`; a document being soft-deleted keeps
+/// its name until it is restored.
+pub async fn rename_document(
+    transaction: &mut TenantTransaction<'_>,
+    id: CloudDocumentId,
+    name: &str,
+) -> Result<Option<DocumentRecord>, RepositoryError> {
+    let row: Option<DocumentRow> = sqlx::query_as(
+        "UPDATE documents SET name = $1, updated_at = now() \
+         WHERE tenant_id = $2::uuid AND id = $3::uuid AND state IN ('active', 'archived') \
+         RETURNING id::text, tenant_id::text, workspace_id::text, project_id::text, name, state",
+    )
+    .bind(name)
+    .bind(transaction.tenant_id().to_string())
+    .bind(id.to_string())
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    if let Some(row) = row {
+        return Ok(Some(document(row)?));
+    }
+    match get_document(transaction, id).await? {
+        Some(_) => Err(RepositoryError::InvalidState),
+        None => Ok(None),
+    }
+}
+
+/// Hide a document without deleting its data. Idempotent: archiving an already-archived document
+/// returns its current record instead of failing.
+pub async fn archive_document(transaction: &mut TenantTransaction<'_>, id: CloudDocumentId) -> Result<Option<DocumentRecord>, RepositoryError> {
+    let row: Option<DocumentRow> = sqlx::query_as(
+        "UPDATE documents SET state = 'archived', updated_at = now() \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid AND state = 'active' \
+         RETURNING id::text, tenant_id::text, workspace_id::text, project_id::text, name, state",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(id.to_string())
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    if let Some(row) = row {
+        return Ok(Some(document(row)?));
+    }
+    settle_or_reject_transition(get_document(transaction, id).await?, ResourceState::Archived)
+}
+
+/// Restore a document to `active` from `archived` or from the soft-delete grace period
+/// (`deleting`), clearing its deletion marker. Idempotent when the document is already active.
+pub async fn restore_document(transaction: &mut TenantTransaction<'_>, id: CloudDocumentId) -> Result<Option<DocumentRecord>, RepositoryError> {
+    let row: Option<DocumentRow> = sqlx::query_as(
+        "UPDATE documents SET state = 'active', deleted_at = NULL, updated_at = now() \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid AND state IN ('archived', 'deleting') \
+         RETURNING id::text, tenant_id::text, workspace_id::text, project_id::text, name, state",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(id.to_string())
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    if let Some(row) = row {
+        return Ok(Some(document(row)?));
+    }
+    settle_or_reject_transition(get_document(transaction, id).await?, ResourceState::Active)
+}
+
+/// Start a document's deletion grace period. Idempotent: calling this again while a document is
+/// already `deleting` leaves its original `deleted_at` marker untouched.
+pub async fn soft_delete_document(transaction: &mut TenantTransaction<'_>, id: CloudDocumentId) -> Result<Option<DocumentRecord>, RepositoryError> {
+    let row: Option<DocumentRow> = sqlx::query_as(
+        "UPDATE documents SET state = 'deleting', deleted_at = now(), updated_at = now() \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid AND state IN ('active', 'archived') \
+         RETURNING id::text, tenant_id::text, workspace_id::text, project_id::text, name, state",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(id.to_string())
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    if let Some(row) = row {
+        return Ok(Some(document(row)?));
+    }
+    settle_or_reject_transition(get_document(transaction, id).await?, ResourceState::Deleting)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PageSize, RepositoryError, page};
+    use super::{DocumentRecord, PageSize, RepositoryError, page, settle_or_reject_transition};
+    use figcraft_cloud_domain::{CloudDocumentId, ProjectId, ResourceState, TenantId, WorkspaceId};
+
+    fn document_record(state: ResourceState) -> DocumentRecord {
+        DocumentRecord {
+            id: CloudDocumentId::random(),
+            tenant_id: TenantId::random(),
+            workspace_id: WorkspaceId::random(),
+            project_id: ProjectId::random(),
+            name: "Untitled".to_owned(),
+            state,
+        }
+    }
+
+    #[test]
+    fn transition_settles_idempotently_or_rejects_other_states() {
+        assert_eq!(settle_or_reject_transition(None, ResourceState::Archived), Ok(None));
+        let already_archived = document_record(ResourceState::Archived);
+        assert_eq!(settle_or_reject_transition(Some(already_archived.clone()), ResourceState::Archived), Ok(Some(already_archived)));
+        let deleting = document_record(ResourceState::Deleting);
+        assert_eq!(settle_or_reject_transition(Some(deleting), ResourceState::Archived), Err(RepositoryError::InvalidState));
+    }
 
     #[test]
     fn page_sizes_are_strictly_bounded() {
