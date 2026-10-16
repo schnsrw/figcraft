@@ -11,6 +11,7 @@ pub mod external_mappings;
 pub mod idempotency;
 pub mod legacy_scan;
 pub mod metadata;
+pub mod migration_plan;
 pub mod object_metadata;
 pub mod object_references;
 pub mod objects;

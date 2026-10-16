@@ -1,0 +1,105 @@
+{
+  "format_version": 1,
+  "report_format_version": 1,
+  "report_scanned_at": 1760000000,
+  "target": {
+    "tenant_id": "5d17a000-0000-4000-8000-000000000001",
+    "workspace_id": "5d17a000-0000-4000-8000-000000000002",
+    "project_id": "5d17a000-0000-4000-8000-000000000003",
+    "principal_id": "5d17a000-0000-4000-8000-000000000004",
+    "bucket": "figcraft"
+  },
+  "executable": true,
+  "blockers": [],
+  "totals": {
+    "documents": 1,
+    "excluded": 0,
+    "deferred": 0,
+    "degraded": 0,
+    "events": 2,
+    "links": 2,
+    "plugins": 1,
+    "objects": 3,
+    "snapshot_bytes": 100,
+    "library_bytes": 30,
+    "plugin_bytes": 64,
+    "upload_bytes": 194,
+    "event_bytes_max": 93,
+    "estimated_bytes": 287
+  },
+  "documents": [
+    {
+      "legacy_id": "doc-a",
+      "status": "ready",
+      "problems": [],
+      "warnings": [],
+      "document": {
+        "id": "3648f310-990f-8042-9fc6-8ad9905235be",
+        "name": "Synthetic board",
+        "state": "active",
+        "current_seq": 6
+      },
+      "external_mapping": {
+        "system_id": "figcraft-server",
+        "resource_kind": "document",
+        "external_id": "doc-a",
+        "internal_id": "3648f310-990f-8042-9fc6-8ad9905235be"
+      },
+      "snapshot": {
+        "id": "1bd0d99b-dc7a-8c5b-8767-1e187f86b04e",
+        "seq": 4,
+        "object": {
+          "id": "9ca2bcca-7280-817c-b6f7-973e0b8f2101",
+          "kind": "snapshot",
+          "bucket": "figcraft",
+          "source": "files/doc-a/snapshot.bin",
+          "key_prefix": "tenants/5d17a000-0000-4000-8000-000000000001/documents/3648f310-990f-8042-9fc6-8ad9905235be/snapshots/4-",
+          "key_suffix": ".bin",
+          "size_bytes": 100,
+          "media_type": "application/vnd.figcraft.session-state"
+        }
+      },
+      "events": {
+        "count": 2,
+        "first_seq": 5,
+        "last_seq": 6,
+        "actor_principal_id": "5d17a000-0000-4000-8000-000000000004",
+        "source_log_bytes": 93
+      },
+      "libraries": [
+        {
+          "id": "da6c6944-0170-8bb2-b657-7c81f2922014",
+          "kind": "library",
+          "bucket": "figcraft",
+          "source": "files/doc-a/library-1.bin",
+          "key_prefix": "tenants/5d17a000-0000-4000-8000-000000000001/libraries/a12616b0-0d2b-8847-a0da-9c5cd4e0afc7/1-",
+          "key_suffix": ".figcraft",
+          "size_bytes": 30,
+          "media_type": "application/vnd.figcraft.library"
+        }
+      ],
+      "links": 2
+    }
+  ],
+  "excluded": [],
+  "plugins": [
+    {
+      "legacy_id": "grid",
+      "version": "3",
+      "plugin_id": "1b6f6122-6b4e-84d4-aeba-7c8c19965450",
+      "object": {
+        "id": "6dc431d5-4811-8473-82eb-271ba4011a3a",
+        "kind": "plugin",
+        "bucket": "figcraft",
+        "source": "plugins/abababababababababababababababababababababababababababababababab.bin",
+        "key_prefix": "tenants/5d17a000-0000-4000-8000-000000000001/plugins/1b6f6122-6b4e-84d4-aeba-7c8c19965450/3-",
+        "key_suffix": ".bin",
+        "object_key": "tenants/5d17a000-0000-4000-8000-000000000001/plugins/1b6f6122-6b4e-84d4-aeba-7c8c19965450/3-abababababababababababababababababababababababababababababababab.bin",
+        "sha256": "abababababababababababababababababababababababababababababababab",
+        "size_bytes": 64,
+        "media_type": "application/vnd.figcraft.plugin"
+      }
+    }
+  ],
+  "deferred": []
+}
