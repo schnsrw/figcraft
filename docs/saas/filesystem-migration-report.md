@@ -211,7 +211,7 @@ legacy file, relative to the scanned root), `key_prefix` and `key_suffix`, `size
 the full `object_key`. For snapshots and libraries the import computes the SHA-256 while
 re-reading the file. The key is then `key_prefix` + hex digest + `key_suffix`, which matches
 `object_metadata::keys`. A snapshot object holds the snapshot body: the file size minus the
-17-byte `FCSN` header. Media types are `application/vnd.figcraft.session-state`,
+17-byte `FCSN` header. Media types are `application/vnd.figcraft.snapshot`,
 `application/vnd.figcraft.library` and `application/vnd.figcraft.plugin`.
 
 ### What is excluded or deferred

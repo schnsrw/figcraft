@@ -107,7 +107,7 @@ done
 init_container=$("${compose[@]}" ps --all --quiet seaweedfs-init)
 test -n "$init_container"
 if test "$(docker inspect --format '{{.State.ExitCode}}' "$init_container")" != 0; then
-  printf 'Bucket versioning initialization failed\n' >&2
+  printf 'Object store initialization (bucket, versioning, lifecycle) failed\n' >&2
   exit 1
 fi
 
@@ -181,6 +181,26 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_D
   cargo test --locked -p figcraft-cloud-storage --test object_repository -- --nocapture
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/object-repository-cleanup.sql" > "$test_dir/object-repository-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/upload-reservation-preflight.sql" > "$test_dir/upload-reservation-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test upload_reservations -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/upload-reservation-cleanup.sql" > "$test_dir/upload-reservation-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/presigned-download-preflight.sql" > "$test_dir/presigned-download-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test presigned_downloads -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/presigned-download-cleanup.sql" > "$test_dir/presigned-download-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/object-reference-preflight.sql" > "$test_dir/object-reference-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test object_references -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/object-reference-cleanup.sql" > "$test_dir/object-reference-cleanup.log"
+FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test bucket_admin -- --nocapture --test-threads=1
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   -c 'DROP TABLE public.tenant_context_probe' > "$test_dir/tenant-context-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
@@ -335,4 +355,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection; object-store connectivity, credential and bucket checks; object read-back verification.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection; object-store connectivity, credential and bucket checks; object read-back verification; upload reservations and validated promotion; authorized presigned downloads; references and retention holds; bucket versioning and lifecycle initialization.\n'

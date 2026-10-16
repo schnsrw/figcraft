@@ -12,12 +12,12 @@
 //!   header (PNG `IHDR` with its CRC, the first JPEG `SOFn`, the WebP `VP8 `/`VP8L`/`VP8X` frame
 //!   header, the GIF logical screen) must give non-zero dimensions within the pixel, dimension and
 //!   decoded-byte budgets.
-//! - `application/x-figcraft`: a `.figcraft` zip (documents and published libraries). Only the
+//! - `application/vnd.figcraft.library`: a `.figcraft` zip (documents and published libraries). Only the
 //!   end-of-central-directory record, the central directory and each local header are read;
 //!   entry count, names, per-entry size, compression ratio and total declared expanded size are
 //!   budgeted, and entries may not overlap, be encrypted, use zip64 or anything but stored or
 //!   deflate. The archive must contain `document.json`.
-//! - `application/x-figcraft-plugin`: a plugin bundle (`FCPLUGB1`, see `figcraft-plugin`), which
+//! - `application/vnd.figcraft.plugin`: a plugin bundle (`FCPLUGB1`, see `figcraft-plugin`), which
 //!   is uncompressed; its manifest, WebAssembly module and assets are bounded and named safely.
 //!
 //! SVG and PDF are refused: both are active, scriptable formats whose safe acceptance needs a full
@@ -37,9 +37,12 @@ pub const MEDIA_WEBP: &str = "image/webp";
 /// GIF image.
 pub const MEDIA_GIF: &str = "image/gif";
 /// A `.figcraft` document or published library (a zip container).
-pub const MEDIA_FIGCRAFT: &str = "application/x-figcraft";
+pub const MEDIA_FIGCRAFT: &str = "application/vnd.figcraft.library";
 /// A FigCraft plugin bundle.
-pub const MEDIA_PLUGIN: &str = "application/x-figcraft-plugin";
+pub const MEDIA_PLUGIN: &str = "application/vnd.figcraft.plugin";
+/// A document snapshot: a collaboration `SessionState` in the wire encoding. Not a container this
+/// validator inspects; it is verified by decoding when restored.
+pub const MEDIA_SNAPSHOT: &str = "application/vnd.figcraft.snapshot";
 
 /// A media type this validator accepts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

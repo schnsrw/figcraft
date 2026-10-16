@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (3/20) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (10/20) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -20,7 +20,7 @@ the same commit as the completed task.
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
-| S3 Object storage and migration | in progress | 3 / 20 | Verified object storage and repeatable migration |
+| S3 Object storage and migration | in progress | 10 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -557,10 +557,110 @@ the same commit as the completed task.
   re-verify, altered, short, long and missing bytes, a rejected object staying rejected after
   correct bytes appear, an unreachable store, duplicate live keys, a foreign-prefix key and
   cross-tenant invisibility.
-- [ ] **S3-004** Implement staging upload reservations with method, key, size, type and expiry.
-- [ ] **S3-005** Implement upload completion, read-back verification and promotion.
-- [ ] **S3-006** Implement authorized, short-lived presigned downloads.
-- [ ] **S3-007** Implement object-reference accounting and retention holds.
+- [x] **S3-004** Implement staging upload reservations with method, key, size, type and expiry.
+  Evidence: `figcraft-cloud-storage::uploads::reserve_upload` checks kind, size, media type and TTL
+  against a per-kind policy before any SQL runs. Assets allow up to 32 MiB of
+  `image/png|jpeg|webp|gif` or `application/octet-stream` (opaque binary assets, served only as
+  attachments). `image/svg+xml` is not allowed because SVG can carry script. Snapshots and libraries
+  allow up to 128 MiB and plugins up to 16 MiB, each with exactly one vendor type
+  (`application/vnd.figcraft.snapshot|library|plugin`). Media types must match exactly: no
+  parameters and no mixed case. Exports and thumbnails come from workers and cannot be reserved
+  (`UnsupportedKind`). TTLs are whole seconds from 1 s up to `MAX_PRESIGN_TTL`; longer requests are
+  capped. A principal may hold at most 100 unexpired open reservations per tenant
+  (`TooManyReservations`). The presigned `PUT` for exactly `keys::staging(tenant, id)` is signed
+  before the row is inserted, and the row's expiry is `clock_timestamp() + ttl`, so the URL never
+  outlives the reservation. The function returns the row (expiry as Unix seconds, plus an `expired`
+  flag taken from the database clock), the method `PUT`, the URL and the TTL. `expire_reservations`
+  moves up to 500 overdue `reserved` rows to `expired`, oldest expiry first, using `FOR UPDATE SKIP
+  LOCKED`, and returns their staging keys for deletion after commit. Unit tests cover the policy
+  bounds, a junk media-type/state/kind sweep and TTL capping. The PostgreSQL + SeaweedFS probe
+  covers: the recorded fields; `X-Amz-Expires` equal to the TTL; the PUT landing only on the staging
+  key (a PUT rewritten to the final key is refused); the 900 s cap; zero, negative and oversize
+  sizes; SVG, mixed case and cross-kind types; export and thumbnail kinds; a sub-second TTL; an
+  unknown principal (`Constraint`); the open-reservation cap; another tenant seeing nothing; and the
+  sweep expiring only overdue rows. Integration (this round): the presigned `PUT` signs the bucket's
+  staging tag (`x-amz-tagging: figcraft-staging=true`, returned in `ReservedUpload::headers`), so an
+  upload that drops it is refused and abandoned staging objects match the S3-014 lifecycle rule;
+  assets are limited to the four image types the validator can vouch for.
+- [x] **S3-005** Implement upload completion, read-back verification and promotion.
+  Evidence: `uploads::complete_upload` locks the reservation row (`FOR UPDATE`). An unknown or
+  other-tenant reservation is `NotFound`; an expired row, or a `reserved` row whose expiry has
+  passed, is `Expired`; a rejected one is `InvalidState`; completing a promoted one again returns
+  the same object (`reused`). Assets are the only kind it completes: snapshot, library and plugin
+  keys need ids a reservation does not carry, so those are left to S3-008, S3-010 and S3-011. It
+  reads the staging object back within the expected size. Nothing staged is `NotUploaded` and
+  changes nothing. A size mismatch (including an oversize `TooLarge` read) or a SHA-256 mismatch
+  marks the reservation `rejected` and deletes the staging object. Matching bytes first reuse a
+  verified object with the same tenant, kind, digest and size. Otherwise they fill an existing
+  pending row at the content-addressed key, or else `register_object` creates one, followed by
+  `put_object` to `keys::asset` and `verify_object` (read-back of the final key). A rejected or
+  deleting row holding the key is `ObjectConflict`. Then the reservation becomes `promoted` with
+  `object_id` and `completed_at`, and the staging object is deleted last, so any `Err` can be rolled
+  back and retried. A store outage leaves the reservation `reserved`. Unit tests sweep junk producer
+  versions. The probe covers: the happy path through a credential-free presigned PUT client;
+  completing before upload; cross-tenant and unknown completion; invalid producer versions; a
+  verified final object whose bytes and metadata match, with the staging object deleted; idempotent
+  re-completion; duplicate content deduped to one object; altered bytes rejected, with staging
+  deleted, no final object written, and the reservation still refused after correct bytes appear;
+  oversize and short uploads rejected with staging deleted; an expired reservation refused before
+  and after the sweep; an unreachable store changing nothing before a successful retry; and a
+  snapshot reservation refused as `UnsupportedKind`. Integration (this round): completion takes the
+  completing principal and refuses anyone but the reserver (`NotReservationOwner`), and bytes that
+  match digest and size are then run through `validation::validate`; a failure is
+  `Completion::Invalid` with the reservation rejected and the staging object deleted (probed with a
+  checksum-correct non-image).
+- [x] **S3-006** Implement authorized, short-lived presigned downloads.
+  Evidence: `figcraft-cloud-storage::downloads` signs object downloads only through
+  `presign_download`, which consumes a `DownloadAuthorization`. The grant has private fields and no
+  `Clone`, `Default` or public constructor; the only way to get one is the explicit step
+  `authorize_download(tx, principal, object_id)`. That step requires an active `tenant_members` row
+  for an active principal in the transaction's active tenant, and a `verified`, non-deleted object
+  in that tenant. It is the seam S4 extends with document and asset access checks.
+  `presign_download` refuses a grant from another tenant's transaction or for another object
+  (`NotAuthorized`). It re-reads the object `FOR SHARE`, so a row deleted since authorization is
+  refused (`Unavailable`), and it refuses an object in a bucket other than the store's. It signs one
+  `GET` for the stored key, valid for 5 minutes by default; longer requests are clamped to
+  `MAX_PRESIGN_TTL` (15 min), the TTL is truncated to whole seconds, and anything under 1 s is
+  refused (`InvalidTtl`). The result holds the URL plus size, SHA-256 and media type, never
+  credentials, and its `Debug` leaves the URL out. Each issued URL records an
+  `object.download_signed` audit event (principal, object, kind, ttl_seconds) in the same
+  transaction; if the audit write fails, no URL is returned. Missing, foreign, pending, rejected and
+  deleting objects all give the same `Unavailable`, so other tenants' ids cannot be probed. A unit
+  junk sweep over 4096 TTLs plus the extremes never leaves 1 s..=15 min. The PostgreSQL + SeaweedFS
+  probe covers: a verified object downloading exactly its bytes through an independent ring-rustls
+  reqwest client; `X-Amz-Expires=300` by default and 900 when 24 h is asked; sub-second TTL refused;
+  a 1 s URL refused after expiry; the URL failing for a different key and for PUT; a grant not
+  signing another object; pending, rejected, unknown and deleting objects refused, including
+  deletion between authorization and signing; suspended members, non-members and suspended
+  principals refused; a member of two tenants refused the other tenant's object; a grant not usable
+  in another tenant's transaction; a suspended tenant refused; exactly three audit events for three
+  issued URLs and none for refusals.
+- [x] **S3-007** Implement object-reference accounting and retention holds.
+  Evidence: `figcraft-cloud-storage::object_references` adds `add_reference`/`remove_reference` for
+  the seven ordinary owner kinds and `place_retention_hold`/`release_retention_hold` (a hold is an
+  `object_references` row with `owner_kind = 'retention_hold'` and `owner_id` = the hold id). All
+  four are idempotent (`Applied`/`AlreadyApplied`). New references are accepted only on `pending` or
+  `verified` objects. Holds are also accepted on `rejected` ones, because a hold keeps bytes and
+  does not use them. `deleting`/`deleted` objects take neither (`InvalidState`), and an unknown or
+  foreign object is `NotFound`. Holds are capped at 64 per object (`TooManyHolds`), and the module
+  documentation says only operator support tooling and legal-hold workflows may place or release
+  them. `reference_count` returns references and holds separately; `list_references` is bounded to
+  1..=1000. `collectable_objects(tx, min_age, limit)` returns at most 1000
+  `pending`/`verified`/`rejected` objects with no reference and no hold, oldest first. Their age is
+  at least `MIN_COLLECTION_AGE` (24 h): a lower request is raised to it, and requests are capped at
+  ten years. `begin_object_deletion` locks the row `FOR UPDATE` and re-checks age (`TooYoung`) and
+  references (`Referenced`) in a separate statement before setting `deleting` and `deleted_at`; it
+  is idempotent on `deleting` and `InvalidState` on `deleted`. `add_reference` (`FOR SHARE`) and
+  `place_retention_hold` (`FOR UPDATE`) take conflicting row locks, and serialization failures map
+  to `Conflict`. The PostgreSQL probe covers idempotent add/remove/hold/release, holds kept apart
+  from references, state refusals, the hold cap, cross-tenant `NotFound`, the candidate filter
+  (references, holds, freshness, a 23 h object kept safe by the floor despite `min_age = 0`, longer
+  and capped ages, ordering, limits), deletion re-checks, and holds released so objects become
+  collectable again. It also covers lock-ordered races (checked through `pg_stat_activity` that the
+  second transaction is waiting): a reference or hold committed first makes the waiting deletion
+  `Referenced`; a deletion committed first makes the waiting reference or hold `InvalidState`; a
+  rolled-back deletion lets the waiting reference land. Finally, 8 free-running reference/deletion
+  pairs each end with exactly one winner and never a reference on a `deleting` object. No migration.
 
 ### Stored object types
 
@@ -569,14 +669,111 @@ the same commit as the completed task.
 - [ ] **S3-010** Store team-library versions and usage references.
 - [ ] **S3-011** Store validated plugin bundles and manifests.
 - [ ] **S3-012** Store export results and thumbnails.
-- [ ] **S3-013** Add media, archive, image-pixel and expanded-byte validation budgets.
+- [x] **S3-013** Add media, archive, image-pixel and expanded-byte validation budgets.
+  Evidence: `figcraft-cloud-storage::validation::validate(declared, bytes, &Budgets)` is a pure,
+  bounded check of staged bytes before promotion. It returns `Validated { media, summary }` (image
+  width/height/decoded bytes, archive entries/expanded bytes, or plugin assets/module bytes), or one
+  of 23 fixed `Rejection` codes (`media_mismatch`, `pixel_budget`, `compression_ratio`,
+  `unsafe_name`, `overlapping_entries`, …) that never contain input bytes. It reads only headers and
+  container directories: it never decodes pixels, never decompresses and adds no new dependencies
+  (`zip` is a dev-dependency only, used to write a real `.figcraft` sample). Accepted types are
+  `image/png|jpeg|webp|gif`, `application/x-figcraft` (documents and libraries, which are zips) and
+  `application/x-figcraft-plugin` (`FCPLUGB1` bundles). The declared type is compared without ASCII
+  case, has no parameters, and must match the magic bytes. SVG and PDF are refused and the reason is
+  documented. Images: PNG `IHDR` must come first with a valid CRC, depth and colour type, and
+  dimensions of at most 2^31-1; JPEG is walked to the first `SOFn` (at most 1 024 segments, a
+  zero/DNL height is refused); WebP must be an exact-length RIFF whose first chunk is a `VP8 ` key
+  frame, `VP8L` or `VP8X`; GIF uses the logical screen. Zero dimensions, sides above 65 535, more
+  than 100 MP, or more than 512 MiB decoded (4 bytes a pixel, 8 at 16-bit) are refused. Zips: the
+  EOCD must end the upload exactly and follow the central directory directly. Zip64, multi-disk,
+  encryption/AES and methods other than stored/deflate are refused, and stored sizes must agree.
+  Each local header must repeat its central name and method, entry ranges must be disjoint and start
+  at byte 0 (overlap bombs, polyglots), and names must be UTF-8 relative paths with no control
+  characters, `\`, `:`, empty/`.`/`..` segments, and no duplicates ignoring ASCII case. Other
+  budgets: at most 50 000 entries, 512 MiB per entry, 2 GiB declared expanded in total, and a 250:1
+  ratio above 1 MiB; `document.json` is required. Plugin bundles: a UTF-8 manifest of at most 256
+  KiB, a module of at most 16 MiB with the wasm v1 header, at most 32 assets with plain, non-device,
+  case-unique names, and no trailing bytes. Tests cover every accepted kind, huge/zero dimensions,
+  bad CRC/depth, ratio, size and count bombs, traversal/absolute/control/duplicate names,
+  encryption, zip64 sentinels and locators, an overlap bomb, renamed local headers, trailing and gap
+  bytes, and hostile plugin bundles. The never-crash sweep runs every truncation of 9 samples
+  (containers must refuse every cut), three byte flips at every offset checked against all six
+  declared types and tight budgets, and 30 000 seeded random garbage and mutated inputs, some ending
+  in a forged EOCD. `docs/saas/security.md` gains "Upload validation budgets". FigCraft media types
+  are canonical in `validation` (`application/vnd.figcraft.snapshot|library|plugin`) and shared by
+  uploads and the migration planner.
 
 ### Lifecycle and migration
 
-- [ ] **S3-014** Add idempotent S3-compatible bucket, versioning and lifecycle initialization.
+- [x] **S3-014** Add idempotent S3-compatible bucket, versioning and lifecycle initialization.
+  Evidence: `figcraft-cloud-storage::bucket_admin::initialize_bucket` brings the bucket to the
+  target state, safely when run repeatedly or concurrently. It sends `HeadBucket` and then
+  `CreateBucket` only on a 404, with a location constraint outside us-east-1. A 409
+  (`BucketAlreadyOwnedByYou`, a concurrent create) is settled by a second HEAD: 200 means already
+  existed, 403 means `BucketOwnedElsewhere`. It then enables versioning (`PUT ?versioning` Enabled)
+  and reads it back (`GET ?versioning`); the change counts only if it reads back as Enabled
+  (otherwise `VersioningNotEnabled`). Finally it reads the lifecycle configuration, writes it only
+  if it differs, and reads it back for comparison. `rusty-s3` has no versioning or lifecycle
+  actions, so these sub-resource requests are signed with `rusty_s3::signing::sign` over the store's
+  validated base URL and carry a signed `Content-MD5`. Response bodies are capped at 64 KiB and
+  parsed with `roxmltree` (no DTD, 8192-node limit, at most 1000 rules, day counts limited to 10
+  digits, text to 1024 bytes). Failures are fixed, non-leaking categories. The lifecycle has three
+  rules. `figcraft-staging-expiry` expires objects tagged `figcraft-staging=true` after 2 days;
+  staging keys are `tenants/<tenant>/staging/<id>`, and a prefix filter cannot wildcard the tenant.
+  `figcraft-abort-incomplete-multipart` aborts uploads after 2 days, and
+  `figcraft-noncurrent-expiry` removes noncurrent versions after 30 days. Periods are validated to
+  1..=36500 days. Rules whose ID does not start with `figcraft-` are refused
+  (`ForeignLifecycleRules`) and left untouched. A store answering 501/`NotImplemented` reports
+  `LifecycleOutcome::Unsupported`. The function returns a typed `BucketInitReport`
+  (Created/AlreadyExisted, Enabled{previous}/AlreadyEnabled,
+  Applied/Replaced/AlreadyCorrect/Unsupported, `changed()`). `staging_tagging_header()` gives the
+  `x-amz-tagging` header that presigned staging PUTs must sign. `figcraft-cloud --init-object-store`
+  is a standalone explicit command that reads the normal S3 config and secrets and never runs at
+  startup. The Compose `seaweedfs-init` job now runs it from the cloud image instead of `weed
+  shell`. The SeaweedFS probe covers: a fresh throwaway bucket created, versioned and given verified
+  lifecycle rules; two reruns making no change; a changed policy replacing the rules and a restore
+  replacing them back; a foreign rule refused and kept, then Applied once removed; two concurrent
+  inits both succeeding, with at most one Created and the final state correct; and a presigned PUT
+  with the signed tagging header storing the tag, while an untagged or retagged PUT is refused. It
+  also covers wrong credentials (`Unauthorized`), a closed port (`Unreachable`) and an invalid
+  policy (`InvalidPolicy`), none of which create the bucket. Probe buckets are deleted after each
+  run.
 - [ ] **S3-015** Add garbage-collection jobs with dry-run and minimum-age protection.
 - [ ] **S3-016** Add database-to-bucket reconciliation report.
-- [ ] **S3-017** Extend the filesystem scanner into a dry-run migration planner.
+- [x] **S3-017** Extend the filesystem scanner into a dry-run migration planner.
+  Evidence: `figcraft-cloud-storage::migration_plan::plan_migration(&MigrationReport, &PlanTarget
+  {tenant_id, workspace_id, project_id, principal_id, bucket})` builds a versioned (format 1),
+  serde-serialisable dry-run `MigrationPlan`. It is pure over the report and target: it reads no
+  files, clock, randomness or database, and writes nothing. It refuses only an unknown report
+  `format_version` and an invalid bucket name. Identifiers are deterministic, so reruns are
+  idempotent. The workspace `uuid` crate doesn't enable v5, so each id is the first 16 bytes of
+  SHA-256 over a fixed namespace, the tenant and length-prefixed legacy parts, stamped as an RFC
+  9562 version-8 UUID. Every list is sorted, so the same report gives byte-identical JSON. Each
+  ready or degraded document plans: - the `documents` row (name trimmed, replaced or cut to 255
+  characters; `current_seq` set to `last_accepted_seq`); - an `external_mappings` row
+  (`figcraft-server`/`document`/legacy id); - a `document_snapshots` row and a snapshot object (body
+  size = file minus the 17-byte header; key prefix and suffix from `object_metadata::keys`; the
+  digest is left to the import because the scanner doesn't hash snapshots); - an event count and seq
+  range (`log.replayable` of a log that continues the snapshot, from `seq+1` to `last_accepted_seq`,
+  actor = the target principal; a mismatch excludes the document); - versioned library objects.
+  Plugins with a valid bundle and an integer version get full content-addressed keys with known
+  SHA-256 (keys checked with `valid_key`). Anything else is listed in `deferred` with a fixed
+  reason. Excluded documents (`blocked`, `invalid_legacy_id`, `duplicate_legacy_id`,
+  `metadata_unavailable`, `snapshot_unavailable`, `sequence_inconsistent`) carry their blocking
+  problem codes. A document marked ready is still excluded if a blocking problem names it. Degraded
+  documents keep their warning codes and plan warnings (`log_truncated`, `log_ignored`,
+  `name_replaced`, `libraries_deferred`, …). Plan blockers are `report_incomplete`,
+  `blocking_server_problem`, `exclusion_approval_required` and `document_limit_reached`. Totals
+  cover object count, snapshot, library and plugin bytes, and estimated bytes (`upload_bytes +
+  event_bytes_max`). Caps: 100,000 documents, 256 libraries per document, 10,000 plugins.
+  `filesystem-migration-report.md` documents the plan format, the id derivation and every reason
+  code. The probe checks: - stable output across runs, report orderings and tenants; - blocked
+  documents excluded; - degraded documents included with warnings; - inconsistent, malformed and
+  duplicate documents excluded; - stale logs ignored; - plugin planning and deferral; - a scanned
+  synthetic directory planning its replayable range, with the tree unchanged; - the document cap; -
+  the JSON format, pinned against `tests/migration_plan_golden.json`; - a 2,000-report pseudo-random
+  sweep with hostile values, checking invariants: unique ids, valid keys, `BIGINT` bounds, `seq +
+  count = current_seq`, totals. Unit tests add a junk-string sweep over the validators.
 - [ ] **S3-018** Implement repeatable filesystem-to-PostgreSQL/S3 migration with per-resource
   checkpoints.
 - [ ] **S3-019** Verify migrated snapshots, logs, links, libraries and plugins before cutover.
@@ -965,3 +1162,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S3-001: chose `rusty-s3` + `reqwest` (Rustls/ring) for S3-compatible storage, added the validated object-store client and a signed `HeadBucket` readiness check. S3 reaches 1/20. |
 | 2026-10-17 | S3-002: added object, object-reference and upload-reservation tables with tenant-prefix key constraints; readiness advanced to schema version 20261017000001. S3 reaches 2/20. |
 | 2026-10-17 | S3-003: added bounded object I/O, the content-addressed key layout and read-back SHA-256 verification of object metadata. S3 reaches 3/20. |
+| 2026-10-17 | S3-004..S3-007, S3-013, S3-014, S3-017: upload reservations and validated promotion, authorized presigned downloads, references and retention holds, content validation budgets, idempotent bucket/versioning/lifecycle initialization, and a dry-run migration planner (six parallel worktree agents, then integrated: tagged staging PUTs, completer check, validation before promotion, one FigCraft media-type set). S3 reaches 10/20. |

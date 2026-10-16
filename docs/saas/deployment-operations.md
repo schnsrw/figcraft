@@ -36,7 +36,7 @@ an operational SaaS deployment.
 | `postgres` | supported PostgreSQL release | database volume | private network only |
 | `redis` | supported Redis release | optional append-only volume | private network only |
 | `seaweedfs` | pinned SeaweedFS `mini` | object volume | private network only |
-| `seaweedfs-init` | pinned SeaweedFS `weed shell` | none | one-shot versioning verification |
+| `seaweedfs-init` | cloud image, `--init-object-store` | none | one-shot, idempotent bucket, versioning and lifecycle initialization (S3-014) |
 
 ### Scale profile
 
@@ -155,8 +155,13 @@ idle timeouts longer than heartbeat intervals and bounded request headers.
 3. Run `figcraft-cloud --migrate` with the migrator URL. It applies embedded, versioned SQL under a
    PostgreSQL advisory lock; application roles never migrate on startup.
 4. Run role provisioning again to grant runtime access to newly created tables.
-5. SeaweedFS creates the local bucket if absent; its initializer enables and verifies versioning.
-   Lifecycle rules remain S3-014 work.
+5. `figcraft-cloud --init-object-store` (the `seaweedfs-init` job) creates the bucket if absent,
+   enables and verifies versioning, and applies FigCraft's lifecycle rules: expire objects tagged
+   `figcraft-staging=true` (every presigned staging upload signs that tag), abort incomplete
+   multipart uploads and expire noncurrent versions. It is idempotent, refuses to overwrite
+   lifecycle rules FigCraft did not write, and never runs at normal startup. The application's
+   reservation-expiry sweep stays authoritative; the lifecycle rule is a backstop, and whether a
+   given S3-compatible store enforces it must be checked per deployment.
 6. Redis becomes reachable.
 7. API and relay roles start with only the runtime URL and pass readiness checks.
 8. Workers start and claim jobs.

@@ -45,9 +45,9 @@ const MAX_PLUGIN_ID_BYTES: usize = 256;
 /// Domain separator for [`derived_id`]; changing it changes every identifier.
 const ID_NAMESPACE: &[u8] = b"figcraft-migration-plan/v1";
 
-const SNAPSHOT_MEDIA_TYPE: &str = "application/vnd.figcraft.session-state";
-const LIBRARY_MEDIA_TYPE: &str = "application/vnd.figcraft.library";
-const PLUGIN_MEDIA_TYPE: &str = "application/vnd.figcraft.plugin";
+const SNAPSHOT_MEDIA_TYPE: &str = crate::validation::MEDIA_SNAPSHOT;
+const LIBRARY_MEDIA_TYPE: &str = crate::validation::MEDIA_FIGCRAFT;
+const PLUGIN_MEDIA_TYPE: &str = crate::validation::MEDIA_PLUGIN;
 
 /// Where the import would put the data, chosen by the operator.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

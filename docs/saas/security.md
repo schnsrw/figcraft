@@ -109,8 +109,8 @@ is safe to return to clients and audit records. `Budgets::DEFAULT`, which plans 
 | Entry name | 255 bytes | zips (plugin asset names: 64) |
 
 - Accepted types are `image/png`, `image/jpeg`, `image/webp`, `image/gif`,
-  `application/x-figcraft` (documents and published libraries) and
-  `application/x-figcraft-plugin`. The declared type is matched without ASCII case and must agree
+  `application/vnd.figcraft.library` (documents and published libraries) and
+  `application/vnd.figcraft.plugin`. The declared type is matched without ASCII case and must agree
   with the magic bytes; parameters are refused.
 - SVG and PDF are refused: both carry scripts, external references and (SVG) XML entities, and a
   header check cannot make them safe. SVG enters through the client's importer, which converts it

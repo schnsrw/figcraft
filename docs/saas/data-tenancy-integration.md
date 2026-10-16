@@ -174,7 +174,10 @@ tenants/${TENANT_ID}/staging/${RESERVATION_ID}
 ```
 
 Object metadata records tenant, object kind, checksum, content type and producing software version.
-Presigned requests expire quickly and permit one method on one key. Downloads are authorized before
+Presigned requests expire quickly and permit one method on one key. Staging uploads also sign
+`x-amz-tagging: figcraft-staging=true`, which the uploader must send unchanged; the bucket
+lifecycle rule expires tagged objects because S3 prefix filters cannot match the tenant segment of
+`tenants/${TENANT_ID}/staging/`. Downloads are authorized before
 signing. Staging objects have lifecycle expiry even when a completion request never arrives.
 
 ## Authentication modes

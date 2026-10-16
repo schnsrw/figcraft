@@ -56,7 +56,7 @@
           "key_prefix": "tenants/5d17a000-0000-4000-8000-000000000001/documents/3648f310-990f-8042-9fc6-8ad9905235be/snapshots/4-",
           "key_suffix": ".bin",
           "size_bytes": 100,
-          "media_type": "application/vnd.figcraft.session-state"
+          "media_type": "application/vnd.figcraft.snapshot"
         }
       },
       "events": {

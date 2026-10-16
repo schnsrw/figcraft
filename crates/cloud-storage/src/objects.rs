@@ -193,6 +193,19 @@ impl ObjectStore {
         Ok(self.signed_object_url(key, |bucket, credentials| bucket.put_object(Some(credentials), key).sign(ttl))?.into())
     }
 
+    /// [`presign_put`](Self::presign_put) with one extra header signed in. The uploader must send
+    /// exactly that header and value or the store refuses the request, so it cannot be dropped.
+    pub fn presign_put_with_header(&self, key: &str, ttl: Duration, header: (&'static str, &'static str)) -> Result<String, ObjectStoreError> {
+        let ttl = presign_ttl(ttl)?;
+        Ok(self
+            .signed_object_url(key, |bucket, credentials| {
+                let mut action = bucket.put_object(Some(credentials), key);
+                action.headers_mut().insert(header.0, header.1);
+                action.sign(ttl)
+            })?
+            .into())
+    }
+
     /// A presigned `GET` for exactly `key`, valid for `ttl` (1 second to [`MAX_PRESIGN_TTL`]).
     /// Callers must have authorized the download first.
     pub fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, ObjectStoreError> {

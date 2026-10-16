@@ -51,16 +51,12 @@ pub const MAX_EXPIRE_BATCH: i64 = 500;
 
 /// Media types accepted for client-uploaded assets.
 ///
-/// Raster images FigCraft can place, plus `application/octet-stream` for the opaque binary assets
-/// S3-009 stores (for example embedded font or data blobs); opaque assets are only ever served as
-/// attachment downloads, never rendered inline. `image/svg+xml` is deliberately absent: SVG can
-/// carry script, and imported SVG becomes vector nodes in the document rather than a stored file.
-pub const ASSET_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif", "application/octet-stream"];
-/// FigCraft's own encoded formats, one vendor type per kind so a snapshot cannot be reserved as a
-/// library or plugin.
-pub const SNAPSHOT_MEDIA_TYPES: &[&str] = &["application/vnd.figcraft.snapshot"];
-pub const LIBRARY_MEDIA_TYPES: &[&str] = &["application/vnd.figcraft.library"];
-pub const PLUGIN_MEDIA_TYPES: &[&str] = &["application/vnd.figcraft.plugin"];
+/// Raster images FigCraft can place. Each is checked by [`crate::validation`] before promotion;
+/// opaque binary or SVG uploads are refused because nothing could vouch for their contents.
+pub const ASSET_MEDIA_TYPES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
+pub const SNAPSHOT_MEDIA_TYPES: &[&str] = &[crate::validation::MEDIA_SNAPSHOT];
+pub const LIBRARY_MEDIA_TYPES: &[&str] = &[crate::validation::MEDIA_FIGCRAFT];
+pub const PLUGIN_MEDIA_TYPES: &[&str] = &[crate::validation::MEDIA_PLUGIN];
 
 /// The upload policy for `kind`: its largest size and accepted media types. Exports and thumbnails
 /// are produced and written by workers (S3-012), never uploaded through a client reservation.
@@ -92,6 +88,8 @@ pub enum UploadError {
     InvalidProducerVersion,
     /// No such reservation in the transaction's tenant.
     NotFound,
+    /// The completing principal is not the one that made the reservation.
+    NotReservationOwner,
     /// The reservation's expiry has passed.
     Expired,
     /// The reservation's state does not permit completion (it was rejected).
@@ -183,6 +181,9 @@ pub struct ReservedUpload {
     pub method: &'static str,
     /// A presigned `PUT` for exactly the staging key.
     pub url: String,
+    /// Headers signed into `url` that the uploader must send unchanged: the staging tag the
+    /// bucket's lifecycle rule uses to expire abandoned uploads (S3-014).
+    pub headers: Vec<(&'static str, &'static str)>,
     /// The validity signed into `url`, equal to the reservation's lifetime.
     pub ttl: Duration,
 }
@@ -274,7 +275,8 @@ pub async fn reserve_upload(
     let id = Uuid::new_v4();
     let staging_key = keys::staging(transaction.tenant_id(), id);
     // Signed before the row exists, so the URL expires no later than the reservation.
-    let url = store.presign_put(&staging_key, ttl).map_err(UploadError::Store)?;
+    let staging_tag = crate::bucket_admin::staging_tagging_header();
+    let url = store.presign_put_with_header(&staging_key, ttl, staging_tag).map_err(UploadError::Store)?;
     let row: ReservationRow = sqlx::query_as(concat!(
         "INSERT INTO upload_reservations (id, tenant_id, principal_id, kind, staging_key, expected_sha256, expected_size, media_type, expires_at) ",
         "VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, clock_timestamp() + make_interval(secs => $9)) RETURNING ",
@@ -292,7 +294,7 @@ pub async fn reserve_upload(
     .fetch_one(transaction.connection())
     .await
     .map_err(database_error)?;
-    Ok(ReservedUpload { reservation: reservation(row)?, method: "PUT", url, ttl })
+    Ok(ReservedUpload { reservation: reservation(row)?, method: "PUT", url, headers: vec![staging_tag], ttl })
 }
 
 /// Read one reservation in the transaction's tenant.
@@ -364,6 +366,10 @@ pub enum Completion {
     /// The staged bytes did not match the reservation; the reservation is `rejected` and the
     /// staging object deleted.
     Rejected { reservation: UploadReservation, reason: Rejection },
+    /// The staged bytes matched the reservation but failed content validation (media sniffing or
+    /// a size, pixel or archive budget); the reservation is `rejected` and the staging object
+    /// deleted.
+    Invalid { reservation: UploadReservation, reason: crate::validation::Rejection },
 }
 
 /// Complete the transaction tenant's reservation `id`: read the staged bytes back within the
@@ -392,6 +398,7 @@ pub async fn complete_upload(
     transaction: &mut TenantTransaction<'_>,
     store: &ObjectStore,
     id: Uuid,
+    completer: PrincipalId,
     producer_version: &str,
 ) -> Result<Completion, UploadError> {
     if !valid_producer_version(producer_version) {
@@ -405,6 +412,9 @@ pub async fn complete_upload(
             .await
             .map_err(database_error)?;
     let reserved = row.map(reservation).transpose()?.ok_or(UploadError::NotFound)?;
+    if reserved.principal_id != completer {
+        return Err(UploadError::NotReservationOwner);
+    }
     match reserved.state {
         ReservationState::Promoted => {
             let object_id = reserved.object_id.ok_or(UploadError::CorruptRow)?;
@@ -436,6 +446,11 @@ pub async fn complete_upload(
             return Ok(Completion::Rejected { reservation, reason });
         }
     };
+    if let Err(reason) = crate::validation::validate(&reserved.media_type, &bytes, &crate::validation::Budgets::default()) {
+        let reservation = finish(transaction, &reserved, "rejected", None).await?;
+        store.delete_object(&reserved.staging_key).await.map_err(UploadError::Store)?;
+        return Ok(Completion::Invalid { reservation, reason });
+    }
     let (object, reused) = promote_asset(transaction, store, &reserved, bytes, producer_version).await?;
     let reservation = finish(transaction, &reserved, "promoted", Some(object.id)).await?;
     store.delete_object(&reserved.staging_key).await.map_err(UploadError::Store)?;

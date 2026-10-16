@@ -130,7 +130,13 @@ the continuation point, a blocker or a major decision changes.
    `reqwest`/Rustls/ring; see `docs/saas/object-store-client-decision.md`) and an object-store
    readiness check; S3-002 adds the object, reference and upload-reservation tables
    (`20261017000001_objects.sql`). S3-003 adds bounded object I/O and `object_metadata` (keys,
-   register, read-back `verify_object`). Continue with S3-004..S3-007, S3-013, S3-014, S3-017.
+   register, read-back `verify_object`). S3-004..S3-007, S3-013, S3-014 and S3-017 add uploads (tagged
+   staging PUT, validated promotion), presigned downloads, references and holds, validation
+   budgets, `--init-object-store` bucket initialization and the dry-run migration planner; S3 is at
+   10/20. Continue with S3-008..S3-012, S3-015, S3-016, then S3-018..S3-020 and the gate.
+   Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
+   plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight
+   reservations; lifecycle enforcement by SeaweedFS is unverified (the sweep is authoritative).
    Open S2 follow-ups: a typed retryable/timeout error variant (timeouts and lost connections all
    map to `Database` today), expiry/takeover of stale pending idempotency keys, and snapshot
    restore in `DurableRoom::open` once S3 objects exist.
