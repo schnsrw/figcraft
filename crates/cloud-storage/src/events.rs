@@ -158,7 +158,46 @@ pub enum EventRepositoryError {
     Corrupt,
     Conflict,
     Constraint,
+    /// The database could not be reached or the connection was lost mid-call: an I/O or
+    /// protocol failure, a pool timeout or closed pool, a connection-exception SQLSTATE (class
+    /// `08`) or a server shutdown/termination (`57P01`, `57P02`, `57P03`).
+    ///
+    /// **Ambiguous for a commit.** If this is the error from (or in place of) `COMMIT`, the
+    /// transaction may or may not be durable: a lost acknowledgement looks exactly like a lost
+    /// connection. Before any statement of a transaction completes it is safe to retry on a fresh
+    /// connection. After the append ran, retry the same batches: the retry either lands (nothing
+    /// was durable) or fails with [`EventRepositoryError::SequenceConflict`], and then
+    /// [`read_events`] at the batch's sequence tells whether the durable event is the caller's own
+    /// batch or a rival's (see `tests/failure_injection.rs`).
+    Unavailable,
+    /// The server cancelled a statement: `statement_timeout` or a cancel request (`57014`
+    /// `query_canceled`) or `lock_timeout` / `NOWAIT` (`55P03` `lock_not_available`). The
+    /// transaction is aborted and nothing of it can commit, so rolling back and retrying the whole
+    /// transaction is safe (with backoff: the contention that caused it may persist).
+    Timeout,
+    /// The transaction lost a serialization race: `40001` `serialization_failure` or `40P01`
+    /// `deadlock_detected`. The transaction is aborted and nothing of it can commit; rolling back
+    /// and retrying the whole transaction is safe.
+    SerializationFailure,
+    /// Any other database failure. Not known to be transient, so not safe to retry blindly.
     Database,
+}
+
+impl EventRepositoryError {
+    /// Whether retrying the whole transaction on a fresh connection is known to be safe: the
+    /// failed transaction was aborted, so none of it can be durable. `Unavailable` is not
+    /// included because a connection lost around `COMMIT` leaves the outcome unknown; see its
+    /// documentation for how to resolve it.
+    #[must_use]
+    pub const fn is_retryable(self) -> bool {
+        matches!(self, Self::Timeout | Self::SerializationFailure)
+    }
+
+    /// Whether the transaction's outcome may be unknown (a connection lost around `COMMIT`).
+    #[must_use]
+    pub const fn is_ambiguous(self) -> bool {
+        matches!(self, Self::Unavailable)
+    }
 }
 
 impl std::fmt::Display for EventRepositoryError {
@@ -170,9 +209,30 @@ impl std::fmt::Display for EventRepositoryError {
 impl std::error::Error for EventRepositoryError {}
 
 fn event_database_error(error: sqlx::Error) -> EventRepositoryError {
-    match error.as_database_error().and_then(|database| database.code()).as_deref() {
-        Some("23505") => EventRepositoryError::Conflict,
-        Some("23503" | "23514") => EventRepositoryError::Constraint,
+    match &error {
+        sqlx::Error::Io(_)
+        | sqlx::Error::Tls(_)
+        | sqlx::Error::Protocol(_)
+        | sqlx::Error::PoolTimedOut
+        | sqlx::Error::PoolClosed
+        | sqlx::Error::WorkerCrashed => EventRepositoryError::Unavailable,
+        _ => match error.as_database_error().and_then(|database| database.code()) {
+            Some(code) => event_sqlstate_error(&code),
+            None => EventRepositoryError::Database,
+        },
+    }
+}
+
+/// Map a SQLSTATE to a repository error. Only codes whose meaning is unambiguous are mapped; the
+/// rest stay [`EventRepositoryError::Database`].
+fn event_sqlstate_error(code: &str) -> EventRepositoryError {
+    match code {
+        "23505" => EventRepositoryError::Conflict,
+        "23503" | "23514" => EventRepositoryError::Constraint,
+        "57014" | "55P03" => EventRepositoryError::Timeout,
+        "40001" | "40P01" => EventRepositoryError::SerializationFailure,
+        "57P01" | "57P02" | "57P03" => EventRepositoryError::Unavailable,
+        code if code.len() == 5 && code.starts_with("08") => EventRepositoryError::Unavailable,
         _ => EventRepositoryError::Database,
     }
 }
@@ -562,5 +622,58 @@ mod tests {
         assert_eq!((partial.next_after_seq(), partial.has_more()), (4, true));
         let last = ReplayPage { events: vec![event(5), event(6), event(7)], current_seq: 7, after_seq: 4 };
         assert_eq!((last.next_after_seq(), last.has_more()), (7, false));
+    }
+
+    #[test]
+    fn sqlstates_map_to_precise_retry_categories() {
+        use super::{EventRepositoryError as E, event_sqlstate_error as map};
+        assert_eq!(map("23505"), E::Conflict);
+        assert_eq!(map("23503"), E::Constraint);
+        assert_eq!(map("23514"), E::Constraint);
+        assert_eq!(map("57014"), E::Timeout);
+        assert_eq!(map("55P03"), E::Timeout);
+        assert_eq!(map("40001"), E::SerializationFailure);
+        assert_eq!(map("40P01"), E::SerializationFailure);
+        for code in ["57P01", "57P02", "57P03", "08000", "08003", "08006", "08P01"] {
+            assert_eq!(map(code), E::Unavailable, "{code}");
+        }
+        for code in ["", "08", "0800", "080000", "42P01", "XX000", "22P02", "57000"] {
+            assert_eq!(map(code), E::Database, "{code:?}");
+        }
+    }
+
+    #[test]
+    fn transport_failures_are_unavailable_and_other_driver_errors_are_database() {
+        use super::{EventRepositoryError as E, event_database_error as map};
+        assert_eq!(map(sqlx::Error::Io(std::io::Error::from(std::io::ErrorKind::ConnectionReset))), E::Unavailable);
+        assert_eq!(map(sqlx::Error::Protocol("unexpected eof".to_owned())), E::Unavailable);
+        assert_eq!(map(sqlx::Error::PoolTimedOut), E::Unavailable);
+        assert_eq!(map(sqlx::Error::PoolClosed), E::Unavailable);
+        assert_eq!(map(sqlx::Error::WorkerCrashed), E::Unavailable);
+        assert_eq!(map(sqlx::Error::RowNotFound), E::Database);
+        assert_eq!(map(sqlx::Error::ColumnNotFound("x".to_owned())), E::Database);
+    }
+
+    #[test]
+    fn only_aborted_transactions_are_blindly_retryable_and_lost_connections_are_ambiguous() {
+        use super::EventRepositoryError as E;
+        let all = [
+            E::InvalidInput,
+            E::NotFound,
+            E::InvalidState,
+            E::SequenceConflict { current: 1 },
+            E::StaleFence,
+            E::Corrupt,
+            E::Conflict,
+            E::Constraint,
+            E::Unavailable,
+            E::Timeout,
+            E::SerializationFailure,
+            E::Database,
+        ];
+        let retryable: Vec<E> = all.into_iter().filter(|error| error.is_retryable()).collect();
+        let ambiguous: Vec<E> = all.into_iter().filter(|error| error.is_ambiguous()).collect();
+        assert_eq!(retryable, vec![E::Timeout, E::SerializationFailure]);
+        assert_eq!(ambiguous, vec![E::Unavailable]);
     }
 }
