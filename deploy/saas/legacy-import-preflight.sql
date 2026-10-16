@@ -1,5 +1,6 @@
 -- S3-018/S3-019 synthetic fixture for the legacy import and cutover verification probes. Each run
--- imports freshly named legacy documents, so their derived ids never collide with earlier runs.
+-- imports freshly named legacy documents, libraries and plugins, so their derived ids never
+-- collide with earlier runs. The principal is the tenant owner, who records library versions.
 INSERT INTO public.principals (id, kind, display_name) VALUES
     ('ad000000-0000-4000-8000-000000000009', 'user', 'Legacy import probe');
 INSERT INTO public.tenants (id, slug, name, plan_id, home_region) VALUES
