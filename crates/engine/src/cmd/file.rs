@@ -30,7 +30,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.open",
             "Open",
-            "{path, variables? (REST: the local variables JSON as an object, JSON text or a path; default `<name>.variables.json` or `variables.json` next to the file)} (.figcraft, .json: FigCraft or REST API file JSON, .fig (best effort), .svg, .png, .jpg …); REST and .fig imports return `warnings`",
+            "{path | data (base64) + name (tells the format; opens as a new unsaved document), variables? (REST: the local variables JSON as an object, JSON text or a path; default `<name>.variables.json` or `variables.json` next to the file)} (.figcraft, .json: FigCraft or REST API file JSON, .fig (best effort), .svg, .png, .jpg …); REST and .fig imports return `warnings`",
             false,
             open
         ),
@@ -653,8 +653,13 @@ fn open_recent(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 fn open(s: &mut Session, p: &Value) -> Result<Value> {
-    let path = req_string("file.open", p, "path")?;
     let variables = variables_param("file.open", p)?;
+    if string(p, "path").is_none()
+        && let Some(d) = string(p, "data")
+    {
+        return open_data(s, &d, p, variables.as_ref());
+    }
+    let path = req_string("file.open", p, "path")?;
     // Already open: switch to it.
     if let Some(i) = s.docs.iter().position(|d| d.path.as_deref() == Some(path.as_str())) {
         s.active = i;
@@ -673,6 +678,21 @@ fn open(s: &mut Session, p: &Value) -> Result<Value> {
         });
     }
     s.docs.push(DocState::new(loaded.doc, native.then_some(path)).with_versions(loaded.versions).with_branches(loaded.branches));
+    s.active = s.docs.len() - 1;
+    let mut out = json!({"index": s.active});
+    out[if warnings { "warnings" } else { "repairs" }] = json!(loaded.issues);
+    Ok(out)
+}
+
+/// [`open`] for a file given as base64 `data` (a file dropped without a path on disk): `name` tells
+/// the format. It opens as a new document with no path, so the first save asks where to put it.
+fn open_data(s: &mut Session, data: &str, p: &Value, variables: Option<&Value>) -> Result<Value> {
+    let name = req_string("file.open", p, "name")?;
+    let data = data.split_once(',').map_or(data, |(_, b)| b);
+    let bytes = base64::engine::general_purpose::STANDARD.decode(data.trim()).map_err(|e| bad("file.open", e.to_string()))?;
+    let (loaded, rest) = load_with(&bytes, &name, variables, &figcraft_format::rest::no_images)?;
+    let warnings = rest || ext(&name) == "svg";
+    s.docs.push(DocState::new(loaded.doc, None).with_versions(loaded.versions).with_branches(loaded.branches));
     s.active = s.docs.len() - 1;
     let mut out = json!({"index": s.active});
     out[if warnings { "warnings" } else { "repairs" }] = json!(loaded.issues);
@@ -1280,7 +1300,7 @@ fn append_pages(doc: &mut Document, other: &Document) -> Result<Vec<NodeId>> {
 }
 
 fn close(s: &mut Session, p: &Value) -> Result<Value> {
-    let i = num(p, "index").map(|x| x as usize).unwrap_or(s.active);
+    let i = if get(p, "index").is_none() { s.active } else { req_index("file.close", p, "index")? };
     let Some(ds) = s.docs.get(i) else { return Err(bad("file.close", "no such document")) };
     // A branch tab's edits are in its main file already (which then has unsaved changes).
     if ds.branch_of.is_none() && ds.is_dirty() && !boolean(p, "force").unwrap_or(false) {
@@ -1349,6 +1369,25 @@ mod rest_import_tests {
         assert!(label.overrides.contains("characters"), "{:?}", label.overrides);
         assert!(crate::components::mirror_issues(&doc).is_empty());
         assert!(thumbnail(&doc).is_some());
+    }
+
+    #[test]
+    fn open_takes_data_and_a_name_as_a_new_unsaved_document() {
+        let mut saved = Session::new();
+        saved.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
+        let bytes = file_bytes(saved.ds().unwrap()).unwrap();
+        let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        let mut s = Session::new();
+        let recent = s.prefs.recent_files.clone();
+        let r = s.execute("file.open", &json!({"data": data, "name": "Dropped.figcraft"})).unwrap();
+        let open = s.docs.len();
+        assert_eq!(r["index"], open - 1, "a document of its own, made active");
+        assert_eq!(s.ds().unwrap().path, None, "no path to save over");
+        assert!(s.doc().unwrap().nodes().any(|n| matches!(n.kind, NodeKind::Rectangle)));
+        assert_eq!(s.prefs.recent_files, recent, "nothing on disk to remember");
+        assert!(s.execute("file.open", &json!({"data": data})).is_err(), "the name tells the format");
+        assert!(s.execute("file.open", &json!({"data": "not base64!", "name": "x.svg"})).is_err());
+        assert_eq!(s.docs.len(), open, "a refused open adds nothing");
     }
 
     #[test]

@@ -158,6 +158,8 @@ pub fn keys(app: &mut FigApp, ctx: &Context) {
 }
 
 pub fn show(app: &mut FigApp, ctx: &Context) {
+    // Dropped files waiting to open: their card, then (once it has shown) the files.
+    crate::pending_open::pending_opens(app, ctx);
     let t = Tokens::get(ctx);
     if app.ui.about {
         let mut open = true;

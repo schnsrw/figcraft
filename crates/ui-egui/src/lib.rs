@@ -40,6 +40,7 @@ pub mod live_text;
 pub mod measure_overlay;
 pub mod menus;
 pub mod online;
+pub mod pending_open;
 pub mod plugins_ui;
 pub mod present;
 pub mod proto_canvas;
@@ -86,6 +87,8 @@ mod comments_tests;
 mod cursors_tests;
 #[cfg(test)]
 mod dev_mode_tests;
+#[cfg(test)]
+mod duplicate_paint_tests;
 #[cfg(test)]
 mod export_preview_tests;
 #[cfg(test)]
@@ -187,7 +190,7 @@ mod windows_tests;
 
 use std::collections::BTreeSet;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll, Wake, Waker};
@@ -449,6 +452,10 @@ pub struct UiState {
     pub follow_system: bool,
     pub tool_flyout: Option<&'static str>,
     pub last_error: Option<String>,
+    /// Files dropped on the home screen or the canvas, opened once their card has been on screen
+    /// ([`pending_open::pending_opens`]), and the frames it has been drawn.
+    pub pending_opens: Vec<pending_open::PendingOpen>,
+    pub pending_open_frames: u8,
     pub screenshot_requests: Vec<(u64, String)>,
     pub frame_ms: f64,
     pub render_ms: f64,
@@ -555,6 +562,8 @@ impl Default for UiState {
             follow_system: false,
             tool_flyout: None,
             last_error: None,
+            pending_opens: Vec::new(),
+            pending_open_frames: 0,
             screenshot_requests: Vec::new(),
             frame_ms: 0.0,
             render_ms: 0.0,
@@ -951,10 +960,9 @@ impl FigApp {
     }
 
     pub fn open_dialog(&mut self) {
-        let exts = ["figcraft", "fig", "json", "svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff"];
         // Opening needs no file in front: it goes ahead even if that file closed meanwhile.
         self.start_dialog(
-            |services| services.pick_open(i18n::tr("Open"), &exts),
+            |services| services.pick_open(i18n::tr("Open"), OPEN_EXTENSIONS),
             false,
             |app, p| {
                 let ps = p.to_string_lossy().to_string();
@@ -1460,7 +1468,7 @@ impl FigApp {
 
     /// UI state as JSON (control channel `ui.inspect`).
     pub fn inspect(&self) -> Value {
-        json!({
+        let mut state = json!({
             "rightTab": self.ui.right_tab,
             "leftTab": self.ui.left_tab,
             "home": self.ui.home,
@@ -1519,8 +1527,51 @@ impl FigApp {
             "panels": {"left": self.ui.left_width, "right": self.ui.right_width, "leftCollapsed": self.ui.left_collapsed},
             "status": self.session.status(),
             "lastError": self.ui.last_error,
-        })
+        });
+        state["pendingOpens"] = json!(self.ui.pending_opens.len());
+        state
     }
+}
+
+/// The file types File ▸ Open and a drop on the home screen open.
+pub(crate) const OPEN_EXTENSIONS: &[&str] = &["figcraft", "fig", "json", "svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff"];
+
+/// Whether `path` names a file type that opens as a document (the extension, in any case).
+pub(crate) fn opens(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()).is_some_and(|e| OPEN_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
+}
+
+/// The contents of a dropped file that has no file on disk to read by path.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn dropped_bytes(f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
+    f.bytes().ok()
+}
+
+/// The contents of a dropped file that has no file on disk to read by path.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn dropped_bytes(_f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
+    // Browser drops arrive asynchronously; not supported yet.
+    None
+}
+
+/// While files are dragged over the window: a tinted, outlined `rect` with `label` in its middle,
+/// over everything else, saying what a drop does there.
+pub(crate) fn drop_overlay(ctx: &egui::Context, rect: egui::Rect, label: &str) {
+    if ctx.input(|i| i.raw.hovered_files.is_empty()) {
+        return;
+    }
+    let t = theme::Tokens::get(ctx);
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop_overlay")));
+    let area = rect.shrink(4.0);
+    painter.rect_filled(area, egui::CornerRadius::same(8), t.accent.gamma_multiply(0.12));
+    painter.rect_stroke(area, egui::CornerRadius::same(8), egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+    let galley = painter.layout_no_wrap(label.to_owned(), theme::semibold(14.0), t.text);
+    let pill = egui::Rect::from_center_size(area.center(), galley.size() + egui::vec2(32.0, 16.0));
+    painter.rect_filled(pill, egui::CornerRadius::same(8), t.panel);
+    painter.rect_stroke(pill, egui::CornerRadius::same(8), egui::Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+    painter.galley(pill.center() - galley.size() / 2.0, galley, t.text);
+    // Hovering sends no pointer events on every platform: keep the overlay current.
+    ctx.request_repaint();
 }
 
 #[cfg(test)]
