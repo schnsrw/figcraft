@@ -9,6 +9,7 @@ description = "Durable metadata and object storage adapters for FigCraft Cloud"
 [dependencies]
 figcraft-cloud-domain = { path = "../cloud-domain" }
 sqlx = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

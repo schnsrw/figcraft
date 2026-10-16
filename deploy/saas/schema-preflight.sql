@@ -1,4 +1,4 @@
--- Synthetic S2-004/S2-005/S2-009 integration checks. All inserted rows are rolled back.
+-- Synthetic S2-004/S2-005/S2-009/S2-010 integration checks. All inserted rows are rolled back.
 BEGIN;
 
 CREATE FUNCTION pg_temp.expect_fk(statement TEXT) RETURNS VOID LANGUAGE plpgsql AS $$
@@ -124,5 +124,14 @@ SELECT pg_temp.expect_fk($sql$INSERT INTO audit_events (id, tenant_id, action, r
     ('90000000-0000-4000-8000-000000000002', '20000000-0000-4000-8000-000000000003', 'document.created', 'document', 'succeeded')$sql$);
 SELECT pg_temp.expect_constraint($sql$INSERT INTO audit_events (id, tenant_id, action, resource_kind, outcome) VALUES
     ('90000000-0000-4000-8000-000000000003', '20000000-0000-4000-8000-000000000001', 'document.created', 'document', 'invalid')$sql$);
+
+INSERT INTO external_mappings (tenant_id, system_id, resource_kind, external_id, internal_id) VALUES
+    ('20000000-0000-4000-8000-000000000001', 'host-a', 'document', 'ext-1', '60000000-0000-4000-8000-000000000001');
+SELECT pg_temp.expect_constraint($sql$INSERT INTO external_mappings (tenant_id, system_id, resource_kind, external_id, internal_id) VALUES
+    ('20000000-0000-4000-8000-000000000001', 'host-a', 'document', 'ext-1', '60000000-0000-4000-8000-000000000005')$sql$);
+SELECT pg_temp.expect_constraint($sql$INSERT INTO external_mappings (tenant_id, system_id, resource_kind, external_id, internal_id) VALUES
+    ('20000000-0000-4000-8000-000000000001', 'host-a', 'folder', 'ext-2', '60000000-0000-4000-8000-000000000005')$sql$);
+SELECT pg_temp.expect_fk($sql$INSERT INTO external_mappings (tenant_id, system_id, resource_kind, external_id, internal_id) VALUES
+    ('20000000-0000-4000-8000-000000000003', 'host-a', 'document', 'ext-3', '60000000-0000-4000-8000-000000000005')$sql$);
 
 ROLLBACK;

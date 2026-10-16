@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (9/21) · **Last updated:** 2026-10-16
+> **Status:** S1 complete (22/22); S2 in progress (13/21) · **Last updated:** 2026-10-16
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 9 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 13 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -291,9 +291,34 @@ the same commit as the completed task.
   image's distroless nonroot container user (Compose bind-mounts `secrets.*.file` preserving host
   permissions outside Swarm), and the cloud binary's hardcoded schema-version constants had not
   been updated past S2-005.
-- [ ] **S2-010** Implement external mapping repository with tenant-scoped uniqueness.
-- [ ] **S2-011** Implement idempotency-key reservation, replay and mismatched-request rejection.
-- [ ] **S2-012** Implement append-only audit repository for foundational actions.
+- [x] **S2-010** Implement external mapping repository with tenant-scoped uniqueness.
+  Evidence: `figcraft-cloud-storage::external_mappings` adds a typed `ExternalMappingRecord` with
+  tenant-scoped create/get over a new `external_mappings` table, unique by `(tenant_id, system_id,
+  resource_kind, external_id)`. `20261016000004_external_mappings.sql` adds the table with a
+  bounded `resource_kind` enum and no single foreign key on `internal_id`, since it may point at a
+  tenant, workspace, project, document or principal depending on kind. The cloud binary's
+  supported schema range advanced to this version. The disposable PostgreSQL integration probe
+  covers tenant-scoped creation, a duplicate-natural-key `Conflict` rejected in its own rolled-back
+  transaction, and cross-tenant invisibility of a committed mapping.
+- [x] **S2-011** Implement idempotency-key reservation, replay and mismatched-request rejection.
+  Evidence: `figcraft-cloud-storage::idempotency` adds `reserve_idempotency_key`
+  (`INSERT ... ON CONFLICT (tenant_id, principal_id, route, key_hash) DO NOTHING RETURNING ...`
+  followed by a conditional lookup that distinguishes a fresh `Reserved` key from a same-request
+  `Replay` of a completed response, a same-request `InFlight` pending duplicate, or a
+  different-request `Err(Conflict)`) and `complete_idempotency_key` (`pending -> completed` via a
+  conditional update, `Err(InvalidState)` when the key is missing or already completed). No new
+  migration was needed; `idempotency_keys` already existed from S2-005. The disposable PostgreSQL
+  integration probe exercises all five outcomes.
+- [x] **S2-012** Implement append-only audit repository for foundational actions.
+  Evidence: `figcraft-cloud-storage::audit` adds `record_audit_event`, a single write-only insert
+  into `audit_events` returning the caller-supplied id, with an optional actor for system/job
+  actions, `outcome` left to the database `CHECK` constraint rather than re-validated in Rust, and
+  `metadata` encoded to JSON text and cast `::jsonb` to avoid enabling SQLx's `json` feature
+  workspace-wide. A list/export function is deliberately out of scope, since it needs its own
+  compound `(created_at, id)` keyset cursor design. No new migration was needed. The disposable
+  PostgreSQL integration probe covers an actored event, a system event with no actor, a paired
+  `resource_id`/`request_id` event, and an invalid-outcome insert rejected as `Constraint` in its
+  own isolated transaction.
 
 ### Collaboration event persistence
 
@@ -302,7 +327,17 @@ the same commit as the completed task.
 - [ ] **S2-014** Implement atomic sequence allocation with unique `(tenant, document, seq)`.
 - [ ] **S2-015** Implement append transaction that validates current fencing token.
 - [ ] **S2-016** Implement bounded event replay from a requested sequence.
-- [ ] **S2-017** Implement snapshot metadata registration without object bytes.
+- [x] **S2-017** Implement snapshot metadata registration without object bytes.
+  Evidence: `figcraft-cloud-storage::snapshots` adds `register_snapshot` (inserts a `'pending'`
+  row referencing `object_id`/`checksum`/`size_bytes` only — the bytes themselves are later S3
+  work), `verify_snapshot`/`reject_snapshot` (idempotent `'pending' -> 'verified'/'rejected'`
+  transitions following the `Ok(Some)/Err(InvalidState)/Ok(None)` pattern established by S2-009),
+  and `set_current_snapshot` (relies on `documents.current_snapshot_id`'s existing composite
+  foreign key to reject cross-document pointers). No new migration was needed; `document_snapshots`
+  and `documents.current_snapshot_id` already existed from S2-005. The disposable PostgreSQL
+  integration probe covers registration, both idempotent transitions, the invalid-state rejection,
+  an unknown-document constraint rejection, and the cross-document pointer rejection, each isolated
+  from the main rolled-back transaction where it would otherwise abort unrelated assertions.
 - [ ] **S2-018** Adapt cloud collaboration durability to commit before broadcast.
 
 ### Verification and migration input
@@ -722,3 +757,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-16 | S2-007: added a typed tenant-scoped SQLx transaction helper and verified transaction-local context against a synthetic PostgreSQL RLS policy on a reused pooled connection. |
 | 2026-10-16 | S2-008: added tenant/workspace/project create and read repositories, membership-scoped tenant discovery and bounded keyset pagination, verified against synthetic cross-tenant PostgreSQL fixtures. |
 | 2026-10-16 | S2-009: added document create/read/rename/archive/restore/soft-delete repositories and a `deleted_at` grace-period migration advancing readiness to version 20261016000003; fixed two pre-existing Compose smoke defects (unreadable `umask 077` secrets under a nonroot container user, and a stale cloud schema-version constant) found while verifying it end-to-end. |
+| 2026-10-16 | S2-010/S2-011/S2-012/S2-017: added external mapping, idempotency-key, append-only audit and snapshot metadata repositories in parallel (each in its own new module/test/fixture files, with the coordinating session wiring `lib.rs` and the Compose smoke script afterward); `20261016000004_external_mappings.sql` advanced readiness to version 20261016000004. S2 reaches 13/21. |

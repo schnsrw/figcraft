@@ -55,7 +55,7 @@ the continuation point, a blocker or a major decision changes.
 - S1 is complete at 22/22 tasks and its cloud foundation gate passes. The cloud binary now serves
   `/api/v1/healthz` and diagnostic `/ws/v1/health` upgrades in the `api`, `relay` and `all` roles;
   `/readyz` checks transport startup and the SQLx schema-version range, not database-backed product
-  operations. S2-009 requires schema version `20261016000003`; Compose runs the one-shot
+  operations. S2-010 requires schema version `20261016000004`; Compose runs the one-shot
   migration job before cloud roles. A disposable smoke starts each role from one image, checks
   web/API/WebSocket routing and rejects unsafe production settings. S2 is in progress: S2-001
   selects SQLx 0.9 with embedded SQL migrations, PostgreSQL advisory locking and Rustls; S2-002 adds explicit
@@ -67,7 +67,10 @@ the continuation point, a blocker or a major decision changes.
   RLS policy; S2-008 adds tenant, workspace and project repositories with bounded keyset pages.
   S2-009 adds document create/read/rename/archive/restore/soft-delete repositories and a
   `deleted_at` grace-period column; finalizing a grace period into `deleted` and object collection
-  remain later work. Production RLS policies remain S4-014 work, and durable collaboration is
+  remain later work. S2-010/S2-011/S2-012/S2-017 add external mapping, idempotency-key, append-only
+  audit and snapshot metadata repositories (implemented as four parallel subagent tasks, each
+  owning only its own new files, with this session wiring `lib.rs` and the Compose smoke script
+  afterward); S2 reaches 13/21. Production RLS policies remain S4-014 work, and durable collaboration is
   still pending. The cloud image builds with workspace Rust 1.95 (SQLx declares MSRV 1.94).
 - `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
@@ -114,11 +117,11 @@ the continuation point, a blocker or a major decision changes.
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
    `docs/saas/dependency-images.md`. S1-018 and S1-GATE pass their transport and startup criteria.
-   S2-001 through S2-009 are complete; see `docs/saas/postgres-client-decision.md`, the
+   S2-001 through S2-012 and S2-017 are complete; see `docs/saas/postgres-client-decision.md`, the
    `--migrate` and `--provision-db-roles` commands, cloud-storage migrations, transaction helper
-   and metadata/document repositories. Continue with S2-010, S2-011 and S2-012: external mapping,
-   idempotency-key and audit repositories (independent of each other and of the S2-013..S2-018
-   collaboration-event chain, which should stay sequential).
+   and metadata/document/external-mapping/idempotency/audit/snapshot repositories. Continue with
+   the S2-013..S2-016/S2-018 collaboration-event chain (sequential: each depends on the previous),
+   then S2-019..S2-021 (concurrency/failure tests and the filesystem migration scanner).
    Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
 3. Update task evidence and milestone counts in the same commit as each completed task.
 

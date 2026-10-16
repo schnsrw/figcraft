@@ -1563,6 +1563,7 @@ name = "figcraft-cloud-storage"
 version = "0.6.0"
 dependencies = [
  "figcraft-cloud-domain",
+ "serde_json",
  "sqlx",
  "tokio",
 ]

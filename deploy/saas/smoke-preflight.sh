@@ -138,8 +138,8 @@ if test "$(migration_ledger)" != t; then
 fi
 schema_version=$("${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -Atqc \
   "SELECT MAX(version) FROM public._sqlx_migrations WHERE success = TRUE")
-if test "$schema_version" != 20261016000003; then
-  printf 'Expected the S2-009 document lifecycle migration, got schema version %s\n' "$schema_version" >&2
+if test "$schema_version" != 20261016000004; then
+  printf 'Expected the S2-010 external mapping migration, got schema version %s\n' "$schema_version" >&2
   exit 1
 fi
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
@@ -175,6 +175,30 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
   cargo test --locked -p figcraft-cloud-storage --test document_repositories -- --nocapture
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/document-repository-cleanup.sql" > "$test_dir/document-repository-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/external-mapping-repository-preflight.sql" > "$test_dir/external-mapping-repository-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test external_mapping_repository -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/external-mapping-repository-cleanup.sql" > "$test_dir/external-mapping-repository-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/idempotency-repository-preflight.sql" > "$test_dir/idempotency-repository-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test idempotency_repository -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/idempotency-repository-cleanup.sql" > "$test_dir/idempotency-repository-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/audit-repository-preflight.sql" > "$test_dir/audit-repository-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test audit_repository -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/audit-repository-cleanup.sql" > "$test_dir/audit-repository-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/snapshot-repository-preflight.sql" > "$test_dir/snapshot-repository-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" \
+  cargo test --locked -p figcraft-cloud-storage --test snapshot_repository -- --nocapture
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/snapshot-repository-cleanup.sql" > "$test_dir/snapshot-repository-cleanup.log"
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-a.log" 2>&1 &
 migration_a=$!
 "${compose[@]}" run --rm --no-deps migrate > "$test_dir/migration-b.log" 2>&1 &
@@ -251,4 +275,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata and document lifecycle repository isolation; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection.\n'
