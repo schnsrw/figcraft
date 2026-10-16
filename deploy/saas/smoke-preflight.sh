@@ -182,6 +182,50 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_D
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/object-repository-cleanup.sql" > "$test_dir/object-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/document-snapshot-preflight.sql" > "$test_dir/document-snapshot-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test document_snapshots -- --nocapture --test-threads=1
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-relay --test snapshot_restore -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/document-snapshot-cleanup.sql" > "$test_dir/document-snapshot-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/asset-preflight.sql" > "$test_dir/asset-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test assets -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/asset-cleanup.sql" > "$test_dir/asset-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/library-preflight.sql" > "$test_dir/library-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test libraries -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/library-cleanup.sql" > "$test_dir/library-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/plugin-store-preflight.sql" > "$test_dir/plugin-store-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test plugin_store -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/plugin-store-cleanup.sql" > "$test_dir/plugin-store-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/export-preflight.sql" > "$test_dir/export-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test exports -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/export-cleanup.sql" > "$test_dir/export-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/garbage-collection-preflight.sql" > "$test_dir/garbage-collection-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test garbage_collection -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/garbage-collection-cleanup.sql" > "$test_dir/garbage-collection-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/reconciliation-preflight.sql" > "$test_dir/reconciliation-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --test reconciliation -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/reconciliation-cleanup.sql" > "$test_dir/reconciliation-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/upload-reservation-preflight.sql" > "$test_dir/upload-reservation-preflight.log"
 FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
   cargo test --locked -p figcraft-cloud-storage --test upload_reservations -- --nocapture --test-threads=1
@@ -355,4 +399,4 @@ for role in all api relay worker; do
   docker rm --force "$role_container" >/dev/null
 done
 
-printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection; object-store connectivity, credential and bucket checks; object read-back verification; upload reservations and validated promotion; authorized presigned downloads; references and retention holds; bucket versioning and lifecycle initialization.\n'
+printf 'S1/S2 smoke passed: database roles and grants; synthetic tenant-context, metadata, document lifecycle, external mapping, idempotency-key and audit repository isolation; snapshot metadata transitions; event append sequencing and fencing; bounded replay; sequence, fencing and idempotency races; commit-before-broadcast rooms; commit, connection-loss and retry failure injection; the S2 create/edit/restart/restore gate; upgrade from the previous schema; schema constraints; concurrent migrations; cloud routes; unsafe-config rejection; object-store connectivity, credential and bucket checks; object read-back verification; upload reservations and validated promotion; authorized presigned downloads; references and retention holds; bucket versioning and lifecycle initialization; snapshot store and recovery; assets, libraries, plugins, exports and thumbnails; garbage collection; reconciliation.\n'

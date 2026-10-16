@@ -133,10 +133,20 @@ the continuation point, a blocker or a major decision changes.
    register, read-back `verify_object`). S3-004..S3-007, S3-013, S3-014 and S3-017 add uploads (tagged
    staging PUT, validated promotion), presigned downloads, references and holds, validation
    budgets, `--init-object-store` bucket initialization and the dry-run migration planner; S3 is at
-   10/20. Continue with S3-008..S3-012, S3-015, S3-016, then S3-018..S3-020 and the gate.
+   10/20; S3-008..S3-012, S3-015 and S3-016 add snapshot storage with
+   `DurableRoom::recover` (snapshot first, then events), assets, libraries, plugins, exports and
+   thumbnails, garbage collection and reconciliation; S3 is at 17/20. Continue with S3-018..S3-020
+   and the gate. Testing policy: targeted suites per step and a quick scan before push; run the full
+   smoke/`cargo xtask ci` only when GitHub CI goes red.
    Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
    plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight
    reservations; lifecycle enforcement by SeaweedFS is unverified (the sweep is authoritative).
+   More S3 follow-ups: `plugins` needs a partial unique index on (tenant, publisher, name)
+   (an advisory lock covers it today); snapshot/library bytes written before a rolled-back
+   transaction are orphaned until reconciliation reports them, so register pending rows first or
+   have GC sweep orphans; there is no room quarantine flag yet (`recover` falls back to a full
+   replay and refuses on a gap); relay wiring should call `DurableRoom::recover` once S3 config
+   reaches the relay.
    Open S2 follow-ups: a typed retryable/timeout error variant (timeouts and lost connections all
    map to `Database` today), expiry/takeover of stale pending idempotency keys, and snapshot
    restore in `DurableRoom::open` once S3 objects exist.

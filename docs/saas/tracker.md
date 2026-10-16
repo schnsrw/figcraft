@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (10/20) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (17/20) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -20,7 +20,7 @@ the same commit as the completed task.
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
-| S3 Object storage and migration | in progress | 10 / 20 | Verified object storage and repeatable migration |
+| S3 Object storage and migration | in progress | 17 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -664,11 +664,205 @@ the same commit as the completed task.
 
 ### Stored object types
 
-- [ ] **S3-008** Store and restore immutable document snapshots.
-- [ ] **S3-009** Store content-addressed image and binary assets.
-- [ ] **S3-010** Store team-library versions and usage references.
-- [ ] **S3-011** Store validated plugin bundles and manifests.
-- [ ] **S3-012** Store export results and thumbnails.
+- [x] **S3-008** Store and restore immutable document snapshots.
+  Evidence: `figcraft-cloud-storage::document_snapshots::store_snapshot(tx, store, document,
+  &SessionState, producer_version)` encodes the state with `figcraft_collab::message::encode`, which
+  is bounded to 1 B–128 MiB (`MAX_SNAPSHOT_BYTES`). A seq that does not fit i64, or an empty or
+  over-64-byte producer version, is `InvalidInput`. A state past `documents.current_seq` is
+  `AheadOfLog`, and nothing is uploaded for it. Valid state is uploaded under the content-addressed
+  `keys::snapshot` (seq plus SHA-256) and registered as a `snapshot` object with `MEDIA_SNAPSHOT`.
+  It is then read back through `verify_object`, recorded as a verified `document_snapshots` row and
+  referenced with `owner_kind = 'document_snapshot'`, all in the caller's transaction. Storing the
+  same state again reuses the object row and the snapshot row. The bytes are written again and
+  re-read and checked, because `verify_object` does not re-read verified rows; this rewrite repaired
+  a corrupted object in the test. A rejected or deleting row under the key, or a lost unique race,
+  is `Conflict`. The document row is locked `FOR UPDATE`, and only then is `current_snapshot_id`
+  moved. It moves only when the new seq is >= the current pointer's seq (read fresh after the lock)
+  and <= `current_seq`. Otherwise the result is `Pointer::Kept`, so the pointer never moves
+  backwards: a seq-3 snapshot stored after seq 4 leaves the pointer on 4.
+  `restore_latest_snapshot(_with)` tries at most `MAX_RESTORE_CANDIDATES` (8) verified snapshots,
+  newest first. Each must be at or below `current_seq`, with an object of kind `snapshot` that is
+  verified and in this bucket. For each, the object is downloaded again within its recorded size.
+  The size and SHA-256 must match both the snapshot row and the object row, the bytes must decode
+  within the cap, the decoded seq must equal the row's seq, and the caller's `accept` check must
+  pass. A failing candidate is skipped and reported (`SkippedSnapshot` with `Missing`,
+  `SizeMismatch`, `ChecksumMismatch`, `Undecodable`, `SequenceMismatch` or `Refused`), and the
+  preceding one is tried. A store outage is `Store(..)`, never a silent fallback to an older
+  snapshot. Errors are fixed `SnapshotStoreError` categories.
+  `figcraft-cloud-relay::DurableRoom::recover(pool, &store, ...)` claims, then calls
+  `Server::restore` on the newest usable snapshot at or below the claimed seq and replays only the
+  events after it. With no usable snapshot it replays the whole log over `base`, which either
+  reproduces the committed state or fails with `Replay`. `open` keeps the base-only path and now
+  also refuses a replay that does not reach the claimed seq. `restored_snapshot()` reports (id,
+  seq), and the new `RoomError::Snapshot` covers snapshot read failures. Probes against PostgreSQL
+  and SeaweedFS, fixture a6, a fresh document per run: (1) snapshot plus replay equals pure replay,
+  comparing replica and seq 5, then seq 7. Recovery from the seq-3 snapshot succeeds over a base the
+  log does not apply to, while `open` over that same base fails with `Replay`, which proves the base
+  was not used. (2) An object byte flipped in place by a raw PUT is never used: the restore falls
+  back from 4 to 3 (`ChecksumMismatch`), and after the seq-3 object is deleted it falls back to 2
+  (`Missing`). The room falls back from 6 to 3, and with every snapshot corrupt it falls back to the
+  base. (3) The pointer moves 2 → 4, is kept against a later 3, and moves on equal seq. (4) Another
+  tenant gets no candidates, gets `None` from `get_object`, gets `NotFound` from `store_snapshot`,
+  and gets `Open(NotFound)` from `recover`. Unit tests include a 2000-round junk-byte sweep through
+  the decode checks.
+- [x] **S3-009** Store content-addressed image and binary assets.
+  Evidence: `figcraft-cloud-storage::assets` is the document-facing asset API over
+  S3-002/004/005/006/007. `find_asset(tx, sha256)` returns the tenant's oldest verified, non-deleted
+  `asset` object at the content-addressed key `keys::asset(tenant, sha256)`, for client-side dedupe
+  before a reservation. Pending, rejected and deleting rows are never offered, and another tenant's
+  identical bytes are invisible. `store_asset_bytes(tx, store, bytes, media_type, producer_version)`
+  is for bytes produced by servers or workers. It runs the pure `prepare_asset` first: the producer
+  version check, the exact `uploads::ASSET_MEDIA_TYPES` allowlist, 1..=`MAX_ASSET_BYTES` checked
+  before any byte is read, `validation::validate` with default budgets, then SHA-256. It returns a
+  matching verified object in the store's bucket (`reused`), or fills a `pending` row already on the
+  key with the same digest, size and kind, or registers, writes and verifies by read-back. A
+  rejected or deleting row on the key, or a row that disagrees with the bytes, is `ObjectConflict`.
+  Binary assets: only PNG/JPEG/WebP/GIF are accepted. Octet-stream, SVG, PDF and fonts are
+  `UnsupportedMediaType` until a validator exists in `validation`. This is documented in the module;
+  validation is not weakened. `attach_asset(tx, document, object)` locks the document `FOR NO KEY
+  UPDATE` and is idempotent: an existing reference is `AlreadyApplied` whatever the document's state
+  now. A new attachment needs a `pending`/`active` document of the tenant (`DocumentUnavailable` /
+  `DocumentNotFound`) and a verified, non-deleted `asset` object locked `FOR SHARE`
+  (`AssetUnavailable` otherwise, which conflicts with `begin_object_deletion`). It is capped at
+  `MAX_ASSETS_PER_DOCUMENT` = 10 000 (`TooManyAssets`), and it records `object_references`
+  `owner_kind = 'document'` through `add_reference`. `detach_asset` is idempotent and returns
+  `DocumentNotFound` for a foreign document. `list_document_assets(tx, document, after, limit)` is a
+  keyset page by object id, bounded 1..=500 (`InvalidLimit`), with `next_after`.
+  `presign_document_asset_download(tx, store, principal, document, object, ttl)` runs
+  `downloads::authorize_download` first (membership; `Download(NotAuthorized)` reveals nothing about
+  the document). It then needs a `pending`/`active`/`archived` document and the attachment row
+  locked `FOR SHARE`, so a concurrent detach waits. It signs and audits through `presign_download`.
+  Missing, foreign or unverified objects are `NotAttached`. Errors are a fixed `AssetError` enum.
+  The PostgreSQL/SeaweedFS probe (fixture prefix a7) covers: store, read-back and canonical key;
+  dedupe on re-store and via `find_asset` (one row); a per-tenant copy in tenant two; a pending row
+  filled with the same id; a rejected row blocking with `ObjectConflict`; validation refusing
+  non-image bytes as `image/png` (`MediaMismatch`), octet-stream, SVG, a mislabelled JPEG,
+  media-type parameters, empty bytes and a bad producer, with nothing registered or written;
+  attach/detach idempotency and reattach; refusal of pending, rejected, deleting, verified-`export`,
+  unknown and other-tenant objects; refusal of archived, deleting, unknown and other-tenant
+  documents; tenant two unable to attach, detach, list or download tenant one's ids; paging;
+  downloads fetching exact bytes only for attached assets (another document, detached, foreign,
+  unknown, outsider and zero-TTL refused); archived documents readable and deleting ones not; and
+  exactly one audit event per committed URL. Unit tests: a 4 096-round junk byte/type sweep and
+  corrupted PNGs. No migration.
+- [x] **S3-010** Store team-library versions and usage references.
+  Evidence: `figcraft-cloud-storage::libraries` adds `create_library(tx, owning_team,
+  source_document, name)`. The name is trimmed, 1–255 chars with no control characters. The team
+  must be an active team of the same tenant (`TeamNotFound`/`TeamNotActive`), and the source
+  document must exist in the tenant and not be deleting or deleted. `publish_library_version(tx,
+  store, library, publisher, bytes)` caps bytes at `MAX_LIBRARY_BYTES` and runs
+  `validation::validate(MEDIA_FIGCRAFT, …)` before any SQL (`Invalid(Rejection)`). It then locks the
+  library row `FOR UPDATE` and refuses archived or deleted libraries (`Archived`/`Deleted`). A
+  backstop check comes next (`NotPublisher`): the publisher must be an active principal and active
+  tenant member who is a tenant owner/admin, or a `team_manager`/`editor` of the owning team or of a
+  team granted `publisher`, or a tenant editor when the library has no owning team. The next version
+  is max+1, capped at `MAX_VERSIONS_PER_LIBRARY` = 10 000. Bytes go to `keys::library` (version plus
+  SHA-256, checked with `valid_key`) through `register_object` → `put_object` → `verify_object`
+  read-back. Only then are the `library_versions` row and a `library_version` object reference
+  inserted. `grant_library_to_team` upserts the role idempotently, active libraries and active
+  same-tenant teams only; `revoke_library_grant` is idempotent in any state. `list_grants` is
+  bounded, `list_versions` lists newest first with a keyset `before` cursor, and every page is
+  1..=1000 (`InvalidLimit`). `record_library_usage(tx, document, version)` keeps one row per
+  document+library. It returns `Recorded`, `Switched { previous }` or `AlreadyRecorded`, and locks
+  the library `FOR SHARE` against `archive_library`. Decision: an archived library keeps its
+  existing usages and re-recording the current version is a no-op, but it takes no new usages, no
+  version switches, no new versions and no grants; a deleted library refuses all of them; documents
+  must be active. `remove_library_usage`, `usage_of_library`, `usages_of_version` (paginated by
+  document id) and `archive_library` (idempotent) complete the API; errors are fixed `LibraryError`
+  categories. The PostgreSQL + SeaweedFS probe covers: trimmed or refused names; foreign, unknown
+  and archived teams and foreign or deleting documents refused; v1 verified at its content-addressed
+  key with intact read-back and exactly one `library_version` reference. Empty, non-zip, PNG,
+  truncated and `document.json`-less archives are refused and take no version number. A team viewer,
+  an ungranted team editor, a tenant editor on a team-owned library and another tenant's principal
+  are all `NotPublisher`, while a tenant admin publishes. A `viewer` grant still refuses publishing
+  and a `publisher` grant allows it, and revoking the grant refuses it again. Listing order, cursor
+  and limits are checked, and another tenant sees nothing and cannot publish, grant or use the
+  versions. The usage path checks record → switch → idempotent re-record, pagination, and archived,
+  deleting, foreign or unknown documents and versions. The archive freeze is verified, and a deleted
+  library is refused. In the ordered concurrency test the waiter is blocked on the row lock (checked
+  through `pg_stat_activity`) and gets version 2. Four free-running racers then get dense, distinct
+  versions 3–6 with distinct keys, and each version has one reference.
+- [x] **S3-011** Store validated plugin bundles and manifests.
+  Evidence: `figcraft-cloud-storage::plugin_store::install_plugin_version(tx, store, PluginName {
+  publisher, name }, version, bundle, producer_version)` finds the tenant's live plugin by publisher
+  and name, or creates it `active`. It does this under a transaction advisory lock, because
+  `plugins` has no unique name constraint, and then locks the plugin row `FOR UPDATE`, so installs
+  of one plugin run one at a time. Names, the version (`keys::plugin_version_valid`) and the
+  producer version are checked before any SQL. So is the bundle: at most `MAX_PLUGIN_BYTES`, then
+  `validation::validate(MEDIA_PLUGIN)`. A separate bounded `FCPLUGB1` reader takes out the manifest,
+  and its module length and asset count must match the validator's `Summary::Plugin`. The manifest
+  must be a JSON object with an `id` (1–128 of `[A-Za-z0-9._-]`) and a non-blank `name` and `main`.
+  It may carry a string `version` (trimmed), which must equal the requested version
+  (`VersionMismatch`). It may not contain U+0000, which JSONB refuses. Every version of one plugin
+  must carry the same manifest `id` (`IdMismatch`). Its size is measured as PostgreSQL renders the
+  JSONB (`octet_length($1::jsonb::text)` ≤ 256 KiB). Without that check a 1e300 array that fits the
+  bundle would overflow the column; it is refused as `TooLarge`, not as a constraint error. The
+  bytes go to `keys::plugin` and are registered and verified by read-back. A verified object already
+  at that key is reused, a pending one is filled, and a rejected or deleting one is
+  `ObjectConflict`. Then a `plugin_versions` row (`verified`, with the parsed manifest) and a
+  `plugin_version` object reference are written. Re-installing the identical bundle is idempotent
+  (`reused`); a different bundle for an existing version is `Conflict`; a withdrawn version or a
+  disabled plugin is `InvalidState`. `withdraw_plugin_version` is idempotent
+  (`Applied`/`AlreadyApplied`) and keeps the row, reference and bytes. `list_versions` returns pages
+  of up to 1000 manifest-free summaries, oldest first, with withdrawn versions only on request.
+  `get_manifest` reads one manifest back and also returns its state. `get_plugin` and `find_plugin`
+  look plugins up. All errors are fixed `PluginStoreError` and `ManifestProblem` codes. The
+  PostgreSQL + SeaweedFS probe covers: first install (key, kind, media type, size, stored bytes, a
+  single reference, manifest round trip); an idempotent re-install; a conflicting bundle that writes
+  nothing; version and id mismatches; a second version; listing order and limits; withdrawal
+  semantics and re-install refusal; cross-tenant invisibility, with the same name in another tenant
+  being a separate plugin; a disabled plugin; 18 junk bundle, name and version refusals that run no
+  SQL; the JSONB expansion bound; a rejected object blocking the key; a pending object being filled;
+  and an unreachable store (`Store(Unreachable)`).
+- [x] **S3-012** Store export results and thumbnails.
+  Evidence: `figcraft-cloud-storage::exports::request_export(tx, document, principal, format,
+  &options, requested_seq)` requires an active member of an active tenant (`NotAuthorized`) and an
+  `active`/`archived` document in the transaction's tenant, locked `FOR KEY SHARE` so event appends
+  are not blocked (`NotFound`, `DocumentUnavailable`). The sequence may not pass `current_seq`
+  (`SeqAhead`) or `i64::MAX` (`InvalidSeq`). Options must be a JSON object of at most 16 levels, 1
+  024 values and 8 KiB compact, with no NUL; they are walked iteratively before encoding, so a 100
+  000-deep value is refused without recursing. Each principal may hold at most 32 open exports. The
+  call inserts a `queued` export and a `queued` `jobs` row of kind `document.export` whose input
+  names the export, document, format and sequence, linked through `job_id`. `start_export` moves
+  queued to running and counts a job attempt; on a running export it is an idempotent resume.
+  `fail_export` fails a queued or running export with a fixed code (1–128 bytes of `[a-z0-9._-]`).
+  `complete_export(tx, store, id, bytes, filename, producer)` accepts only `running` exports and
+  checks content by format. png/jpeg/webp/figcraft go through `validation::validate`. SVG must be
+  UTF-8 with an `<svg` root (after an optional BOM, XML declaration and comments) that ends in
+  `</svg>` or is self-closed, and may not contain script, foreignObject, iframe, embed, object,
+  DOCTYPE, ENTITY, `javascript:`/`vbscript:` or `on…=` handlers. PDF needs a `%PDF-n.n` header and
+  `%%EOF` in the last 1 KiB, and may not contain the `/JavaScript`, `/JS`, `/Launch`, `/SubmitForm`
+  or `/ImportData` name tokens. The SVG and PDF checks are a documented tripwire, not a sanitizer,
+  and failures return `ActiveContent`. A refused completion changes nothing. On success the bytes go
+  to `tenants/<t>/exports/<export>/<sanitize_filename>`; `sanitize_filename` keeps only the last
+  path component, lowercases, maps everything else to `-`, collapses `-`/`.` runs, trims, caps the
+  stem at 96 bytes and forces the format's extension. The object is registered as `export`, verified
+  by read-back and referenced (`export`, export id). The export becomes `succeeded` with
+  `result_object_id` and `completed_at`, and the job becomes `succeeded` with a result.
+  `expire_exports(tx, older_than ≥ 1 h, limit ≤ 500)` uses one statement with `SKIP LOCKED` to set
+  old succeeded exports to `expired`, clear their result and delete the `export` reference, then
+  returns `(export, object)` for the collector. `store_thumbnail(tx, store, document, seq, webp,
+  producer)` validates WebP within 1 MiB, 1 024 px per side and 1 Mpx; it requires `seq ≤
+  current_seq` and writes `keys::thumbnail`, a verified `thumbnail` object, a `document_thumbnails`
+  row and a `thumbnail` reference owned by the document. Identical bytes for a stored seq are
+  `AlreadyApplied`, different bytes are `ThumbnailExists` (objects stay immutable), and an older seq
+  is `Superseded`. A newer seq drops the older rows and their references (at most 16 per call) and
+  reports their objects as superseded. `latest_thumbnail` returns the newest. The PostgreSQL +
+  SeaweedFS probe covers 7 direct-SQL updates refused by the exports CHECKs (success without result,
+  failure without code, completion time on an open export, stray error code, unknown state/format,
+  non-object options) plus clearing a succeeded result. It also covers: complete-before-start, start
+  resume and attempts, MediaMismatch/Truncated/empty/bad-producer refusals that leave the export
+  running, sanitized key `…/frame-1.png` from `../../Users/Me/Frame 1.PNG` with read-back bytes,
+  references and the job result, terminal states refusing every transition, the fail path, SVG/PDF
+  active-content refusal and success, a junk `.figcraft` refused then failed, other-tenant
+  invisibility for get/start/fail/complete/request/expire, expiry after backdating while fresh
+  exports are untouched, the open-export cap, thumbnail
+  SeqAhead/InvalidSeq/PNG/oversize-dimension/size/unknown-document refusals, idempotent re-store,
+  ThumbnailExists, replacement by a newer seq, Superseded, cross-tenant thumbnail invisibility and a
+  cross-tenant `document_thumbnails` FK refusal. Unit sweeps run every format against several
+  hundred junk filenames (traversal, Windows paths, Unicode, controls, 100 000-character names);
+  each result is one valid key segment. They also cover junk bytes for every format and the
+  thumbnail check, and junk formats, states and error codes.
 - [x] **S3-013** Add media, archive, image-pixel and expanded-byte validation budgets.
   Evidence: `figcraft-cloud-storage::validation::validate(declared, bytes, &Budgets)` is a pure,
   bounded check of staged bytes before promotion. It returns `Validated { media, summary }` (image
@@ -738,8 +932,78 @@ the same commit as the completed task.
   also covers wrong credentials (`Unauthorized`), a closed port (`Unreachable`) and an invalid
   policy (`InvalidPolicy`), none of which create the bucket. Probe buckets are deleted after each
   run.
-- [ ] **S3-015** Add garbage-collection jobs with dry-run and minimum-age protection.
-- [ ] **S3-016** Add database-to-bucket reconciliation report.
+- [x] **S3-015** Add garbage-collection jobs with dry-run and minimum-age protection.
+  Evidence: `figcraft-cloud-storage::garbage_collection::collect_garbage(&PgPool, &ObjectStore,
+  TenantId, GcOptions { dry_run, limit 1..=1000, min_age })` runs one bounded pass over one tenant
+  and returns a `GcReport` (resumed, candidates, protected with reason, skipped, deleted, failed,
+  versions_removed, staging_keys, staging_failed). A requested min_age is raised to
+  `MIN_COLLECTION_AGE` and capped at `MAX_COLLECTION_AGE`; `GcOptions::from_job_input` parses a
+  `object_garbage_collection` job's `{dry_run, limit, min_age_seconds}`, refusing unknown fields,
+  wrong types and ages below the floor. Order: objects left `deleting` by an interrupted pass are
+  resumed first; candidates come from `collectable_objects` (one full page, so protected heads do
+  not hide collectable objects) and are then excluded, belt and braces, while a current-snapshot
+  pointer, `document_snapshots`, `library_versions`, `plugin_versions`, `exports.result_object_id`
+  or `document_thumbnails` row names them, a `reserved`/`completed` upload reservation names their
+  id, key or kind+digest, a queued/running job's input mentions their id or key (at most 10 000
+  active jobs of at most 1 MiB scanned; more fails the pass closed with `ActiveJobsUnbounded`), or,
+  for snapshot and asset objects, any tenant export is queued/running. Each candidate is marked by
+  `begin_object_deletion` in its own short transaction with the protections re-checked under the row
+  lock; then every version and delete marker of the exact key is removed through hand-signed
+  `ListObjectVersions` (prefix = key, 100 per page, 256 KiB/32k-node bounded roxmltree parse, at
+  most 100 rounds) and `DELETE ?versionId=`, falling back to a plain DELETE on stores without
+  version listing; only after an empty listing is the row marked `deleted` (`deleted_at` kept).
+  Store failures leave rows `deleting` for the next pass; a resumed `deleting` object that something
+  names again is reported `Protected` and its bytes are kept. Overdue reservations are expired
+  through `uploads::expire_reservations` and their staging keys removed with all versions. A dry run
+  only reads, in rolled-back transactions. The PostgreSQL + versioned SeaweedFS probe (one fixture
+  tenant per test, versions counted with an independent signed listing) covers fresh objects
+  protected by age, references and holds protecting until released, a dry run changing no state or
+  version, a longer min_age honoured and a zero one raised, a limit-1 pass followed by the rest, two
+  versions plus a delete marker all removed, a pending row with no bytes, a bystander tenant
+  untouched, all nine protection reasons with no reference row and collection once they clear, an
+  active export pausing asset collection but not thumbnails, a crash after marking and a crash after
+  a partial plain delete both finished by a rerun, an unreachable store leaving every touched object
+  `deleting`, an idempotent idle rerun, and an expired staging upload with two versions swept and
+  its reservation expired.
+- [x] **S3-016** Add database-to-bucket reconciliation report.
+  Evidence: `figcraft-cloud-storage::reconciliation::reconcile_tenant(tx, store,
+  &ReconciliationLimits)` returns a versioned (`format_version` 1) serde `ReconciliationReport` for
+  one tenant. It lists `tenants/<tenant>/` with signed `ListObjectsV2` pages, following continuation
+  tokens, and compares the keys with the tenant's `objects` rows. Rows are read in `(object_key
+  COLLATE "C", id)` keyset pages, which matches S3 byte order. Staging keys are compared with
+  `upload_reservations`. It reports: missing objects (`verified` is critical, `pending` is info, and
+  `rejected`/`deleting` without bytes are expected); orphan keys (`no_row`, `deleted_row_only`, or
+  `unsignable_key` when the key is not one FigCraft writes); stale staging keys (`no_reservation`,
+  `reservation_expired`, or `reservation_closed`; staging keys of open reservations are only
+  counted); size mismatches between the listed size and `size_bytes` (critical when verified); stuck
+  `pending` rows (age since creation) and stuck `deleting` rows (age since deletion started) past
+  `stuck_after` (default 1 h), with `in_bucket`; and collectable rows with no reference and no hold
+  (info, `eligible` past `MIN_COLLECTION_AGE`). It also gives severity totals, exact per-category
+  counts, and live/verified/stored rows and bytes per kind. Read-only: it issues `SET TRANSACTION
+  READ ONLY` before any query, so PostgreSQL refuses any later write in that transaction, and sends
+  only listing `GET`s. The database clock is read before the listing; rows created or verified after
+  it are counted as `recent_rows` and not compared, and rows are read after the listing. Caps: rows
+  ≤1M, keys ≤1M, pages ≤10k, page size ≤1000, findings per category ≤10k (counts stay exact). Any
+  cap reached is named in `caps_reached` and sets `complete=false`. Comparisons stay within the key
+  range both sides fully read (`unchecked_rows`/`unchecked_keys`), so a cap never invents a missing
+  or orphan finding. Listing bodies are capped at 4 MiB and parsed with roxmltree under a 64k-node
+  limit with no DTD. Keys are percent-decoded strictly, kept to ≤1024 bytes and checked against the
+  prefix; tokens are bounded printable ASCII; a repeated token or duplicate key is
+  `MalformedListing`. Errors are fixed categories (`InvalidLimits`, `ReadOnly`, `Store(..)`,
+  `MalformedListing`, `Database`, `CorruptRow`). Unit tests cover the parser with a junk sweep over
+  every truncation and single-byte mutation of a page plus pseudo-random bodies. The PostgreSQL +
+  SeaweedFS probe plants, under fixture prefix `ac`: a referenced healthy object; a hold-only
+  object; a verified row with no bytes; a verified object overwritten by a raw put of a longer body;
+  a raw orphan put; a key whose only row is `deleted`; stuck `pending` and `deleting` rows; a
+  rejected row without bytes; unreserved, expired, closed and open staging keys; and another
+  tenant's key. It asserts every classification, severity, count and kind total and the JSON round
+  trip. It proves nothing changed by comparing rows, reservations, references and an independent
+  rusty-s3 listing before and after, with the report's transaction committed. It shows a write in
+  the report's transaction is refused. It checks that page-size-2 paging gives the same counts and
+  that key, page, row and finding caps mark the report incomplete without false missing or orphan
+  findings. Earlier runs' leftovers are cleared first, so reruns pass.
+  `docs/saas/deployment-operations.md` gains "Object reconciliation report", which says how to act
+  on each category.
 - [x] **S3-017** Extend the filesystem scanner into a dry-run migration planner.
   Evidence: `figcraft-cloud-storage::migration_plan::plan_migration(&MigrationReport, &PlanTarget
   {tenant_id, workspace_id, project_id, principal_id, bucket})` builds a versioned (format 1),
@@ -1163,3 +1427,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S3-002: added object, object-reference and upload-reservation tables with tenant-prefix key constraints; readiness advanced to schema version 20261017000001. S3 reaches 2/20. |
 | 2026-10-17 | S3-003: added bounded object I/O, the content-addressed key layout and read-back SHA-256 verification of object metadata. S3 reaches 3/20. |
 | 2026-10-17 | S3-004..S3-007, S3-013, S3-014, S3-017: upload reservations and validated promotion, authorized presigned downloads, references and retention holds, content validation budgets, idempotent bucket/versioning/lifecycle initialization, and a dry-run migration planner (six parallel worktree agents, then integrated: tagged staging PUTs, completer check, validation before promotion, one FigCraft media-type set). S3 reaches 10/20. |
+| 2026-10-17 | S3-008..S3-012, S3-015, S3-016: snapshot store and snapshot-first room recovery, document assets, team-library versions, plugin bundles, exports and thumbnails on one shared schema migration (20261017000002), garbage collection with versioned deletes, and a read-only reconciliation report (seven parallel worktree agents; verified with targeted suites). S3 reaches 17/20. |
