@@ -21,6 +21,7 @@ pub mod object_metadata;
 pub mod object_references;
 pub mod objects;
 pub mod plugin_store;
+pub mod reconciliation;
 pub mod snapshots;
 pub mod uploads;
 pub mod validation;

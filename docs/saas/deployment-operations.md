@@ -267,8 +267,53 @@ higher rate.
 - Bucket versioning.
 - Lifecycle retention for snapshots, staging objects and deleted objects.
 - Replication or provider durability appropriate to the plan.
-- Inventory reconciliation against the PostgreSQL object table.
+- Inventory reconciliation against the PostgreSQL object table (see "Object reconciliation
+  report" below).
 - Independent backup of tenant encryption metadata when used.
+
+### Object reconciliation report
+
+`figcraft-cloud-storage::reconciliation::reconcile_tenant(transaction, store, limits)` compares one
+tenant's `objects` rows (and, for staging keys, its `upload_reservations`) with a
+`ListObjectsV2` listing of `tenants/<tenant>/` and returns a `ReconciliationReport`
+(`format_version` 1, serde JSON). The report is read-only by construction. It sends only listing
+`GET`s and runs only `SELECT`s, and it first switches its transaction to `READ ONLY`, so PostgreSQL
+refuses any write later in the same transaction. Give it a transaction of its own. Run it after a
+restore (step 4 of "Restore"), after an object-store incident, and on a schedule (weekly per tenant
+is a reasonable start).
+
+The top-level fields are `tenant_id`, `bucket`, `prefix`, `listing_started_unix`, `complete`,
+`caps_reached`, `summary` (severity totals, rows scanned, keys and bytes listed, pages, rows in
+other buckets, recent and unchecked rows and keys, open staging keys, staging and orphan bytes),
+`counts` (exact per-category counts), `kinds` (live, verified and stored rows and bytes per object
+kind) and one list per category:
+
+| Category | Severity | Meaning | Action |
+| --- | --- | --- | --- |
+| `missing_objects`, state `verified` | critical | The database promises bytes the bucket does not have | Treat as data loss. Restore the key from a noncurrent bucket version or backup, then check the SHA-256 against the row. Never re-upload different bytes under the key. If nothing can be restored, mark the dependent snapshot, asset or version unavailable through the owning workflow. |
+| `missing_objects`, state `pending` | info | An upload has not written its bytes yet | Nothing to do unless it also shows up as stuck. |
+| `size_mismatches`, state `verified` | critical | The stored size differs from `size_bytes`: the key was overwritten | Restore the version whose size and SHA-256 match the row. Then investigate who wrote the key, because FigCraft never overwrites a verified key. |
+| `size_mismatches`, other states | warning | An unverified row and its bytes disagree | Verification (or the garbage collector) settles it; re-run the report. |
+| `orphan_keys`, `no_row` | warning | Bytes with no row | Re-run the report first: a young orphan (`last_modified` within minutes) may be a write whose row is not committed yet. Then check the backup that was restored for the row; delete the key only if no recovery point needs it. |
+| `orphan_keys`, `deleted_row_only` | warning | The garbage collector marked the row deleted but the bytes stayed | Delete the key (bucket versioning keeps a noncurrent copy for the lifecycle period). |
+| `orphan_keys`, `unsignable_key` | warning | A key FigCraft never writes (uppercase, spaces, …) | Something other than FigCraft wrote under the tenant prefix. Investigate credentials and remove the key with operator tooling. |
+| `stale_staging_keys` | warning | Staged bytes whose reservation is missing (`no_reservation`), expired (`reservation_expired`) or closed (`reservation_closed`) | Run the reservation expiry sweep and delete the staging key. The tagged lifecycle rule removes any left after two days. |
+| `stuck_objects` | warning | `pending` since creation, or `deleting` since deletion started, longer than `stuck_after` (default one hour); `in_bucket` says whether the key is listed | For `pending`: verify the object or let the reservation flow reject it. For `deleting`: re-run the garbage collector for the object. |
+| `collectable_objects` | info | A `pending`, `verified` or `rejected` row with no reference and no retention hold; `eligible` once older than `MIN_COLLECTION_AGE` | The garbage collector handles it. A large or growing count points to a reference leak. |
+
+Bounds: `ReconciliationLimits` caps rows (default 100 000, ceiling 1 000 000), listed keys (100 000
+and 1 000 000), listing pages (200 and 10 000), keys per page (1 000) and findings per category
+(1 000 and 10 000; the counts stay exact). Listing responses are read up to 4 MiB and parsed without
+DTDs under a node limit, and keys are checked against the tenant prefix. Any cap that is reached is
+named in `caps_reached`, and `complete` is then `false`. When the listing or the row scan stops
+early, comparisons only cover the key range both sides fully read. Keys and rows outside it are
+counted as `unchecked_keys` and `unchecked_rows`, so a cap never invents a missing or orphan
+finding. To finish an incomplete report, raise the limits.
+
+Consistency: the database clock is read before the listing starts. Rows created or verified after
+that point are counted as `recent_rows` and not compared, and rows are read after the listing. Any
+finding can be a race with live traffic, so re-run the report before acting on a single finding.
+`clean()` is true only for a complete report with no critical and no warning findings.
 
 ### Redis
 
