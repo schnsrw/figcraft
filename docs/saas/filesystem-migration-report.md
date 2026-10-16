@@ -275,5 +275,32 @@ Not imported yet: library files, links (token hashes) and plugin bundles. Plugin
 publisher and a manifest, which the legacy index doesn't have. These are reported by cutover
 verification and block cutover until a later import covers them.
 
+### Cutover verification
+
+`legacy_import::verify_import` (S3-019) is read-only. It takes a tenant transaction, which the
+caller rolls back, and re-reads PostgreSQL, the object store and the legacy directory. For each
+planned document it reports `passed` and a sorted list of fixed `failures` codes:
+
+- `legacy_unreadable`, `legacy_changed`: the legacy files can't be re-read, or no longer match
+  the plan.
+- `document_missing`, `document_mismatch`: no row, or another workspace, project or a non-active
+  state.
+- `mapping_missing`, `mapping_mismatch`.
+- `sequence_mismatch`: `current_seq` isn't the plan's last sequence.
+- `snapshot_row_missing`, `snapshot_not_verified`, `current_snapshot_mismatch`.
+- `object_missing`, `object_not_verified`: the row isn't verified or records another key, size
+  or digest.
+- `object_bytes_mismatch`: the stored bytes are missing or don't hash to the row.
+- `snapshot_content_mismatch`: the stored bytes differ from the legacy snapshot body.
+- `store_unavailable`.
+- `event_count_mismatch`: the rows after the snapshot don't number `events.count` or don't span
+  `first_seq..last_seq`.
+- `replay_corrupt`: `read_events` found a bad checksum, bad decoding or a gap.
+- `replay_mismatch`: the replayed batches differ from the log's replayable batches.
+
+`not_imported` lists, by kind, what the import does not carry yet: each document's `links`,
+planned `library` files and `plugin` bundles, `deferred` items and `excluded_document`s.
+`cutover_ready` is true only when every document passed and `not_imported` is empty.
+
 Probe: `crates/cloud-storage/tests/legacy_import.rs` with `deploy/saas/legacy-import-preflight.sql`
 and `legacy-import-cleanup.sql` (fixture tenant `ad000000-…-000000000001`).

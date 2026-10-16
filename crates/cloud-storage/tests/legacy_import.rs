@@ -12,7 +12,9 @@ use std::path::PathBuf;
 
 use figcraft_cloud_domain::{CloudDocumentId, Uuid};
 use figcraft_cloud_storage::events::{MAX_REPLAY_BYTES, MAX_REPLAY_EVENTS, append_events, claim_sequencer, read_events};
-use figcraft_cloud_storage::legacy_import::{ImportError, ImportOptions, ImportStage, ImportStatus, import_document, import_plan};
+use figcraft_cloud_storage::legacy_import::{
+    ImportError, ImportOptions, ImportStage, ImportStatus, NotImportedKind, VerifyCode, import_document, import_plan, verify_import,
+};
 use figcraft_cloud_storage::legacy_scan::{ScanLimits, scan_data_directory};
 use figcraft_cloud_storage::migration_plan::{ExclusionReason, MigrationPlan, PlanTarget, plan_migration};
 use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
@@ -237,6 +239,16 @@ async fn a_plan_imports_once_skips_blocked_documents_and_reruns_as_a_no_op() -> 
     assert_eq!(after, token);
     assert_eq!(replay(&pool, ready_plan.document.id, 4).await?.len(), 3);
 
+    // S3-019: both documents verify; the links and the excluded document block cutover.
+    let mut tx = begin(&pool).await?;
+    let verification = verify_import(&mut tx, &store, &plan, &f.root, &limits).await?;
+    tx.rollback().await?;
+    assert!(verification.documents.iter().all(|d| d.passed), "{verification:?}");
+    assert_eq!(verification.documents.iter().find(|d| d.legacy_id == ready).map(|d| d.events), Some(3));
+    let left: Vec<_> = verification.not_imported.iter().map(|n| (n.kind, n.legacy_document.clone(), n.count)).collect();
+    assert_eq!(left, [(NotImportedKind::Links, Some(ready.clone()), 1), (NotImportedKind::ExcludedDocument, Some(blocked.clone()), 1)]);
+    assert!(!verification.cutover_ready);
+
     delete_snapshots(&store, &plan, &pool).await?;
     pool.close().await;
     Ok(())
@@ -291,6 +303,81 @@ async fn an_interrupted_import_resumes_without_duplicating_and_refuses_changed_s
     );
 
     delete_snapshots(&store, &plan, &pool).await?;
+    pool.close().await;
+    Ok(())
+}
+
+/// The admin pool, for tampering with append-only rows the runtime role cannot touch.
+async fn admin() -> Result<Option<PgPool>, Box<dyn std::error::Error>> {
+    let Ok(file) = std::env::var("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE") else {
+        eprintln!("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE is unset; tamper probe skipped");
+        return Ok(None);
+    };
+    let url = fs::read_to_string(file)?;
+    Ok(Some(PgPoolOptions::new().max_connections(1).connect(url.trim_end()).await?))
+}
+
+#[tokio::test]
+async fn verification_passes_a_clean_import_and_detects_tampering() -> TestResult {
+    let (Some((pool, store)), Some(admin)) = (probe().await?, admin().await?) else {
+        return Ok(());
+    };
+    let f = Fixture::new();
+    let id = f.id("verify");
+    let entries: Vec<Journal> = (4..=6).map(|seq| Journal::Accepted(accepted(seq))).collect();
+    f.document(&id, 3, &entries, Some(b"[]"));
+    let plan = f.plan();
+    let entry = plan.documents.first().unwrap().clone();
+    let limits = ScanLimits::default();
+    let verify = || async {
+        let mut tx = begin(&pool).await?;
+        let verification = verify_import(&mut tx, &store, &plan, &f.root, &limits).await?;
+        tx.rollback().await?;
+        Ok::<_, Box<dyn std::error::Error>>(verification)
+    };
+
+    // Nothing imported yet: every check fails, and verification wrote nothing.
+    let before = verify().await?;
+    assert_eq!(before.documents[0].failures, [VerifyCode::DocumentMissing]);
+    assert!(!before.cutover_ready);
+
+    let options = ImportOptions::default();
+    import_plan(&pool, &store, &plan, &f.root, &limits, &options).await?;
+    let clean = verify().await?;
+    assert!(clean.cutover_ready, "{clean:?}");
+    assert!(clean.not_imported.is_empty());
+
+    // An event row removed behind the import's back.
+    let deleted = sqlx::query("DELETE FROM public.document_events WHERE tenant_id = $1::uuid AND document_id = $2::uuid AND seq = $3")
+        .bind(TENANT)
+        .bind(entry.document.id.to_string())
+        .bind(5_i64)
+        .execute(&admin)
+        .await?;
+    assert_eq!(deleted.rows_affected(), 1);
+    let gap = verify().await?;
+    assert!(!gap.cutover_ready);
+    assert_eq!(gap.documents[0].failures, [VerifyCode::EventCountMismatch, VerifyCode::ReplayCorrupt]);
+
+    // Snapshot bytes overwritten in the bucket (same size, so only the digest gives it away).
+    let mut tx = begin(&pool).await?;
+    let object = figcraft_cloud_storage::object_metadata::get_object(&mut tx, entry.snapshot.object.id).await?.unwrap();
+    tx.rollback().await?;
+    let mut bytes = store.get_object(&object.object_key, 1 << 20).await?;
+    if let Some(first) = bytes.first_mut() {
+        *first ^= 0xff;
+    }
+    store.put_object(&object.object_key, bytes, &object.media_type).await?;
+    let tampered = verify().await?;
+    let failures = &tampered.documents[0].failures;
+    assert!(failures.contains(&VerifyCode::ObjectBytesMismatch) && failures.contains(&VerifyCode::SnapshotContentMismatch), "{failures:?}");
+
+    // A legacy source that changed after the import is reported too.
+    f.write(&format!("files/{id}/log.bin"), &log(2, &entries[..1]));
+    assert!(verify().await?.documents[0].failures.contains(&VerifyCode::LegacyChanged));
+
+    delete_snapshots(&store, &plan, &pool).await?;
+    admin.close().await;
     pool.close().await;
     Ok(())
 }

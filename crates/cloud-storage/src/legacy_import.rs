@@ -1,4 +1,5 @@
-//! Repeatable filesystem-server to PostgreSQL/S3 import with per-resource checkpoints (S3-018).
+//! Repeatable filesystem-server to PostgreSQL/S3 import with per-resource checkpoints (S3-018),
+//! and read-only verification of the result before cutover (S3-019).
 //!
 //! [`import_plan`] executes a [`MigrationPlan`] (S3-017) against a stopped legacy data directory.
 //! For each planned document, [`import_document`] re-reads `snapshot.bin` and `log.bin` read-only
@@ -32,6 +33,7 @@ use std::path::{Path, PathBuf};
 use figcraft_cloud_domain::{CloudDocumentId, ResourceState, Uuid};
 use figcraft_collab::message;
 use figcraft_collab::{Accepted, Journal, SessionState};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
@@ -637,6 +639,302 @@ async fn import_snapshot(
     tx.commit().await.map_err(db)?;
     outcome.snapshot_registered = true;
     Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cutover verification (S3-019)
+// ---------------------------------------------------------------------------------------------
+
+/// Why one imported document failed verification. Serialized names never change meaning.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VerifyCode {
+    /// The legacy files could not be read (missing, a link, too large).
+    LegacyUnreadable,
+    /// The legacy files no longer match the plan.
+    LegacyChanged,
+    DocumentMissing,
+    /// The document is in another workspace or project, or not active.
+    DocumentMismatch,
+    MappingMissing,
+    /// The mapping points at another internal id.
+    MappingMismatch,
+    SnapshotRowMissing,
+    /// The snapshot row is not verified, or records another sequence or object.
+    SnapshotNotVerified,
+    /// `current_snapshot_id` is not the imported snapshot.
+    CurrentSnapshotMismatch,
+    ObjectMissing,
+    /// The object row is not verified, or records another key, size or digest.
+    ObjectNotVerified,
+    /// The stored bytes are missing or do not hash to the object row.
+    ObjectBytesMismatch,
+    /// The stored bytes differ from the legacy snapshot body.
+    SnapshotContentMismatch,
+    /// The store failed in a way that says nothing about the bytes.
+    StoreUnavailable,
+    /// `documents.current_seq` is not the plan's last sequence.
+    SequenceMismatch,
+    /// The event rows after the snapshot do not number `events.count` or span its range.
+    EventCountMismatch,
+    /// Replay of the stored events failed verification (checksum, decoding or a gap).
+    ReplayCorrupt,
+    /// Replay succeeded but yields other batches than the legacy log.
+    ReplayMismatch,
+}
+
+/// One planned document's verification.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DocumentVerification {
+    pub legacy_id: String,
+    pub document_id: CloudDocumentId,
+    pub passed: bool,
+    pub failures: Vec<VerifyCode>,
+    /// Event rows found after the snapshot sequence.
+    pub events: u64,
+}
+
+/// What a not-imported item is.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotImportedKind {
+    /// A document the plan excluded.
+    ExcludedDocument,
+    /// A document's share links (`links.json`).
+    Links,
+    /// A planned library file (library import is later work).
+    Library,
+    /// A planned plugin bundle (plugin import is later work).
+    Plugin,
+    /// A library file or plugin the plan deferred.
+    Deferred,
+}
+
+/// Legacy data the import did not carry over. Any entry blocks cutover.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NotImported {
+    pub kind: NotImportedKind,
+    /// Legacy path.
+    pub source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_document: Option<String>,
+    pub count: u64,
+}
+
+/// The result of [`verify_import`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ImportVerification {
+    pub documents: Vec<DocumentVerification>,
+    pub not_imported: Vec<NotImported>,
+    /// Every planned document passed and nothing was left behind.
+    pub cutover_ready: bool,
+}
+
+/// Re-read PostgreSQL, the object store and the legacy directory, and check every planned
+/// document of `plan` was imported exactly. Read-only: nothing is written anywhere (object and
+/// snapshot verification states are read, never changed); the caller should roll back.
+pub async fn verify_import(
+    transaction: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    plan: &MigrationPlan,
+    root: &Path,
+    limits: &ScanLimits,
+) -> Result<ImportVerification, ImportError> {
+    if plan.target.tenant_id != transaction.tenant_id() {
+        return Err(ImportError::InvalidPlanEntry);
+    }
+    if plan.target.bucket != store.bucket_name() {
+        return Err(ImportError::BucketMismatch);
+    }
+    let mut documents = Vec::with_capacity(plan.documents.len());
+    let mut not_imported = Vec::new();
+    for entry in &plan.documents {
+        documents.push(verify_document(transaction, store, plan, entry, root, limits).await?);
+        if entry.links > 0 {
+            not_imported.push(NotImported {
+                kind: NotImportedKind::Links,
+                source: format!("files/{}/links.json", entry.legacy_id),
+                legacy_document: Some(entry.legacy_id.clone()),
+                count: entry.links,
+            });
+        }
+        for library in &entry.libraries {
+            not_imported.push(NotImported {
+                kind: NotImportedKind::Library,
+                source: library.source.clone(),
+                legacy_document: Some(entry.legacy_id.clone()),
+                count: 1,
+            });
+        }
+    }
+    for excluded in &plan.excluded {
+        not_imported.push(NotImported {
+            kind: NotImportedKind::ExcludedDocument,
+            source: format!("files/{}", excluded.legacy_id),
+            legacy_document: Some(excluded.legacy_id.clone()),
+            count: 1,
+        });
+    }
+    for plugin in &plan.plugins {
+        not_imported.push(NotImported { kind: NotImportedKind::Plugin, source: plugin.object.source.clone(), legacy_document: None, count: 1 });
+    }
+    for deferred in &plan.deferred {
+        not_imported.push(NotImported {
+            kind: NotImportedKind::Deferred,
+            source: deferred.source.clone(),
+            legacy_document: deferred.legacy_document.clone(),
+            count: 1,
+        });
+    }
+    let cutover_ready = not_imported.is_empty() && documents.iter().all(|document| document.passed);
+    Ok(ImportVerification { documents, not_imported, cutover_ready })
+}
+
+async fn verify_document(
+    tx: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    plan: &MigrationPlan,
+    entry: &DocumentPlan,
+    root: &Path,
+    limits: &ScanLimits,
+) -> Result<DocumentVerification, ImportError> {
+    let document_id = entry.document.id;
+    let mut failures = std::collections::BTreeSet::new();
+    let base_seq = seq_i64(entry.snapshot.seq)?;
+    let last_seq = seq_i64(entry.document.current_seq)?;
+    let legacy = match read_legacy(plan, entry, root, limits) {
+        Ok(legacy) => Some(legacy),
+        Err(ImportError::LegacyUnreadable) => {
+            failures.insert(VerifyCode::LegacyUnreadable);
+            None
+        }
+        Err(_) => {
+            failures.insert(VerifyCode::LegacyChanged);
+            None
+        }
+    };
+    let result = |failures: std::collections::BTreeSet<VerifyCode>, events: u64| {
+        let failures: Vec<VerifyCode> = failures.into_iter().collect();
+        DocumentVerification { legacy_id: entry.legacy_id.clone(), document_id, passed: failures.is_empty(), failures, events }
+    };
+
+    // Document and mapping.
+    let Some(document) = crate::metadata::get_document(tx, document_id).await.map_err(db)? else {
+        failures.insert(VerifyCode::DocumentMissing);
+        return Ok(result(failures, 0));
+    };
+    if document.workspace_id != plan.target.workspace_id || document.project_id != plan.target.project_id || document.state != ResourceState::Active {
+        failures.insert(VerifyCode::DocumentMismatch);
+    }
+    let mapping = &entry.external_mapping;
+    match crate::external_mappings::get_external_mapping(tx, LEGACY_SYSTEM_ID, &mapping.resource_kind, &mapping.external_id).await.map_err(db)? {
+        Some(found) if found.internal_id == document_id.as_uuid() => {}
+        Some(_) => {
+            failures.insert(VerifyCode::MappingMismatch);
+        }
+        None => {
+            failures.insert(VerifyCode::MappingMissing);
+        }
+    }
+    let (current_seq, current_snapshot) = document_progress(tx, document_id).await?.unwrap_or((-1, None));
+    if current_seq != last_seq {
+        failures.insert(VerifyCode::SequenceMismatch);
+    }
+
+    // Snapshot row, object row and stored bytes.
+    let snapshot_id = entry.snapshot.id;
+    let object_id = entry.snapshot.object.id;
+    match snapshot_state(tx, document_id, snapshot_id).await? {
+        Some((seq, object, state)) if seq == base_seq && object == object_id.to_string() && state == "verified" => {}
+        Some(_) => {
+            failures.insert(VerifyCode::SnapshotNotVerified);
+        }
+        None => {
+            failures.insert(VerifyCode::SnapshotRowMissing);
+        }
+    }
+    if current_snapshot.as_deref() != Some(snapshot_id.to_string().as_str()) {
+        failures.insert(VerifyCode::CurrentSnapshotMismatch);
+    }
+    match get_object(tx, object_id).await.map_err(object_error)? {
+        None => {
+            failures.insert(VerifyCode::ObjectMissing);
+        }
+        Some(object) => {
+            let planned = &entry.snapshot.object;
+            let shape_ok = object.kind == ObjectKind::Snapshot
+                && object.bucket == store.bucket_name()
+                && object.object_key.starts_with(&planned.key_prefix)
+                && u64::try_from(object.size_bytes).ok() == Some(planned.size_bytes)
+                && legacy.as_ref().is_none_or(|legacy| legacy.object_key == object.object_key && legacy.sha256 == object.sha256);
+            if object.state != ObjectState::Verified || !shape_ok {
+                failures.insert(VerifyCode::ObjectNotVerified);
+            }
+            match store.get_object(&object.object_key, planned.size_bytes).await {
+                Ok(bytes) => {
+                    if <[u8; 32]>::from(Sha256::digest(&bytes)) != object.sha256 {
+                        failures.insert(VerifyCode::ObjectBytesMismatch);
+                    }
+                    if legacy.as_ref().is_some_and(|legacy| legacy.snapshot.body != bytes) {
+                        failures.insert(VerifyCode::SnapshotContentMismatch);
+                    }
+                }
+                Err(ObjectStoreError::NotFound | ObjectStoreError::TooLarge) => {
+                    failures.insert(VerifyCode::ObjectBytesMismatch);
+                }
+                Err(_) => {
+                    failures.insert(VerifyCode::StoreUnavailable);
+                }
+            }
+        }
+    }
+
+    // Event rows and their replay.
+    let (count, first, last): (i64, Option<i64>, Option<i64>) =
+        sqlx::query_as("SELECT count(*), min(seq), max(seq) FROM document_events WHERE tenant_id = $1::uuid AND document_id = $2::uuid AND seq > $3")
+            .bind(tx.tenant_id().to_string())
+            .bind(document_id.to_string())
+            .bind(base_seq)
+            .fetch_one(tx.connection())
+            .await
+            .map_err(db)?;
+    let expected = entry.events.count;
+    let range_ok = if expected == 0 { first.is_none() } else { first == base_seq.checked_add(1) && last == Some(last_seq) };
+    if u64::try_from(count).ok() != Some(expected) || !range_ok {
+        failures.insert(VerifyCode::EventCountMismatch);
+    }
+    if current_seq >= base_seq {
+        let mut replayed: Vec<Accepted> = Vec::new();
+        let mut after = base_seq;
+        let mut corrupt = false;
+        // Bounded by the planned count: one page past it is enough to prove a mismatch.
+        while after < current_seq && replayed.len() as u64 <= expected {
+            match crate::events::read_events(tx, document_id, after, crate::events::MAX_REPLAY_EVENTS, crate::events::MAX_REPLAY_BYTES).await {
+                Ok(page) => {
+                    let next = page.next_after_seq();
+                    replayed.extend(page.events.into_iter().map(|event| event.batch));
+                    if next <= after {
+                        break;
+                    }
+                    after = next;
+                }
+                Err(EventRepositoryError::Corrupt | EventRepositoryError::SequenceConflict { .. }) => {
+                    corrupt = true;
+                    break;
+                }
+                Err(_) => return Err(ImportError::Database),
+            }
+        }
+        if corrupt {
+            failures.insert(VerifyCode::ReplayCorrupt);
+        } else if let Some(legacy) = &legacy {
+            let same = replayed.len() == legacy.batches.len() && replayed.iter().zip(&legacy.batches).all(|(stored, source)| *stored == source.batch);
+            if !same {
+                failures.insert(VerifyCode::ReplayMismatch);
+            }
+        }
+    }
+    Ok(result(failures, u64::try_from(count).unwrap_or(0)))
 }
 
 #[cfg(test)]
