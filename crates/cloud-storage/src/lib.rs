@@ -10,6 +10,7 @@ pub mod idempotency;
 pub mod legacy_scan;
 pub mod metadata;
 pub mod object_metadata;
+pub mod object_references;
 pub mod objects;
 pub mod snapshots;
 
