@@ -45,7 +45,7 @@ migrator, reconciles runtime grants, and then creates the cloud container after 
 health checks. The gateway waits for both
 web health and cloud readiness. `figcraft-cloud --check-ready` probes `/readyz` with a bounded
 local HTTP request. At startup, `/readyz` is healthy only when the listener is bound and the SQLx
-migration ledger is at the supported S3 schema version `20261017000002`. This does not imply
+migration ledger is at the supported schema version `20261017000003`. This does not imply
 database-backed product operations work.
 The one-shot SeaweedFS initializer retries failures and fails closed if versioning cannot be
 confirmed. The edge `/healthz` is only liveness after the gateway starts.
