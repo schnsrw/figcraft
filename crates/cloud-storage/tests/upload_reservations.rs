@@ -2,10 +2,11 @@ use std::time::Duration;
 
 use figcraft_cloud_domain::{PrincipalId, TenantId, Uuid};
 use figcraft_cloud_storage::begin_tenant_transaction;
-use figcraft_cloud_storage::object_metadata::{ObjectKind, keys};
+use figcraft_cloud_storage::object_metadata::{ObjectKind, ObjectState, Rejection, keys};
 use figcraft_cloud_storage::objects::{MAX_PRESIGN_TTL, ObjectStore, ObjectStoreError, ObjectStoreSettings};
 use figcraft_cloud_storage::uploads::{
-    MAX_ASSET_BYTES, MAX_OPEN_RESERVATIONS_PER_PRINCIPAL, ReservationState, UploadError, expire_reservations, get_reservation, reserve_upload,
+    Completion, MAX_ASSET_BYTES, MAX_EXPIRE_BATCH, MAX_OPEN_RESERVATIONS_PER_PRINCIPAL, ReservationState, ReservedUpload, UploadError,
+    complete_upload, expire_reservations, get_reservation, reserve_upload,
 };
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -180,6 +181,178 @@ async fn reservations_bind_kind_digest_size_type_and_expiry_to_one_staging_put()
     assert!(!expire_reservations(&mut check, 10).await?.contains(&reservation.staging_key));
     check.rollback().await?;
 
+    pool.close().await;
+    Ok(())
+}
+
+/// Reserve an asset upload for `bytes` (as claimed) and commit it.
+async fn reserve_asset(pool: &PgPool, store: &ObjectStore, claimed: &[u8], expected_size: i64) -> Result<ReservedUpload, Box<dyn std::error::Error>> {
+    let tenant: TenantId = TENANT.parse()?;
+    let principal: PrincipalId = PRINCIPAL.parse()?;
+    let mut scoped = begin_tenant_transaction(pool, tenant).await.map_err(|error| format!("begin tenant: {error:?}"))?;
+    let reserved =
+        reserve_upload(&mut scoped, store, principal, ObjectKind::Asset, digest(claimed), expected_size, "image/png", Duration::from_secs(300))
+            .await?;
+    scoped.commit().await?;
+    Ok(reserved)
+}
+
+/// Complete `id` in `tenant` and commit, or roll back on error.
+async fn complete(
+    pool: &PgPool,
+    store: &ObjectStore,
+    tenant: TenantId,
+    id: Uuid,
+) -> Result<Result<Completion, UploadError>, Box<dyn std::error::Error>> {
+    let mut scoped = begin_tenant_transaction(pool, tenant).await.map_err(|error| format!("begin tenant: {error:?}"))?;
+    let outcome = complete_upload(&mut scoped, store, id, "figcraft-cloud test").await;
+    if outcome.is_ok() {
+        scoped.commit().await?
+    } else {
+        scoped.rollback().await?
+    }
+    Ok(outcome)
+}
+
+async fn state_of(pool: &PgPool, id: Uuid) -> Result<Option<ReservationState>, Box<dyn std::error::Error>> {
+    let mut scoped = begin_tenant_transaction(pool, TENANT.parse()?).await.map_err(|error| format!("begin tenant: {error:?}"))?;
+    let state = get_reservation(&mut scoped, id).await?.map(|row| row.state);
+    scoped.rollback().await?;
+    Ok(state)
+}
+
+#[tokio::test]
+async fn completion_verifies_staged_bytes_and_promotes_them_to_one_content_addressed_object() -> Result<(), Box<dyn std::error::Error>> {
+    let Some((pool, settings)) = probe().await? else {
+        return Ok(());
+    };
+    let store = ObjectStore::new(&settings)?;
+    let client = presigned_client()?;
+    let tenant: TenantId = TENANT.parse()?;
+    let other: TenantId = OTHER_TENANT.parse()?;
+
+    // Happy path: the client PUTs through the presigned URL, completion reads the staging object
+    // back, writes and verifies the content-addressed key and deletes the staging object.
+    let bytes = unique_bytes("happy");
+    let reserved = reserve_asset(&pool, &store, &bytes, size(&bytes)).await?;
+    let id = reserved.reservation.id;
+    // Completing before anything is staged changes nothing.
+    assert_eq!(complete(&pool, &store, tenant, id).await?, Err(UploadError::NotUploaded));
+    assert_eq!(state_of(&pool, id).await?, Some(ReservationState::Reserved));
+    assert!(client.put(&reserved.url).body(bytes.clone()).send().await?.status().is_success());
+    // Another tenant cannot complete it, and that attempt leaves it untouched.
+    assert_eq!(complete(&pool, &store, other, id).await?, Err(UploadError::NotFound));
+    assert_eq!(complete(&pool, &store, tenant, Uuid::new_v4()).await?, Err(UploadError::NotFound));
+    let mut bad_version = begin_tenant_transaction(&pool, tenant).await.map_err(|error| format!("begin tenant: {error:?}"))?;
+    for version in ["", " x", "x\n", &"v".repeat(65)] {
+        assert_eq!(complete_upload(&mut bad_version, &store, id, version).await, Err(UploadError::InvalidProducerVersion));
+    }
+    bad_version.rollback().await?;
+    let Completion::Promoted { reservation, object, reused } = complete(&pool, &store, tenant, id).await?? else {
+        return Err("matching bytes should promote".into());
+    };
+    assert!(!reused);
+    assert_eq!((reservation.state, reservation.object_id), (ReservationState::Promoted, Some(object.id)));
+    assert_eq!(object.state, ObjectState::Verified);
+    assert_eq!((object.kind, object.object_key.clone()), (ObjectKind::Asset, keys::asset(tenant, &digest(&bytes))));
+    assert_eq!((object.sha256, object.size_bytes, object.media_type.as_str()), (digest(&bytes), size(&bytes), "image/png"));
+    assert_eq!(object.producer_version, "figcraft-cloud test");
+    assert_eq!(store.get_object(&object.object_key, 1024).await?, bytes);
+    assert_eq!(store.get_object(&reserved.reservation.staging_key, 1024).await, Err(ObjectStoreError::NotFound));
+
+    // Completing again returns the same object without touching the store.
+    let Completion::Promoted { object: again, reused, .. } = complete(&pool, &store, tenant, id).await?? else {
+        return Err("re-completion should return the promoted object".into());
+    };
+    assert!(reused);
+    assert_eq!(again, object);
+
+    // Identical content in a second reservation reuses the verified object.
+    let duplicate = reserve_asset(&pool, &store, &bytes, size(&bytes)).await?;
+    assert!(client.put(&duplicate.url).body(bytes.clone()).send().await?.status().is_success());
+    let Completion::Promoted { reservation: deduped, object: shared, reused } = complete(&pool, &store, tenant, duplicate.reservation.id).await??
+    else {
+        return Err("duplicate content should promote".into());
+    };
+    assert!(reused);
+    assert_eq!((shared.id, deduped.object_id), (object.id, Some(object.id)));
+    assert_eq!(store.get_object(&duplicate.reservation.staging_key, 1024).await, Err(ObjectStoreError::NotFound));
+
+    // Bytes that do not hash to the reservation are rejected and the staging object deleted.
+    let claimed = unique_bytes("claimed");
+    let mut altered = claimed.clone();
+    if let Some(first) = altered.first_mut() {
+        *first ^= 1;
+    }
+    let wrong = reserve_asset(&pool, &store, &claimed, size(&claimed)).await?;
+    assert!(client.put(&wrong.url).body(altered).send().await?.status().is_success());
+    let outcome = complete(&pool, &store, tenant, wrong.reservation.id).await??;
+    assert!(
+        matches!(&outcome, Completion::Rejected { reason: Rejection::ChecksumMismatch, reservation } if reservation.state == ReservationState::Rejected && reservation.object_id.is_none())
+    );
+    assert_eq!(store.get_object(&wrong.reservation.staging_key, 1024).await, Err(ObjectStoreError::NotFound));
+    assert_eq!(store.get_object(&keys::asset(tenant, &digest(&claimed)), 1024).await, Err(ObjectStoreError::NotFound));
+    // A rejected reservation stays rejected even once the right bytes appear.
+    assert!(client.put(&wrong.url).body(claimed.clone()).send().await?.status().is_success());
+    assert_eq!(complete(&pool, &store, tenant, wrong.reservation.id).await?, Err(UploadError::InvalidState));
+    store.delete_object(&wrong.reservation.staging_key).await?;
+
+    // Oversize and short uploads are rejected on size; the read is bounded by the reservation.
+    for (label, uploaded_extra) in [("oversize", 1usize), ("short", 0usize)] {
+        let body = unique_bytes(label);
+        let declared = if uploaded_extra == 1 { size(&body) - 1 } else { size(&body) + 1 };
+        let reservation = reserve_asset(&pool, &store, &body, declared).await?;
+        assert!(client.put(&reservation.url).body(body).send().await?.status().is_success());
+        let outcome = complete(&pool, &store, tenant, reservation.reservation.id).await??;
+        assert!(matches!(outcome, Completion::Rejected { reason: Rejection::SizeMismatch, .. }), "{label}: {outcome:?}");
+        assert_eq!(store.get_object(&reservation.reservation.staging_key, 1024).await, Err(ObjectStoreError::NotFound));
+    }
+
+    // An expired reservation cannot be completed, before or after the sweep.
+    let late_bytes = unique_bytes("late");
+    let late = reserve_asset(&pool, &store, &late_bytes, size(&late_bytes)).await?;
+    assert!(client.put(&late.url).body(late_bytes.clone()).send().await?.status().is_success());
+    backdate(&pool, late.reservation.id).await?;
+    assert_eq!(complete(&pool, &store, tenant, late.reservation.id).await?, Err(UploadError::Expired));
+    let mut sweep = begin_tenant_transaction(&pool, tenant).await.map_err(|error| format!("begin tenant: {error:?}"))?;
+    let expired = expire_reservations(&mut sweep, MAX_EXPIRE_BATCH).await?;
+    sweep.commit().await?;
+    assert!(expired.contains(&late.reservation.staging_key), "{expired:?}");
+    for key in &expired {
+        store.delete_object(key).await?;
+    }
+    assert_eq!(complete(&pool, &store, tenant, late.reservation.id).await?, Err(UploadError::Expired));
+    assert_eq!(store.get_object(&keys::asset(tenant, &digest(&late_bytes)), 1024).await, Err(ObjectStoreError::NotFound));
+
+    // A store outage changes nothing, so the completion can be retried.
+    let retry_bytes = unique_bytes("retry");
+    let retry = reserve_asset(&pool, &store, &retry_bytes, size(&retry_bytes)).await?;
+    assert!(client.put(&retry.url).body(retry_bytes.clone()).send().await?.status().is_success());
+    let unreachable = ObjectStore::new(&ObjectStoreSettings { endpoint: "http://127.0.0.1:9".into(), ..settings.clone() })?;
+    assert_eq!(complete(&pool, &unreachable, tenant, retry.reservation.id).await?, Err(UploadError::Store(ObjectStoreError::Unreachable)));
+    assert_eq!(state_of(&pool, retry.reservation.id).await?, Some(ReservationState::Reserved));
+    let Completion::Promoted { object: retried, .. } = complete(&pool, &store, tenant, retry.reservation.id).await?? else {
+        return Err("retry should promote".into());
+    };
+
+    // Kinds whose final key needs identities a reservation lacks are not completed here.
+    let mut snapshot_scope = begin_tenant_transaction(&pool, tenant).await.map_err(|error| format!("begin tenant: {error:?}"))?;
+    let snapshot = reserve_upload(
+        &mut snapshot_scope,
+        &store,
+        PRINCIPAL.parse()?,
+        ObjectKind::Snapshot,
+        [3; 32],
+        3,
+        "application/vnd.figcraft.snapshot",
+        Duration::from_secs(60),
+    )
+    .await?;
+    assert_eq!(complete_upload(&mut snapshot_scope, &store, snapshot.reservation.id, "figcraft-cloud test").await, Err(UploadError::UnsupportedKind));
+    snapshot_scope.rollback().await?;
+
+    store.delete_object(&object.object_key).await?;
+    store.delete_object(&retried.object_key).await?;
     pool.close().await;
     Ok(())
 }

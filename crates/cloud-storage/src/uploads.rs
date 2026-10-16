@@ -13,6 +13,12 @@
 //! into `expired` in bounded batches and hands back their staging keys for deletion; bucket
 //! lifecycle expiry of the staging prefix (S3-014) is the backstop for keys a sweep never reaches.
 //!
+//! [`complete_upload`] locks a reservation, reads the staged bytes back bounded by the expected
+//! size, and either rejects the reservation (deleting the staging object) or promotes the bytes to
+//! their content-addressed key as a verified object, reusing an identical verified object when the
+//! tenant already has one. This implementation verifies synchronously, so reservations go straight
+//! from `reserved` to `promoted` or `rejected` and the `completed` state is unused.
+//!
 //! `TIMESTAMPTZ` columns are only read as whole Unix seconds, because no `chrono`/`time` SQLx
 //! feature is enabled in this crate.
 
@@ -20,9 +26,12 @@ use std::fmt;
 use std::time::Duration;
 
 use figcraft_cloud_domain::{PrincipalId, TenantId, Uuid};
+use sha2::{Digest, Sha256};
 
 use crate::TenantTransaction;
-use crate::object_metadata::{ObjectKind, keys};
+use crate::object_metadata::{
+    NewObject, ObjectKind, ObjectRecord, ObjectRepositoryError, Rejection, Verification, get_object, keys, register_object, verify_object,
+};
 use crate::objects::{MAX_PRESIGN_TTL, ObjectStore, ObjectStoreError};
 
 /// Largest image or binary asset a client may upload (S3-009 decodes images within S3-013 pixel
@@ -79,6 +88,21 @@ pub enum UploadError {
     InvalidTtl,
     /// The principal already holds the maximum number of open reservations.
     TooManyReservations,
+    /// The producer version is empty, too long or not printable ASCII.
+    InvalidProducerVersion,
+    /// No such reservation in the transaction's tenant.
+    NotFound,
+    /// The reservation's expiry has passed.
+    Expired,
+    /// The reservation's state does not permit completion (it was rejected).
+    InvalidState,
+    /// Nothing is staged under the reservation's key yet; nothing changed.
+    NotUploaded,
+    /// The final key is held by an object that is not verified and cannot be filled (rejected or
+    /// being deleted), or by a row that disagrees with the reservation.
+    ObjectConflict,
+    /// The final key's read-back did not match the bytes just written.
+    VerificationFailed,
     Conflict,
     Constraint,
     Database,
@@ -307,6 +331,208 @@ pub async fn expire_reservations(transaction: &mut TenantTransaction<'_>, limit:
     .map_err(database_error)
 }
 
+/// Longest producer version recorded on an object (the `objects.producer_version` bound).
+const MAX_PRODUCER_VERSION_CHARS: usize = 64;
+
+fn object_error(error: ObjectRepositoryError) -> UploadError {
+    match error {
+        ObjectRepositoryError::Conflict => UploadError::Conflict,
+        ObjectRepositoryError::Constraint => UploadError::Constraint,
+        ObjectRepositoryError::Database => UploadError::Database,
+        ObjectRepositoryError::CorruptRow => UploadError::CorruptRow,
+        ObjectRepositoryError::InvalidState => UploadError::ObjectConflict,
+        ObjectRepositoryError::Store(error) => UploadError::Store(error),
+    }
+}
+
+/// A producer version: 1–64 printable ASCII characters (spaces allowed inside).
+#[must_use]
+pub fn valid_producer_version(value: &str) -> bool {
+    (1..=MAX_PRODUCER_VERSION_CHARS).contains(&value.len())
+        && value.bytes().all(|byte| byte == b' ' || byte.is_ascii_graphic())
+        && !value.starts_with(' ')
+        && !value.ends_with(' ')
+}
+
+/// The result of [`complete_upload`]. Both outcomes changed the reservation: commit them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum Completion {
+    /// The bytes matched and the reservation now points at a verified object. `reused` is true
+    /// when no bytes were written by this call: an identical verified object already existed, or
+    /// the reservation had already been promoted.
+    Promoted { reservation: UploadReservation, object: ObjectRecord, reused: bool },
+    /// The staged bytes did not match the reservation; the reservation is `rejected` and the
+    /// staging object deleted.
+    Rejected { reservation: UploadReservation, reason: Rejection },
+}
+
+/// Complete the transaction tenant's reservation `id`: read the staged bytes back within the
+/// expected size, check size and SHA-256, and promote them to their content-addressed key.
+///
+/// - Another tenant's or an unknown reservation is `NotFound`; an expired one is `Expired`; a
+///   rejected one is `InvalidState`. Completing a promoted reservation again returns its object.
+/// - Nothing staged yet is `NotUploaded` and changes nothing, so the client may still upload
+///   until the reservation expires.
+/// - Mismatched, oversize or short bytes reject the reservation and delete the staging object.
+/// - Matching bytes reuse a verified object with the same tenant, kind and digest when one exists;
+///   otherwise they are written to the final key, registered and verified by reading the final key
+///   back. The reservation becomes `promoted` and the staging object is deleted.
+///
+/// Only assets complete today: snapshot, library and plugin keys need a document, library or
+/// plugin identity and version that a reservation does not carry, so those kinds are
+/// `UnsupportedKind` here and get their own completion in S3-008, S3-010 and S3-011.
+///
+/// The reservation row stays locked until the transaction ends, so concurrent completions of one
+/// reservation serialize. On any `Err` roll back: staging deletion happens last, so a failure
+/// leaves the reservation `reserved` and its bytes in place for a retry. A concurrent completion
+/// of identical content in another reservation can make this one `Conflict`; retrying then reuses
+/// the object it created. Callers must have authorized the completing principal against
+/// [`UploadReservation::principal_id`].
+pub async fn complete_upload(
+    transaction: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    id: Uuid,
+    producer_version: &str,
+) -> Result<Completion, UploadError> {
+    if !valid_producer_version(producer_version) {
+        return Err(UploadError::InvalidProducerVersion);
+    }
+    let row: Option<ReservationRow> =
+        sqlx::query_as(concat!("SELECT ", columns!(), " FROM upload_reservations WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE"))
+            .bind(transaction.tenant_id().to_string())
+            .bind(id.to_string())
+            .fetch_optional(transaction.connection())
+            .await
+            .map_err(database_error)?;
+    let reserved = row.map(reservation).transpose()?.ok_or(UploadError::NotFound)?;
+    match reserved.state {
+        ReservationState::Promoted => {
+            let object_id = reserved.object_id.ok_or(UploadError::CorruptRow)?;
+            let object = get_object(transaction, object_id).await.map_err(object_error)?.ok_or(UploadError::CorruptRow)?;
+            return Ok(Completion::Promoted { reservation: reserved, object, reused: true });
+        }
+        ReservationState::Expired => return Err(UploadError::Expired),
+        ReservationState::Rejected | ReservationState::Completed => return Err(UploadError::InvalidState),
+        ReservationState::Reserved if reserved.expired => return Err(UploadError::Expired),
+        ReservationState::Reserved => {}
+    }
+    if reserved.kind != ObjectKind::Asset {
+        return Err(UploadError::UnsupportedKind);
+    }
+    let expected = u64::try_from(reserved.expected_size).map_err(|_| UploadError::CorruptRow)?;
+    let rejection = match store.get_object(&reserved.staging_key, expected).await {
+        Ok(bytes) if u64::try_from(bytes.len()).ok() != Some(expected) => Err(Rejection::SizeMismatch),
+        Ok(bytes) if <[u8; 32]>::from(Sha256::digest(&bytes)) != reserved.expected_sha256 => Err(Rejection::ChecksumMismatch),
+        Ok(bytes) => Ok(bytes),
+        Err(ObjectStoreError::NotFound) => return Err(UploadError::NotUploaded),
+        Err(ObjectStoreError::TooLarge) => Err(Rejection::SizeMismatch),
+        Err(error) => return Err(UploadError::Store(error)),
+    };
+    let bytes = match rejection {
+        Ok(bytes) => bytes,
+        Err(reason) => {
+            let reservation = finish(transaction, &reserved, "rejected", None).await?;
+            store.delete_object(&reserved.staging_key).await.map_err(UploadError::Store)?;
+            return Ok(Completion::Rejected { reservation, reason });
+        }
+    };
+    let (object, reused) = promote_asset(transaction, store, &reserved, bytes, producer_version).await?;
+    let reservation = finish(transaction, &reserved, "promoted", Some(object.id)).await?;
+    store.delete_object(&reserved.staging_key).await.map_err(UploadError::Store)?;
+    Ok(Completion::Promoted { reservation, object, reused })
+}
+
+/// Move a locked `reserved` reservation to `rejected` or `promoted`.
+async fn finish(
+    transaction: &mut TenantTransaction<'_>,
+    reserved: &UploadReservation,
+    state: &str,
+    object_id: Option<Uuid>,
+) -> Result<UploadReservation, UploadError> {
+    let row: ReservationRow = sqlx::query_as(concat!(
+        "UPDATE upload_reservations SET state = $3, object_id = $4::uuid, completed_at = now() ",
+        "WHERE tenant_id = $1::uuid AND id = $2::uuid AND state = 'reserved' RETURNING ",
+        columns!()
+    ))
+    .bind(transaction.tenant_id().to_string())
+    .bind(reserved.id.to_string())
+    .bind(state)
+    .bind(object_id.map(|id| id.to_string()))
+    .fetch_one(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    reservation(row)
+}
+
+/// Find or create the verified asset object for `bytes`, whose size and digest already match
+/// `reserved`. Returns the object and whether it already existed verified.
+async fn promote_asset(
+    transaction: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    reserved: &UploadReservation,
+    bytes: Vec<u8>,
+    producer_version: &str,
+) -> Result<(ObjectRecord, bool), UploadError> {
+    let tenant = transaction.tenant_id();
+    // Content-addressed dedupe: identical verified bytes are stored once per tenant and kind.
+    let existing: Option<String> = sqlx::query_scalar(concat!(
+        "SELECT id::text FROM objects WHERE tenant_id = $1::uuid AND kind = $2 AND sha256 = $3 AND size_bytes = $4 ",
+        "AND state = 'verified' AND bucket = $5 ORDER BY created_at, id LIMIT 1"
+    ))
+    .bind(tenant.to_string())
+    .bind(reserved.kind.as_str())
+    .bind(reserved.expected_sha256.as_slice())
+    .bind(reserved.expected_size)
+    .bind(store.bucket_name())
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    if let Some(existing) = existing {
+        let existing = existing.parse().map_err(|_| UploadError::CorruptRow)?;
+        let object = get_object(transaction, existing).await.map_err(object_error)?.ok_or(UploadError::CorruptRow)?;
+        return Ok((object, true));
+    }
+
+    // A live row may already hold the final key without being verified: a pending one (written by
+    // another path) is filled and verified here; a rejected or deleting one blocks the key until
+    // garbage collection (S3-015) retires it.
+    let object_key = keys::asset(tenant, &reserved.expected_sha256);
+    let live: Option<(String, String, i64)> = sqlx::query_as(concat!(
+        "SELECT id::text, state, size_bytes FROM objects WHERE tenant_id = $1::uuid AND bucket = $2 AND object_key = $3 ",
+        "AND state <> 'deleted' FOR UPDATE"
+    ))
+    .bind(tenant.to_string())
+    .bind(store.bucket_name())
+    .bind(&object_key)
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    let object_id = match live {
+        Some((id, state, size_bytes)) if state == "pending" && size_bytes == reserved.expected_size => {
+            id.parse().map_err(|_| UploadError::CorruptRow)?
+        }
+        Some(_) => return Err(UploadError::ObjectConflict),
+        None => {
+            let object = NewObject {
+                id: Uuid::new_v4(),
+                kind: reserved.kind,
+                object_key: object_key.clone(),
+                sha256: reserved.expected_sha256,
+                size_bytes: reserved.expected_size,
+                media_type: reserved.media_type.clone(),
+                producer_version: producer_version.to_string(),
+            };
+            register_object(transaction, store.bucket_name(), &object).await.map_err(object_error)?.id
+        }
+    };
+    store.put_object(&object_key, bytes, &reserved.media_type).await.map_err(UploadError::Store)?;
+    match verify_object(transaction, store, object_id).await.map_err(object_error)? {
+        Some(Verification::Verified(object)) => Ok((object, false)),
+        Some(Verification::Rejected(..)) => Err(UploadError::VerificationFailed),
+        None => Err(UploadError::CorruptRow),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -383,5 +609,23 @@ mod tests {
         assert_eq!(reservation_ttl(Duration::from_secs(300)), Ok(Duration::from_secs(300)));
         assert_eq!(reservation_ttl(MAX_PRESIGN_TTL + Duration::from_secs(1)), Ok(MAX_PRESIGN_TTL));
         assert_eq!(reservation_ttl(Duration::MAX), Ok(MAX_PRESIGN_TTL));
+    }
+
+    #[test]
+    fn producer_versions_are_bounded_printable_ascii() {
+        for version in ["figcraft-cloud 0.6.0", "v", &"v".repeat(64)] {
+            assert!(valid_producer_version(version), "{version}");
+        }
+        let mut junk: Vec<String> =
+            ["", " ", " v", "v ", "v\n", "v\t1", "v\0", "é", &"v".repeat(65)].iter().map(|value| (*value).to_string()).collect();
+        junk.extend(
+            (0u8..=255)
+                .filter(|byte| !byte.is_ascii_graphic() && *byte != b' ')
+                .map(|byte| String::from_utf8_lossy(&[b'v', byte, b'v']).into_owned()),
+        );
+        junk.push("v".repeat(100_000));
+        for version in &junk {
+            assert!(!valid_producer_version(version), "{version:?}");
+        }
     }
 }
