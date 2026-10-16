@@ -12,6 +12,7 @@ pub mod events;
 pub mod external_mappings;
 pub mod idempotency;
 pub mod legacy_scan;
+pub mod libraries;
 pub mod metadata;
 pub mod migration_plan;
 pub mod object_metadata;
