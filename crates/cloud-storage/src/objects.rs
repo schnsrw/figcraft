@@ -22,6 +22,11 @@ pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// How long a signature this client sends for itself stays valid.
 const SELF_SIGNED_TTL: Duration = Duration::from_secs(60);
 const MAX_SETTING_BYTES: usize = 2048;
+/// Longest object key this client signs (S3 allows 1024 bytes).
+pub const MAX_KEY_BYTES: usize = 1024;
+/// Largest body this client uploads or downloads in one request; larger objects need multipart
+/// transfer, which is not implemented.
+pub const MAX_SINGLE_TRANSFER_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Fixed, non-leaking categories for object-store failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -36,6 +41,12 @@ pub enum ObjectStoreError {
     Unauthorized,
     /// The configured bucket does not exist.
     BucketMissing,
+    /// The object key is not one this client will sign.
+    InvalidKey,
+    /// The object does not exist.
+    NotFound,
+    /// The object is larger than the caller's bound.
+    TooLarge,
     /// Any other response.
     Unexpected,
 }
@@ -122,6 +133,95 @@ impl ObjectStore {
             _ => Err(ObjectStoreError::Unexpected),
         }
     }
+}
+
+impl ObjectStore {
+    /// Upload `body` to `key`, replacing nothing the caller has not already decided to replace:
+    /// immutability is enforced by the object metadata repository, not by the store.
+    pub async fn put_object(&self, key: &str, body: Vec<u8>, media_type: &str) -> Result<(), ObjectStoreError> {
+        let url = self.signed_object_url(key, |bucket, credentials| bucket.put_object(Some(credentials), key).sign(SELF_SIGNED_TTL))?;
+        if u64::try_from(body.len()).map_or(true, |length| length > MAX_SINGLE_TRANSFER_BYTES) {
+            return Err(ObjectStoreError::TooLarge);
+        }
+        if media_type.is_empty() || media_type.len() > 255 || !media_type.bytes().all(|byte| byte.is_ascii_graphic()) {
+            return Err(ObjectStoreError::InvalidConfig);
+        }
+        let response = self
+            .client
+            .put(url.as_str())
+            .header(reqwest::header::CONTENT_TYPE, media_type)
+            .timeout(transfer_timeout(body.len()))
+            .body(body)
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::Unreachable)?;
+        status_result(response.status().as_u16())
+    }
+
+    /// Download `key`, refusing an object larger than `max_bytes` before and while reading it.
+    pub async fn get_object(&self, key: &str, max_bytes: u64) -> Result<Vec<u8>, ObjectStoreError> {
+        let url = self.signed_object_url(key, |bucket, credentials| bucket.get_object(Some(credentials), key).sign(SELF_SIGNED_TTL))?;
+        let max_bytes = max_bytes.min(MAX_SINGLE_TRANSFER_BYTES);
+        let mut response = self
+            .client
+            .get(url.as_str())
+            .timeout(transfer_timeout(usize::try_from(max_bytes).unwrap_or(usize::MAX)))
+            .send()
+            .await
+            .map_err(|_| ObjectStoreError::Unreachable)?;
+        status_result(response.status().as_u16())?;
+        if response.content_length().is_some_and(|length| length > max_bytes) {
+            return Err(ObjectStoreError::TooLarge);
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|_| ObjectStoreError::Unreachable)? {
+            let total = u64::try_from(body.len().saturating_add(chunk.len())).unwrap_or(u64::MAX);
+            if total > max_bytes {
+                return Err(ObjectStoreError::TooLarge);
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
+    }
+
+    /// Delete `key`. Deleting a missing key succeeds, as S3 does.
+    pub async fn delete_object(&self, key: &str) -> Result<(), ObjectStoreError> {
+        let url = self.signed_object_url(key, |bucket, credentials| bucket.delete_object(Some(credentials), key).sign(SELF_SIGNED_TTL))?;
+        let response = self.client.delete(url.as_str()).timeout(REQUEST_TIMEOUT).send().await.map_err(|_| ObjectStoreError::Unreachable)?;
+        status_result(response.status().as_u16())
+    }
+
+    /// Validate `key` and sign. `rusty-s3` unwraps the object URL internally, so the URL is built
+    /// fallibly first from the same key; with a valid key the internal unwrap cannot fail.
+    fn signed_object_url(&self, key: &str, sign: impl FnOnce(&Bucket, &Credentials) -> url::Url) -> Result<url::Url, ObjectStoreError> {
+        if !valid_key(key) || self.bucket.object_url(key).is_err() {
+            return Err(ObjectStoreError::InvalidKey);
+        }
+        Ok(sign(&self.bucket, &self.credentials))
+    }
+}
+
+/// Object keys FigCraft writes: 1–1024 bytes of lowercase letters, digits, `/`, `.`, `-` and `_`,
+/// with no empty, `.` or `..` segment and no leading or trailing `/`.
+#[must_use]
+pub fn valid_key(key: &str) -> bool {
+    (1..=MAX_KEY_BYTES).contains(&key.len())
+        && key.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'/' | b'.' | b'-' | b'_'))
+        && key.split('/').all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn status_result(status: u16) -> Result<(), ObjectStoreError> {
+    match status {
+        200..=299 => Ok(()),
+        401 | 403 => Err(ObjectStoreError::Unauthorized),
+        404 => Err(ObjectStoreError::NotFound),
+        _ => Err(ObjectStoreError::Unexpected),
+    }
+}
+
+/// The request timeout plus one second per MiB transferred, so large bodies on slow links finish.
+fn transfer_timeout(bytes: usize) -> Duration {
+    REQUEST_TIMEOUT.saturating_add(Duration::from_secs(u64::try_from(bytes / (1024 * 1024)).unwrap_or(u64::MAX)))
 }
 
 fn http_client() -> Result<reqwest::Client, ObjectStoreError> {
@@ -243,6 +343,26 @@ mod tests {
         let settings = settings();
         let shown = format!("{settings:?} {:?}", ObjectStore::new(&settings).unwrap());
         assert!(!shown.contains("secret-value-123") && !shown.contains("FCaccess"), "{shown}");
+    }
+
+    #[test]
+    fn signs_only_well_formed_keys() {
+        for key in ["tenants/a/assets/ab12", "tenants/1-2/snapshots/3-ab.bin", "a", "a_b.c-d"] {
+            assert!(valid_key(key), "{key}");
+        }
+        for key in ["", "/a", "a/", "a//b", "a/./b", "a/../b", "..", "A", "a b", "a?b", "a#b", "a%2f", "é", &"a".repeat(MAX_KEY_BYTES + 1)] {
+            assert!(!valid_key(key), "{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn refuses_bad_keys_and_bodies_before_sending() {
+        let store = ObjectStore::new(&ObjectStoreSettings { endpoint: "http://127.0.0.1:9".into(), ..settings() }).unwrap();
+        assert_eq!(store.get_object("../x", 1).await, Err(ObjectStoreError::InvalidKey));
+        assert_eq!(store.put_object("a/../b", vec![1], "image/png").await, Err(ObjectStoreError::InvalidKey));
+        assert_eq!(store.delete_object("a//b").await, Err(ObjectStoreError::InvalidKey));
+        assert_eq!(store.put_object("a/b", vec![1], "").await, Err(ObjectStoreError::InvalidConfig));
+        assert_eq!(store.put_object("a/b", vec![1], "image/png").await, Err(ObjectStoreError::Unreachable));
     }
 
     #[tokio::test]

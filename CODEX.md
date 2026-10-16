@@ -129,8 +129,8 @@ the continuation point, a blocker or a major decision changes.
    S3 is in progress: S3-001 adds `figcraft-cloud-storage::objects` (`rusty-s3` signing over
    `reqwest`/Rustls/ring; see `docs/saas/object-store-client-decision.md`) and an object-store
    readiness check; S3-002 adds the object, reference and upload-reservation tables
-   (`20261017000001_objects.sql`). Continue with S3-003 (object metadata repository and checksum
-   verification).
+   (`20261017000001_objects.sql`). S3-003 adds bounded object I/O and `object_metadata` (keys,
+   register, read-back `verify_object`). Continue with S3-004..S3-007, S3-013, S3-014, S3-017.
    Open S2 follow-ups: a typed retryable/timeout error variant (timeouts and lost connections all
    map to `Database` today), expiry/takeover of stale pending idempotency keys, and snapshot
    restore in `DurableRoom::open` once S3 objects exist.

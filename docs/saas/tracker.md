@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (2/20) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 in progress (3/20) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -20,7 +20,7 @@ the same commit as the completed task.
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
-| S3 Object storage and migration | in progress | 2 / 20 | Verified object storage and repeatable migration |
+| S3 Object storage and migration | in progress | 3 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -543,7 +543,20 @@ the same commit as the completed task.
   segments, short digests, empty objects, unknown kinds, unverified `verified` rows, duplicate live
   keys, cross-tenant references, a foreign staging key, a non-`PUT` method, past expiry and
   object-less or unknown-object promotion are refused; the upgrade probe covers the new version.
-- [ ] **S3-003** Implement tenant-scoped immutable object metadata and checksum verification.
+- [x] **S3-003** Implement tenant-scoped immutable object metadata and checksum verification.
+  Evidence: `figcraft-cloud-storage::objects` gains bounded `put_object`, `get_object` (refused
+  past the caller's bound by `Content-Length` and while streaming) and `delete_object`, signing
+  only keys of lowercase letters, digits and `/._-` without empty, `.` or `..` segments; because
+  `rusty-s3` unwraps the object URL internally, the URL is built fallibly from the same key first.
+  `object_metadata::keys` builds the documented tenant-scoped, content-addressed layout.
+  `register_object` records a `pending` row; `verify_object` locks the row, reads the bytes back
+  and marks it `verified` only when size and SHA-256 match, otherwise `rejected` (`Missing`,
+  `SizeMismatch`, `ChecksumMismatch`). Verified objects are not re-read, rejected or deleted ones
+  are `InvalidState`, and a store failure that says nothing about the bytes leaves the row
+  `pending` (`Store`). The PostgreSQL + SeaweedFS probe covers a verified object and idempotent
+  re-verify, altered, short, long and missing bytes, a rejected object staying rejected after
+  correct bytes appear, an unreachable store, duplicate live keys, a foreign-prefix key and
+  cross-tenant invisibility.
 - [ ] **S3-004** Implement staging upload reservations with method, key, size, type and expiry.
 - [ ] **S3-005** Implement upload completion, read-back verification and promotion.
 - [ ] **S3-006** Implement authorized, short-lived presigned downloads.
@@ -951,3 +964,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S2-020/S2-GATE: added connection-kill, lock-wait, lost-acknowledgement, timeout, idempotency-boundary and room-level failure injection; the end-to-end create/edit/restart/restore gate probe; and a previous-schema upgrade probe. S2 complete (21/21) and its gate passes. |
 | 2026-10-17 | S3-001: chose `rusty-s3` + `reqwest` (Rustls/ring) for S3-compatible storage, added the validated object-store client and a signed `HeadBucket` readiness check. S3 reaches 1/20. |
 | 2026-10-17 | S3-002: added object, object-reference and upload-reservation tables with tenant-prefix key constraints; readiness advanced to schema version 20261017000001. S3 reaches 2/20. |
+| 2026-10-17 | S3-003: added bounded object I/O, the content-addressed key layout and read-back SHA-256 verification of object metadata. S3 reaches 3/20. |
