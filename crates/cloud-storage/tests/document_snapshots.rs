@@ -93,7 +93,7 @@ async fn store(
     state: &SessionState,
 ) -> Result<Result<StoredSnapshot, SnapshotStoreError>, Box<dyn std::error::Error>> {
     let mut transaction = scoped(pool, TENANT).await?;
-    let stored = store_snapshot(&mut transaction, objects, document, state, PRODUCER).await;
+    let stored = store_snapshot(pool, &mut transaction, objects, document, state, PRODUCER).await;
     if stored.is_ok() {
         transaction.commit().await?;
     } else {
@@ -208,18 +208,18 @@ async fn snapshots_are_stored_verified_and_restored_newest_first() -> Result<(),
     let restore = restore_latest_snapshot(&mut other, &objects, document).await?;
     assert_eq!((restore.restored, restore.skipped), (None, Vec::new()));
     assert_eq!(get_object(&mut other, at_four.object.id).await?, None);
-    assert_eq!(store_snapshot(&mut other, &objects, document, &state(1)?, PRODUCER).await.map(|_| ()), Err(SnapshotStoreError::NotFound));
+    assert_eq!(store_snapshot(&pool, &mut other, &objects, document, &state(1)?, PRODUCER).await.map(|_| ()), Err(SnapshotStoreError::NotFound));
     other.rollback().await?;
 
     // Bad input is refused without touching the store.
     let mut transaction = scoped(&pool, TENANT).await?;
-    assert_eq!(store_snapshot(&mut transaction, &objects, document, &two, "").await.map(|_| ()), Err(SnapshotStoreError::InvalidInput));
+    assert_eq!(store_snapshot(&pool, &mut transaction, &objects, document, &two, "").await.map(|_| ()), Err(SnapshotStoreError::InvalidInput));
     assert_eq!(
-        store_snapshot(&mut transaction, &objects, document, &state(u64::MAX)?, PRODUCER).await.map(|_| ()),
+        store_snapshot(&pool, &mut transaction, &objects, document, &state(u64::MAX)?, PRODUCER).await.map(|_| ()),
         Err(SnapshotStoreError::InvalidInput)
     );
     assert_eq!(
-        store_snapshot(&mut transaction, &objects, CloudDocumentId::random(), &two, PRODUCER).await.map(|_| ()),
+        store_snapshot(&pool, &mut transaction, &objects, CloudDocumentId::random(), &two, PRODUCER).await.map(|_| ()),
         Err(SnapshotStoreError::NotFound)
     );
     transaction.rollback().await?;

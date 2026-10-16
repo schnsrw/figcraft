@@ -141,7 +141,7 @@ async fn publish(
     label: &str,
 ) -> TestResult<Result<PublishedVersion, LibraryError>> {
     let mut transaction = begin(pool).await?;
-    let published = publish_library_version(&mut transaction, store, library, principal(publisher), archive(label)).await;
+    let published = publish_library_version(pool, &mut transaction, store, library, principal(publisher), archive(label)).await;
     if published.is_ok() {
         transaction.commit().await?;
     } else {
@@ -213,7 +213,7 @@ async fn publishing_validates_sequences_references_and_authorizes() -> TestResul
         (png, Rejection::MediaMismatch),
         (archive_without_document(), Rejection::MissingMember),
     ] {
-        let refused = publish_library_version(&mut scoped, &store, library, principal(TEAM_EDITOR), bytes).await;
+        let refused = publish_library_version(&pool, &mut scoped, &store, library, principal(TEAM_EDITOR), bytes).await;
         assert!(matches!(refused, Err(LibraryError::Invalid(_))), "{refused:?}");
         if rejection != Rejection::MediaMismatch {
             assert_eq!(refused, Err(LibraryError::Invalid(rejection)));
@@ -221,7 +221,10 @@ async fn publishing_validates_sequences_references_and_authorizes() -> TestResul
     }
     let mut truncated = archive("truncated");
     truncated.truncate(truncated.len() / 2);
-    assert!(matches!(publish_library_version(&mut scoped, &store, library, principal(TEAM_EDITOR), truncated).await, Err(LibraryError::Invalid(_))));
+    assert!(matches!(
+        publish_library_version(&pool, &mut scoped, &store, library, principal(TEAM_EDITOR), truncated).await,
+        Err(LibraryError::Invalid(_))
+    ));
     assert_eq!(list_versions(&mut scoped, library, None, MAX_LIBRARY_PAGE).await?.len(), 1);
     scoped.rollback().await?;
 
@@ -278,7 +281,10 @@ async fn publishing_validates_sequences_references_and_authorizes() -> TestResul
     assert_eq!(get_library(&mut foreign, library).await?, None);
     assert_eq!(get_version(&mut foreign, first.version.id).await?, None);
     assert_eq!(list_versions(&mut foreign, library, None, 10).await?, Vec::new());
-    assert_eq!(publish_library_version(&mut foreign, &store, library, principal(OUTSIDER), archive("foreign")).await, Err(LibraryError::NotFound));
+    assert_eq!(
+        publish_library_version(&pool, &mut foreign, &store, library, principal(OUTSIDER), archive("foreign")).await,
+        Err(LibraryError::NotFound)
+    );
     assert_eq!(grant_library_to_team(&mut foreign, library, id(OTHER_TEAM), LibraryRole::Viewer).await, Err(LibraryError::NotFound));
     assert_eq!(record_library_usage(&mut foreign, document(OTHER_DOCUMENT), first.version.id).await, Err(LibraryError::VersionNotFound));
     assert_eq!(reference_count(&mut foreign, first.object.id).await?, ReferenceCount::default());
@@ -342,7 +348,7 @@ async fn usages_upsert_and_archived_libraries_freeze() -> TestResult {
     assert_eq!(archive_library(&mut scoped, library).await?, Change::AlreadyApplied);
     assert_eq!(get_library(&mut scoped, library).await?.map(|library| library.state), Some(LibraryState::Archived));
     assert_eq!(
-        publish_library_version(&mut scoped, &store, library, principal(TENANT_EDITOR), archive("archived")).await,
+        publish_library_version(&pool, &mut scoped, &store, library, principal(TENANT_EDITOR), archive("archived")).await,
         Err(LibraryError::Archived)
     );
     assert_eq!(grant_library_to_team(&mut scoped, library, id(GRANTED_TEAM), LibraryRole::Viewer).await, Err(LibraryError::Archived));
@@ -362,7 +368,10 @@ async fn usages_upsert_and_archived_libraries_freeze() -> TestResult {
         .execute(scoped.connection())
         .await?;
     assert_eq!(archive_library(&mut scoped, library).await, Err(LibraryError::Deleted));
-    assert_eq!(publish_library_version(&mut scoped, &store, library, principal(TENANT_EDITOR), archive("deleted")).await, Err(LibraryError::Deleted));
+    assert_eq!(
+        publish_library_version(&pool, &mut scoped, &store, library, principal(TENANT_EDITOR), archive("deleted")).await,
+        Err(LibraryError::Deleted)
+    );
     assert_eq!(record_library_usage(&mut scoped, consumer, v1).await, Err(LibraryError::Deleted));
     scoped.rollback().await?;
 
@@ -409,14 +418,14 @@ async fn concurrent_publishers_take_consecutive_versions() -> TestResult {
     // Ordered: the second publisher blocks on the first's library row lock and, once the first
     // commits, takes the next number.
     let mut holder = begin(&pool).await?;
-    let held = publish_library_version(&mut holder, &store, library, principal(TEAM_EDITOR), archive("holder")).await?;
+    let held = publish_library_version(&pool, &mut holder, &store, library, principal(TEAM_EDITOR), archive("holder")).await?;
     let (pid_sender, pid_receiver) = tokio::sync::oneshot::channel();
     let (waiter_pool, waiter_store) = (pool.clone(), store.clone());
     let waiting = tokio::spawn(async move {
         let mut waiter = begin(&waiter_pool).await.map_err(|error| error.to_string())?;
         let pid = backend_pid(&mut waiter).await.map_err(|error| error.to_string())?;
         pid_sender.send(pid).map_err(|_| "pid receiver dropped".to_string())?;
-        let result = publish_library_version(&mut waiter, &waiter_store, library, principal(TENANT_ADMIN), archive("waiter")).await;
+        let result = publish_library_version(&waiter_pool, &mut waiter, &waiter_store, library, principal(TENANT_ADMIN), archive("waiter")).await;
         if result.is_ok() {
             waiter.commit().await.map_err(|error| error.to_string())?;
         }

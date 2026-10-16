@@ -4,7 +4,12 @@
 //!
 //! 1. **Resume.** Objects left `deleting` by an earlier, interrupted pass are finished first, so a
 //!    crash between any two steps below is repaired by simply running again.
-//! 2. **Candidates.** [`collectable_objects`] lists unreferenced, unheld objects older than the
+//! 2. **Settle.** Rows still `pending` longer than the minimum age (a writer that registered
+//!    first and then crashed or rolled back, see `document_snapshots` and `libraries`) are
+//!    verified, at most [`MAX_SETTLE_BATCH`] per pass: bytes that are missing or wrong make the
+//!    row `rejected`, intact bytes make it `verified`. Either way an unreferenced row is then an
+//!    ordinary candidate below; settling only makes a referenced or held one's state honest.
+//! 3. **Candidates.** [`collectable_objects`] lists unreferenced, unheld objects older than the
 //!    requested minimum age, which is never lower than [`MIN_COLLECTION_AGE`]. Belt and braces, an
 //!    object is also *protected* (left alone and reported) while anything still names it without a
 //!    reference row: a document snapshot row or current-snapshot pointer, a library or plugin
@@ -13,14 +18,14 @@
 //!    any of the tenant's exports is `queued`/`running`, snapshot and asset objects are not
 //!    collected at all: the export renders the document as of an earlier sequence and may need bytes
 //!    whose references were dropped after it was queued.
-//! 3. **Delete.** Per object, in its own short transaction, [`begin_object_deletion`] re-checks age,
+//! 4. **Delete.** Per object, in its own short transaction, [`begin_object_deletion`] re-checks age,
 //!    references and holds under the row lock and marks it `deleting` (setting `deleted_at`); the
 //!    protections are re-checked in that same transaction. The bucket is versioned, so a plain
 //!    `DELETE` would only add a delete marker: every version and delete marker of the exact key is
 //!    listed (`ListObjectVersions`, bounded) and deleted by version id. Only once a listing comes
 //!    back empty is the row marked `deleted` (`deleted_at` is kept). Any failure leaves the row
 //!    `deleting` for the next pass; deleting a version twice is harmless.
-//! 4. **Staging.** Overdue upload reservations are expired with [`expire_reservations`] and their
+//! 5. **Staging.** Overdue upload reservations are expired with [`expire_reservations`] and their
 //!    staging keys removed, versions included. A key whose removal fails is reported and left to
 //!    the staging lifecycle rule (S3-014), because the reservation no longer names it.
 //!
@@ -34,6 +39,16 @@
 //! (a missing reference row somewhere) would stall the pass behind them; they are all reported in
 //! [`GcReport::protected`] for the reconciliation report (S3-016) to repair.
 //!
+//! # Orphan keys
+//!
+//! [`collect_orphans`] is the backstop for bytes no row names (an upload whose transaction rolled
+//! back before register-first, or an older writer): it lists the tenant prefix with the same
+//! bounded `ListObjectsV2` listing as the reconciliation report and deletes keys with no live
+//! `objects` row whose `LastModified` is older than the minimum age, every version and delete
+//! marker older than that age included. Staging keys of `reserved`/`completed` reservations and
+//! keys an active job mentions are never touched, and versions younger than the minimum age are
+//! kept, so a writer that registers and uploads the same key while the sweep runs keeps its bytes.
+//!
 //! Garbage collection runs as a `jobs` row of kind [`GC_JOB_KIND`] whose input
 //! [`GcOptions::from_job_input`] parses. It acts for the system, never for a tenant member, and
 //! never places or releases retention holds.
@@ -45,11 +60,13 @@ use figcraft_cloud_domain::{TenantId, Uuid};
 use rusty_s3::{Method, S3Action};
 use sqlx::PgPool;
 
+use crate::object_metadata::{ObjectRepositoryError, Rejection, Verification, verify_object};
 use crate::object_references::{
     CollectableObject, DeletionStart, MAX_COLLECTABLE_PAGE, MAX_COLLECTION_AGE, MIN_COLLECTION_AGE, ObjectReferenceError, begin_object_deletion,
     collectable_objects,
 };
 use crate::objects::{ObjectStore, ObjectStoreError, REQUEST_TIMEOUT, valid_key};
+use crate::reconciliation::{ListedObject, list_tenant_keys};
 use crate::uploads::{MAX_EXPIRE_BATCH, expire_reservations};
 use crate::{TenantTransaction, begin_tenant_transaction};
 
@@ -73,6 +90,14 @@ const MAX_XML_NODES: u32 = 32_768;
 const MAX_PAGE_ENTRIES: usize = 1000;
 /// Longest version id accepted from a listing.
 const MAX_VERSION_ID_BYTES: usize = 1024;
+/// The most stuck `pending` rows one pass verifies (each read costs up to the object's size).
+pub const MAX_SETTLE_BATCH: u32 = 100;
+/// Hard ceiling on [`OrphanOptions::max_keys`].
+pub const MAX_ORPHAN_KEYS: u32 = 100_000;
+/// Keys checked against the database per statement in the orphan sweep.
+const ORPHAN_LOOKUP_CHUNK: usize = 1000;
+/// Most protected keys listed in an [`OrphanReport`] (all are counted).
+const MAX_ORPHAN_FINDINGS: usize = 1000;
 /// How long a signature this module sends for itself stays valid.
 const SELF_SIGNED_TTL: Duration = Duration::from_secs(60);
 
@@ -143,6 +168,8 @@ pub enum GcError {
     ActiveJobsUnbounded,
     /// A tenant transaction could not be started.
     Transaction,
+    /// The orphan sweep's tenant listing failed or was malformed; nothing was deleted.
+    Listing,
     Conflict,
     Database,
     CorruptRow,
@@ -259,6 +286,8 @@ pub struct GcReport {
     pub min_age: Duration,
     /// Objects found `deleting` (left by an interrupted pass) that this pass finishes.
     pub resumed: Vec<CollectableObject>,
+    /// Stuck `pending` rows this pass verified (a dry run lists them with no outcome).
+    pub settled: Vec<(Uuid, Option<Settled>)>,
     /// Unprotected candidates this pass marks for deletion; each also ends in `deleted`,
     /// `skipped`, `protected` or `failed` on a real run.
     pub candidates: Vec<CollectableObject>,
@@ -273,6 +302,19 @@ pub struct GcReport {
     pub staging_keys: Vec<String>,
     /// Staging keys whose removal failed; the staging lifecycle rule is their backstop.
     pub staging_failed: Vec<(String, GcFailure)>,
+}
+
+/// What settling a stuck `pending` row did.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Settled {
+    /// The bytes are intact; the row is `verified`.
+    Verified,
+    /// The bytes are missing or wrong; the row is `rejected` and collectable once unreferenced.
+    Rejected(Rejection),
+    /// The row changed state concurrently; nothing was done.
+    Gone,
+    /// The store failed in a way that says nothing about the bytes; the row stays `pending`.
+    Store(ObjectStoreError),
 }
 
 /// Run one garbage-collection pass over `tenant`'s objects in `store`'s bucket. See the module
@@ -291,6 +333,20 @@ pub async fn collect_garbage(pool: &PgPool, store: &ObjectStore, tenant: TenantI
     let mut scoped = begin(pool, tenant).await?;
     check_active_jobs_bounded(&mut scoped).await?;
     report.resumed = deleting_objects(&mut scoped, options.limit).await?;
+    let settle_limit = options.limit.min(MAX_SETTLE_BATCH);
+    let stuck = stuck_pending(&mut scoped, store.bucket_name(), min_age, settle_limit).await?;
+    if options.dry_run {
+        report.settled = stuck.iter().map(|id| (*id, None)).collect();
+    } else {
+        // Settle before reading candidates, in transactions of their own, so the candidate list
+        // below sees the settled states. The read-only transaction is restarted afterwards.
+        scoped.rollback().await.map_err(database_error)?;
+        for id in stuck {
+            let outcome = settle(pool, store, tenant, id).await?;
+            report.settled.push((id, Some(outcome)));
+        }
+        scoped = begin(pool, tenant).await?;
+    }
     let remaining = options.limit.saturating_sub(u32::try_from(report.resumed.len()).unwrap_or(u32::MAX));
     if remaining > 0 {
         // Read a full page so protected objects at the head do not hide collectable ones behind them.
@@ -345,6 +401,42 @@ fn reference_error(error: ObjectReferenceError) -> GcError {
         ObjectReferenceError::CorruptRow => GcError::CorruptRow,
         _ => GcError::Database,
     }
+}
+
+/// Up to `limit` rows of `bucket` still `pending` and created more than `min_age` ago, oldest first.
+async fn stuck_pending(transaction: &mut TenantTransaction<'_>, bucket: &str, min_age: Duration, limit: u32) -> Result<Vec<Uuid>, GcError> {
+    let seconds = i64::try_from(min_age.as_secs()).map_err(|_| GcError::InvalidOptions)?;
+    let rows: Vec<String> = sqlx::query_scalar(concat!(
+        "SELECT id::text FROM objects WHERE tenant_id = $1::uuid AND bucket = $2 AND state = 'pending' ",
+        "AND created_at < now() - $3::bigint * interval '1 second' ORDER BY created_at, id LIMIT $4"
+    ))
+    .bind(transaction.tenant_id().to_string())
+    .bind(bucket)
+    .bind(seconds)
+    .bind(i64::from(limit))
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    rows.iter().map(|id| id.parse().map_err(|_| GcError::CorruptRow)).collect()
+}
+
+/// Verify one stuck `pending` row in a transaction of its own.
+async fn settle(pool: &PgPool, store: &ObjectStore, tenant: TenantId, id: Uuid) -> Result<Settled, GcError> {
+    let mut scoped = begin(pool, tenant).await?;
+    let outcome = match verify_object(&mut scoped, store, id).await {
+        Ok(Some(Verification::Verified(_))) => Settled::Verified,
+        Ok(Some(Verification::Rejected(_, rejection))) => Settled::Rejected(rejection),
+        Ok(None) | Err(ObjectRepositoryError::InvalidState | ObjectRepositoryError::Conflict) => Settled::Gone,
+        Err(ObjectRepositoryError::Store(error)) => Settled::Store(error),
+        Err(ObjectRepositoryError::CorruptRow) => return Err(GcError::CorruptRow),
+        Err(_) => return Err(GcError::Database),
+    };
+    if matches!(outcome, Settled::Verified | Settled::Rejected(_)) {
+        scoped.commit().await.map_err(database_error)?;
+    } else {
+        scoped.rollback().await.map_err(database_error)?;
+    }
+    Ok(outcome)
 }
 
 /// Finish an object an earlier pass marked `deleting`.
@@ -516,6 +608,273 @@ async fn protections(transaction: &mut TenantTransaction<'_>, ids: &[Uuid]) -> R
         .collect()
 }
 
+/// What one orphan sweep may do.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OrphanOptions {
+    /// Report only; delete nothing.
+    pub dry_run: bool,
+    /// Most orphan keys removed, 1..=[`MAX_GC_BATCH`].
+    pub limit: u32,
+    /// Minimum age of a key (and of each version removed); raised to [`MIN_COLLECTION_AGE`] and
+    /// capped at [`MAX_COLLECTION_AGE`].
+    pub min_age: Duration,
+    /// Most keys listed under the tenant prefix, 1..=[`MAX_ORPHAN_KEYS`].
+    pub max_keys: u32,
+}
+
+impl Default for OrphanOptions {
+    /// A dry run at the minimum age: the safe thing to run by accident.
+    fn default() -> Self {
+        Self { dry_run: true, limit: 100, min_age: MIN_COLLECTION_AGE, max_keys: MAX_ORPHAN_KEYS }
+    }
+}
+
+/// Why a listed key with no live `objects` row was left alone.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum OrphanProtection {
+    /// A `reserved` or `completed` upload reservation stages its bytes there.
+    UploadReservation,
+    /// A queued or running job's input mentions the key.
+    ActiveJob,
+    /// A live row for the key appeared between the listing and the deletion.
+    Registered,
+}
+
+/// A key with no live `objects` row, old enough to remove.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OrphanCandidate {
+    pub object_key: String,
+    pub stored_bytes: u64,
+    pub last_modified: String,
+    /// Only `deleted` rows name the key (bytes written again after collection).
+    pub deleted_row: bool,
+}
+
+/// What one orphan sweep did or, for a dry run, would do.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OrphanReport {
+    pub dry_run: bool,
+    /// The minimum age actually applied.
+    pub min_age: Duration,
+    pub keys_listed: u64,
+    /// `false` when the listing stopped at [`OrphanOptions::max_keys`] or the page cap; keys past
+    /// it were not looked at.
+    pub listing_complete: bool,
+    /// Listed keys a live row names (not orphans).
+    pub registered: u64,
+    /// Orphan keys younger than the minimum age, or with no usable `LastModified`.
+    pub too_young: u64,
+    /// Protected orphan keys (at most 1000 listed; `protected_count` counts all).
+    pub protected: Vec<(String, OrphanProtection)>,
+    pub protected_count: u64,
+    /// Orphans this sweep removes (or would remove), at most [`OrphanOptions::limit`].
+    pub orphans: Vec<OrphanCandidate>,
+    /// Orphan keys whose every old version and delete marker is gone.
+    pub removed: Vec<String>,
+    /// Orphan keys that still hold versions younger than the minimum age (a writer reused the key).
+    pub kept_young_versions: Vec<String>,
+    pub versions_removed: u64,
+    pub failed: Vec<(String, GcFailure)>,
+}
+
+/// What the database says about one listed key.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct KeyStatus {
+    live_row: bool,
+    deleted_row: bool,
+    reservation: bool,
+    active_job: bool,
+}
+
+impl KeyStatus {
+    const fn protection(self) -> Option<OrphanProtection> {
+        if self.live_row {
+            Some(OrphanProtection::Registered)
+        } else if self.reservation {
+            Some(OrphanProtection::UploadReservation)
+        } else if self.active_job {
+            Some(OrphanProtection::ActiveJob)
+        } else {
+            None
+        }
+    }
+}
+
+/// Remove bucket keys under `tenant`'s prefix that no live `objects` row names. See the module
+/// documentation ("Orphan keys") for what is protected.
+///
+/// The listing runs first and the rows are read after it, so a key written and registered while
+/// the listing ran is matched rather than treated as an orphan. Each orphan is checked again just
+/// before its versions are deleted, and only versions whose own `LastModified` is older than the
+/// minimum age are deleted. Returns `Err` only when the sweep cannot start, the listing fails or a
+/// database step fails; per-key outcomes are in the report.
+pub async fn collect_orphans(pool: &PgPool, store: &ObjectStore, tenant: TenantId, options: OrphanOptions) -> Result<OrphanReport, GcError> {
+    collect_orphans_at(pool, store, tenant, options, Duration::ZERO).await
+}
+
+/// [`collect_orphans`] as if `elapsed` more time had passed: only tests shift the clock, because a
+/// freshly written key cannot be backdated in the store. The minimum age itself is never lowered.
+async fn collect_orphans_at(
+    pool: &PgPool,
+    store: &ObjectStore,
+    tenant: TenantId,
+    options: OrphanOptions,
+    elapsed: Duration,
+) -> Result<OrphanReport, GcError> {
+    if !(1..=MAX_GC_BATCH).contains(&options.limit) || !(1..=MAX_ORPHAN_KEYS).contains(&options.max_keys) {
+        return Err(GcError::InvalidOptions);
+    }
+    let min_age = effective_min_age(options.min_age);
+    let mut report = OrphanReport { dry_run: options.dry_run, min_age, ..OrphanReport::default() };
+
+    let mut scoped = begin(pool, tenant).await?;
+    check_active_jobs_bounded(&mut scoped).await?;
+    let now: i64 =
+        sqlx::query_scalar("SELECT extract(epoch FROM clock_timestamp())::bigint").fetch_one(scoped.connection()).await.map_err(database_error)?;
+    scoped.rollback().await.map_err(database_error)?;
+    let shift = i64::try_from(elapsed.as_secs()).map_err(|_| GcError::InvalidOptions)?;
+    let age = i64::try_from(min_age.as_secs()).map_err(|_| GcError::InvalidOptions)?;
+    let cutoff = now.saturating_add(shift).saturating_sub(age);
+
+    let max_pages = options.max_keys.div_ceil(1000).saturating_add(1);
+    let (listed, truncated) = list_tenant_keys(store, tenant, options.max_keys, max_pages).await.map_err(|_| GcError::Listing)?;
+    report.keys_listed = u64::try_from(listed.len()).unwrap_or(u64::MAX);
+    report.listing_complete = !truncated;
+
+    let mut scoped = begin(pool, tenant).await?;
+    let mut statuses = Vec::with_capacity(listed.len());
+    for chunk in listed.chunks(ORPHAN_LOOKUP_CHUNK) {
+        statuses.extend(key_statuses(&mut scoped, store.bucket_name(), chunk).await?);
+    }
+    scoped.rollback().await.map_err(database_error)?;
+
+    let limit = usize::try_from(options.limit).unwrap_or(usize::MAX);
+    for (listed, status) in listed.into_iter().zip(statuses) {
+        if status.live_row {
+            report.registered = report.registered.saturating_add(1);
+            continue;
+        }
+        if let Some(protection) = status.protection() {
+            report.protected_count = report.protected_count.saturating_add(1);
+            if report.protected.len() < MAX_ORPHAN_FINDINGS {
+                report.protected.push((listed.key, protection));
+            }
+            continue;
+        }
+        if !parse_timestamp(&listed.last_modified).is_some_and(|modified| modified <= cutoff) {
+            report.too_young = report.too_young.saturating_add(1);
+            continue;
+        }
+        if report.orphans.len() < limit {
+            report.orphans.push(OrphanCandidate {
+                object_key: listed.key,
+                stored_bytes: listed.size,
+                last_modified: listed.last_modified,
+                deleted_row: status.deleted_row,
+            });
+        }
+    }
+    if options.dry_run {
+        return Ok(report);
+    }
+
+    for orphan in report.orphans.clone() {
+        // Checked again right before deleting: a row or reservation may have appeared.
+        let mut scoped = begin(pool, tenant).await?;
+        let probe = [ListedObject { key: orphan.object_key.clone(), size: orphan.stored_bytes, last_modified: String::new() }];
+        let status = key_statuses(&mut scoped, store.bucket_name(), &probe)
+            .await?
+            .first()
+            .copied()
+            .unwrap_or(KeyStatus { live_row: true, ..KeyStatus::default() });
+        scoped.rollback().await.map_err(database_error)?;
+        if let Some(protection) = status.protection() {
+            report.protected_count = report.protected_count.saturating_add(1);
+            if report.protected.len() < MAX_ORPHAN_FINDINGS {
+                report.protected.push((orphan.object_key, protection));
+            }
+            continue;
+        }
+        match remove_old_versions(store, &orphan.object_key, cutoff).await {
+            Ok((removed, young_left)) => {
+                report.versions_removed = report.versions_removed.saturating_add(removed);
+                if young_left {
+                    report.kept_young_versions.push(orphan.object_key);
+                } else {
+                    report.removed.push(orphan.object_key);
+                }
+            }
+            Err(failure) => report.failed.push((orphan.object_key, failure)),
+        }
+    }
+    Ok(report)
+}
+
+/// The database status of each of `keys` (same order): live and deleted `objects` rows in
+/// `bucket`, live reservations staging there, and active jobs mentioning it.
+async fn key_statuses(transaction: &mut TenantTransaction<'_>, bucket: &str, keys: &[ListedObject]) -> Result<Vec<KeyStatus>, GcError> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let names: Vec<String> = keys.iter().map(|listed| listed.key.clone()).collect();
+    let rows: Vec<(String, bool, bool, bool, bool)> = sqlx::query_as(concat!(
+        "WITH k AS (SELECT DISTINCT unnest($2::text[]) AS key), ",
+        "active_jobs AS (SELECT j.input::text AS input FROM jobs j WHERE j.tenant_id = $1::uuid ",
+        "AND j.state IN ('queued', 'running') ORDER BY j.created_at, j.id LIMIT $4) ",
+        "SELECT k.key, ",
+        "EXISTS (SELECT 1 FROM objects o WHERE o.tenant_id = $1::uuid AND o.bucket = $3 AND o.object_key = k.key ",
+        "AND o.state <> 'deleted'), ",
+        "EXISTS (SELECT 1 FROM objects o WHERE o.tenant_id = $1::uuid AND o.bucket = $3 AND o.object_key = k.key ",
+        "AND o.state = 'deleted'), ",
+        "EXISTS (SELECT 1 FROM upload_reservations r WHERE r.tenant_id = $1::uuid AND r.staging_key = k.key ",
+        "AND r.state IN ('reserved', 'completed')), ",
+        "EXISTS (SELECT 1 FROM active_jobs j WHERE strpos(j.input, k.key) > 0) ",
+        "FROM k"
+    ))
+    .bind(transaction.tenant_id().to_string())
+    .bind(&names)
+    .bind(bucket)
+    .bind(MAX_ACTIVE_JOBS_SCANNED)
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    let found: std::collections::HashMap<String, KeyStatus> = rows
+        .into_iter()
+        .map(|(key, live_row, deleted_row, reservation, active_job)| (key, KeyStatus { live_row, deleted_row, reservation, active_job }))
+        .collect();
+    // A key the statement did not return is treated as registered: never delete on doubt.
+    Ok(names.iter().map(|key| found.get(key).copied().unwrap_or(KeyStatus { live_row: true, ..KeyStatus::default() })).collect())
+}
+
+/// Delete the versions and delete markers of exactly `key` last modified at or before `cutoff`
+/// (Unix seconds). Returns how many were removed and whether younger (or undated) versions remain.
+/// Stores without `ListObjectVersions` get one plain `DELETE`; the listing already showed the key
+/// older than the cutoff.
+async fn remove_old_versions(store: &ObjectStore, key: &str, cutoff: i64) -> Result<(u64, bool), GcFailure> {
+    if !signable(store, key) {
+        return Err(GcFailure::UnsignableKey);
+    }
+    let mut removed: u64 = 0;
+    for _ in 0..MAX_LISTING_ROUNDS {
+        let Some(entries) = list_version_entries(store, key).await? else {
+            store.delete_object(key).await.map_err(GcFailure::Store)?;
+            return Ok((removed, false));
+        };
+        if entries.is_empty() {
+            return Ok((removed, false));
+        }
+        let old: Vec<&VersionEntry> = entries.iter().filter(|entry| entry.last_modified.is_some_and(|modified| modified <= cutoff)).collect();
+        if old.is_empty() {
+            return Ok((removed, true));
+        }
+        for entry in old {
+            delete_version(store, key, &entry.id).await?;
+            removed = removed.saturating_add(1);
+        }
+    }
+    Err(GcFailure::TooManyVersions)
+}
+
 /// Whether the store client can sign requests for `key`. `rusty-s3` unwraps object URLs
 /// internally, so a key must pass this before any object action is built from it.
 fn signable(store: &ObjectStore, key: &str) -> bool {
@@ -551,6 +910,12 @@ async fn remove_all_versions(store: &ObjectStore, key: &str) -> Result<u64, GcFa
 /// Version ids of `key` on one listing page, or `None` when the store does not implement
 /// `ListObjectVersions`. `key` must be [`signable`].
 async fn list_versions(store: &ObjectStore, key: &str) -> Result<Option<Vec<String>>, GcFailure> {
+    Ok(list_version_entries(store, key).await?.map(|entries| entries.into_iter().map(|entry| entry.id).collect()))
+}
+
+/// The versions and delete markers of `key` on one listing page with their `LastModified`, or
+/// `None` when the store does not implement `ListObjectVersions`. `key` must be [`signable`].
+async fn list_version_entries(store: &ObjectStore, key: &str) -> Result<Option<Vec<VersionEntry>>, GcFailure> {
     let page = VERSION_PAGE.to_string();
     // `sign` merges these with its own parameters and requires them sorted by name.
     let query = [("max-keys", page.as_str()), ("prefix", key), ("versions", "")];
@@ -582,7 +947,7 @@ async fn list_versions(store: &ObjectStore, key: &str) -> Result<Option<Vec<Stri
         body.extend_from_slice(&chunk);
     }
     match status {
-        200 => parse_versions(&body, key).map(Some),
+        200 => parse_version_entries(&body, key).map(Some),
         501 => Ok(None),
         _ if error_code(&body).as_deref() == Some("NotImplemented") => Ok(None),
         401 | 403 => Err(GcFailure::Store(ObjectStoreError::Unauthorized)),
@@ -631,8 +996,31 @@ fn text<'a>(node: roxmltree::Node<'a, '_>) -> &'a str {
     node.text().unwrap_or("").trim()
 }
 
+/// One version or delete marker of a key.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct VersionEntry {
+    id: String,
+    /// Whole Unix seconds of `LastModified`, or `None` when missing or unparseable.
+    last_modified: Option<i64>,
+}
+
 /// The version ids of exactly `key` in a `ListVersionsResult`, versions and delete markers alike.
+#[cfg(test)]
 fn parse_versions(body: &[u8], key: &str) -> Result<Vec<String>, GcFailure> {
+    Ok(parse_version_entries(body, key)?.into_iter().map(|entry| entry.id).collect())
+}
+
+/// An S3 `LastModified` timestamp (RFC 3339) as whole Unix seconds; `None` for anything else.
+fn parse_timestamp(value: &str) -> Option<i64> {
+    if value.is_empty() || value.len() > 64 {
+        return None;
+    }
+    value.parse::<jiff::Timestamp>().ok().map(|timestamp| timestamp.as_second())
+}
+
+/// The versions of exactly `key` in a `ListVersionsResult` with their `LastModified`, versions and
+/// delete markers alike, first occurrence of each version id only.
+fn parse_version_entries(body: &[u8], key: &str) -> Result<Vec<VersionEntry>, GcFailure> {
     let document = parse_document(body).ok_or(GcFailure::MalformedListing)?;
     let root = document.root_element();
     if root.tag_name().name() != "ListVersionsResult" {
@@ -653,8 +1041,9 @@ fn parse_versions(body: &[u8], key: &str) -> Result<Vec<String>, GcFailure> {
         if !valid_version_id(version) {
             return Err(GcFailure::MalformedListing);
         }
-        if !versions.iter().any(|known: &String| known == version) {
-            versions.push(version.to_string());
+        if !versions.iter().any(|known: &VersionEntry| known.id == version) {
+            let last_modified = child(entry, "LastModified").map(text).and_then(parse_timestamp);
+            versions.push(VersionEntry { id: version.to_string(), last_modified });
         }
     }
     Ok(versions)
@@ -871,3 +1260,7 @@ mod tests {
         assert_eq!(delete_version(&store, "a/b", "a b").await, Err(GcFailure::UnsignableKey));
     }
 }
+
+#[cfg(test)]
+#[path = "orphan_sweep_tests.rs"]
+mod orphan_sweep_tests;
