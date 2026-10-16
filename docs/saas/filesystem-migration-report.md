@@ -133,3 +133,107 @@ The import is a later milestone. This is the contract it will follow:
 
 Client-id issue and refusal entries (`issued`, `refused`) are session state, not events, so the
 import does not copy them (see S2-013).
+
+## Dry-run migration plan
+
+> **Status:** plan format 1 · **Tracker:** S3-017
+
+`figcraft_cloud_storage::migration_plan::plan_migration(&report, &target)` turns a
+`MigrationReport` and a `PlanTarget` into a `MigrationPlan`. The target is chosen by the
+operator: `tenant_id`, `workspace_id`, `project_id`, the `principal_id` recorded as the actor of
+imported events, and the `bucket`. The plan lists what the import (S3-018) would create. It is a
+dry run: the planner reads no files, clock, randomness or database and writes nothing.
+
+`plan_migration` returns an error for a report `format_version` it doesn't read
+(`UnsupportedReportFormat`) and for a bucket that isn't a valid S3 name (`InvalidBucket`). Any
+other input yields a plan, with exclusions, deferrals and blockers where the input is unusable.
+A report deserialized from hand-edited JSON can't make it panic, and every list is capped:
+100,000 documents, 256 library files per document and 10,000 plugin entries.
+
+### Deterministic identifiers
+
+Every identifier comes from the tenant and the legacy identifiers, so a rerun plans the same
+rows and objects and the import can find what an earlier attempt created. The workspace's `uuid`
+dependency doesn't enable UUIDv5 (SHA-1), so the planner uses its own derivation: the first 16
+bytes of SHA-256 over `figcraft-migration-plan/v1`, the tenant id and each part. Each part is
+length-prefixed (u64 LE), and the result is stamped as an RFC 9562 version 8 (custom) UUID with
+the RFC 4122 variant. The tenant is included because `documents.id` and `objects.id` are global
+primary keys.
+
+| Resource | Parts |
+|---|---|
+| Document (`documents.id`, mapping `internal_id`) | `document`, legacy id |
+| Snapshot row (`document_snapshots.id`) | `document_snapshot`, legacy id, snapshot seq |
+| Snapshot object | `snapshot_object`, legacy id, snapshot seq |
+| Library (key path) | `library`, legacy id |
+| Library object | `library_object`, legacy id, file version |
+| Plugin (key path) | `plugin`, plugin id |
+| Plugin object | `plugin_object`, plugin id, version text, SHA-256 hex |
+
+Changing the derivation changes every identifier, so it requires a new plan format version.
+
+### Plan fields
+
+Field names are `snake_case`, and optional fields are omitted when absent. Lists are sorted:
+documents and exclusions by legacy id, plugins by id and version, deferrals by source. The JSON
+layout is pinned by `crates/cloud-storage/tests/migration_plan_golden.json`.
+
+| Field | Meaning |
+|---|---|
+| `format_version` | `1` |
+| `report_format_version`, `report_scanned_at` | Copied from the report |
+| `target` | The `PlanTarget` as given |
+| `executable` | `blockers` is empty |
+| `blockers[]` | `report_incomplete`, `blocking_server_problem` (a blocking problem not tied to one document), `exclusion_approval_required` (some documents are excluded; the import needs the operator's explicit list), `document_limit_reached` |
+| `totals` | `documents`, `excluded`, `deferred`, `degraded`, `events`, `links`, `plugins`, `objects`, `snapshot_bytes`, `library_bytes`, `plugin_bytes`, `upload_bytes` (sum of planned object sizes), `event_bytes_max` (sum of the source logs: an upper bound on event payloads), `estimated_bytes` (`upload_bytes + event_bytes_max`) |
+| `documents[]` | One per importable document (below) |
+| `excluded[]` | `legacy_id`, `reason`, and `problems` (the scanner's blocking codes for that document) |
+| `plugins[]` | `legacy_id`, `version`, `plugin_id`, `object` |
+| `deferred[]` | Library files and plugins not uploaded: `kind`, `source`, optional `legacy_document`, `reason`, `bytes` |
+
+Each `documents[]` entry has these fields:
+
+| Field | Meaning |
+|---|---|
+| `legacy_id`, `status` | The folder name; `ready` or `degraded` |
+| `problems` | The scanner's warning codes for the document, sorted and deduplicated |
+| `warnings` | `name_replaced` (empty name, the legacy id is used), `name_truncated` (cut to 255 characters), `log_ignored` (the log doesn't continue the snapshot), `log_truncated` (damage or a sequence break stops replay early), `libraries_deferred` |
+| `document` | The `documents` row: `id`, `name`, `state` (`active`), `current_seq` (the report's `last_accepted_seq`) |
+| `external_mapping` | `system_id` `figcraft-server`, `resource_kind` `document`, `external_id` the legacy id, `internal_id` the document id |
+| `snapshot` | The `document_snapshots` row `id` and `seq` (the snapshot's `session_seq`), and its `object` |
+| `events` | `count` (`log.replayable` of a log that continues the snapshot, otherwise 0), `first_seq`/`last_seq` (`seq + 1` to `current_seq`, absent when there are none), `actor_principal_id`, `source_log_bytes` |
+| `libraries[]` | Planned library objects |
+| `links` | Links the import recreates from `links.json` |
+
+A planned `object` has `id`, `kind` (`snapshot`, `library` or `plugin`), `bucket`, `source` (the
+legacy file, relative to the scanned root), `key_prefix` and `key_suffix`, `size_bytes` and
+`media_type`. The scanner hashes only plugin bundles, so only plugin objects carry `sha256` and
+the full `object_key`. For snapshots and libraries the import computes the SHA-256 while
+re-reading the file. The key is then `key_prefix` + hex digest + `key_suffix`, which matches
+`object_metadata::keys`. A snapshot object holds the snapshot body: the file size minus the
+17-byte `FCSN` header. Media types are `application/vnd.figcraft.session-state`,
+`application/vnd.figcraft.library` and `application/vnd.figcraft.plugin`.
+
+### What is excluded or deferred
+
+A document is excluded (`excluded[].reason`) when it is:
+
+- `blocked`: marked blocked, or any blocking problem names it.
+- `invalid_legacy_id`: not 1–64 ASCII letters, digits, `-` or `_`.
+- `duplicate_legacy_id`: listed more than once. Every copy is excluded.
+- `metadata_unavailable`: missing its metadata.
+- `snapshot_unavailable`: without a decoded, checksum-valid snapshot that has a sequence and a
+  non-empty body.
+- `sequence_inconsistent`: `last_accepted_seq` isn't the snapshot sequence plus the replayable
+  batches, or a sequence or size doesn't fit PostgreSQL `BIGINT`.
+
+A library file or plugin is deferred (`deferred[].reason`) when it is:
+
+- `library_unversioned`: `library.bin`, because the key layout needs a version.
+- `library_name_invalid`: any other name, or a repeated version.
+- `empty`.
+- `plugin_bundle_invalid`: the bundle is missing or doesn't match the index.
+- `plugin_version_not_integer`: the plugin key layout takes a `u64` version, while server plugin
+  versions are free text.
+- `plugin_id_invalid`, `plugin_digest_invalid`, `plugin_duplicate`, `size_out_of_range` or
+  `limit_reached`.
