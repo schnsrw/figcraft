@@ -1562,8 +1562,10 @@ version = "0.6.0"
 name = "figcraft-cloud-storage"
 version = "0.6.0"
 dependencies = [
+ "crc32fast",
  "figcraft-cloud-domain",
  "figcraft-collab",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
