@@ -19,12 +19,19 @@ BEGIN
         RAISE EXCEPTION 'cloud database roles have memberships';
     END IF;
     IF EXISTS (
-        SELECT 1 FROM pg_class
-        WHERE relname IN ('_sqlx_migrations', 'tenants', 'documents', 'document_events', 'audit_events')
-            AND relnamespace = 'public'::regnamespace
-            AND pg_get_userbyid(relowner) <> 'figcraft_migrator'
+        SELECT 1 FROM pg_tables
+        WHERE schemaname = 'public' AND tableowner <> 'figcraft_migrator'
     ) THEN
         RAISE EXCEPTION 'application tables are not owned by the migrator';
+    END IF;
+    -- Every migrated table must be in the provisioning grant list; a missing one is unreadable at
+    -- runtime even though its migration applied.
+    IF EXISTS (
+        SELECT 1 FROM pg_class
+        WHERE relnamespace = 'public'::regnamespace AND relkind IN ('r', 'p')
+            AND NOT has_table_privilege('figcraft_runtime', oid, 'SELECT')
+    ) THEN
+        RAISE EXCEPTION 'runtime role cannot read every application table';
     END IF;
     IF has_schema_privilege('figcraft_runtime', 'public', 'CREATE') THEN
         RAISE EXCEPTION 'runtime role can create schema objects';
