@@ -825,6 +825,34 @@ async fn list_prefix(store: &ObjectStore, prefix: &str, limits: &ReconciliationL
     }
 }
 
+/// One key of a [`list_tenant_keys`] listing: the key, its stored size and its `LastModified`
+/// (bounded, sanitised; empty when the store sent none or a malformed one).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ListedObject {
+    pub(crate) key: String,
+    pub(crate) size: u64,
+    pub(crate) last_modified: String,
+}
+
+/// The bounded, validated `ListObjectsV2` listing [`reconcile_tenant`] uses, for the orphan sweep
+/// in [`crate::garbage_collection`]: every key under `tenants/<tenant>/` in key order, at most
+/// `max_keys` keys over at most `max_pages` pages of [`MAX_PAGE_SIZE`]. The flag says whether a
+/// cap stopped the listing early. Read-only.
+pub(crate) async fn list_tenant_keys(
+    store: &ObjectStore,
+    tenant: TenantId,
+    max_keys: u32,
+    max_pages: u32,
+) -> Result<(Vec<ListedObject>, bool), ReconciliationError> {
+    let limits = ReconciliationLimits { max_keys, max_pages, page_size: MAX_PAGE_SIZE, ..ReconciliationLimits::default() };
+    limits.validate()?;
+    let prefix = format!("tenants/{tenant}/");
+    let listing = list_prefix(store, &prefix, &limits).await?;
+    let truncated = listing.truncated_by.is_some();
+    let keys = listing.keys.into_iter().map(|(key, listed)| ListedObject { key, size: listed.size, last_modified: listed.last_modified }).collect();
+    Ok((keys, truncated))
+}
+
 async fn fetch_page(store: &ObjectStore, prefix: &str, page_size: usize, token: Option<&str>) -> Result<Vec<u8>, ReconciliationError> {
     let mut action = store.bucket.list_objects_v2(Some(&store.credentials));
     action.with_prefix(prefix);

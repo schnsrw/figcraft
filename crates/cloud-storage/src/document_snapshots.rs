@@ -2,9 +2,9 @@
 //! restore the newest one that still verifies.
 //!
 //! [`store_snapshot`] follows `docs/saas/architecture.md` "Snapshot compaction": the state is
-//! encoded with the collaboration wire encoding ([`message::encode`]), uploaded under a
-//! content-addressed key ([`keys::snapshot`]: sequence plus SHA-256), registered as a `snapshot`
-//! object, read back and verified, recorded as a `document_snapshots` row, referenced by that row
+//! encoded with the collaboration wire encoding ([`message::encode`]), registered as a `pending`
+//! `snapshot` object in a committed transaction of its own (register-first), uploaded under a
+//! content-addressed key ([`keys::snapshot`]: sequence plus SHA-256), read back and verified, recorded as a `document_snapshots` row, referenced by that row
 //! (`owner_kind = 'document_snapshot'`) and only then offered to the document's
 //! `current_snapshot_id` pointer. The pointer moves only to a snapshot whose sequence is at least
 //! the current pointer's and at most the document's committed `current_seq`, so it never moves
@@ -20,12 +20,12 @@
 
 use std::fmt;
 
-use figcraft_cloud_domain::{CloudDocumentId, Uuid};
+use figcraft_cloud_domain::{CloudDocumentId, TenantId, Uuid};
 use figcraft_collab::SessionState;
 use figcraft_collab::message;
 use sha2::{Digest, Sha256};
+use sqlx::PgPool;
 
-use crate::TenantTransaction;
 use crate::object_metadata::{
     NewObject, ObjectKind, ObjectRecord, ObjectRepositoryError, ObjectState, Rejection, Verification, get_object, keys, register_object,
     verify_object,
@@ -34,6 +34,7 @@ use crate::object_references::{ObjectReferenceError, OwnerKind, add_reference};
 use crate::objects::{ObjectStore, ObjectStoreError};
 use crate::snapshots::{RepositoryError, SnapshotRecord, register_snapshot, set_current_snapshot, verify_snapshot};
 use crate::validation::MEDIA_SNAPSHOT;
+use crate::{TenantTransaction, begin_tenant_transaction};
 
 /// Largest encoded snapshot stored or restored (well under the client's single-transfer cap).
 pub const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
@@ -168,39 +169,69 @@ async fn existing_snapshot(
     id.map(|id| id.parse().map_err(|_| SnapshotStoreError::CorruptRow)).transpose()
 }
 
-/// Upload the snapshot object under `key` and return its verified record, and whether the row
-/// already existed. The bytes are written every time: the key is content-addressed, so writing
-/// the same bytes again is harmless and repairs a store that lost or damaged them. A row that was
-/// already verified is checked by reading the bytes back here, because [`verify_object`] does not
-/// re-read verified objects.
-async fn stored_object(
+/// Register-first: find or register the `pending` row for `object.object_key` in a short tenant
+/// transaction of its own and **commit it before any byte is uploaded**, so a crash or a rolled
+/// back caller after the upload leaves a `pending` row that garbage collection can see (S3-015)
+/// rather than bytes no row names. Returns the row and whether it already existed.
+///
+/// An existing live row is reused only when it is the same object (kind, SHA-256 and size) and
+/// still `pending` (an earlier attempt that never finished) or `verified`; anything else is
+/// `Conflict`. A concurrent registration of the same key loses the unique race as `Conflict`.
+///
+/// This takes a second connection from `pool` while the caller's transaction is open, so the
+/// pool must hold at least one connection more than the callers that can wait on each other.
+pub(crate) async fn preregister_object(
+    pool: &PgPool,
+    tenant: TenantId,
+    bucket: &str,
+    object: &NewObject,
+) -> Result<(ObjectRecord, bool), SnapshotStoreError> {
+    let mut scoped = begin_tenant_transaction(pool, tenant).await.map_err(|_| SnapshotStoreError::Database)?;
+    if let Some(id) = live_object_for_key(&mut scoped, bucket, &object.object_key).await? {
+        let existing = get_object(&mut scoped, id).await.map_err(object_error)?.ok_or(SnapshotStoreError::Conflict)?;
+        scoped.rollback().await.map_err(database_error)?;
+        let same = existing.kind == object.kind && existing.sha256 == object.sha256 && existing.size_bytes == object.size_bytes;
+        // A pending row is an earlier attempt that never finished; anything else cannot be
+        // reused (rejected or being deleted: operator repair and collection decide).
+        if !same || !matches!(existing.state, ObjectState::Verified | ObjectState::Pending) {
+            return Err(SnapshotStoreError::Conflict);
+        }
+        return Ok((existing, true));
+    }
+    let registered = register_object(&mut scoped, bucket, object).await.map_err(object_error)?;
+    scoped.commit().await.map_err(database_error)?;
+    Ok((registered, false))
+}
+
+/// The second half of register-first, in the caller's transaction: lock the pre-registered row
+/// (so a collection pass cannot mark it `deleting` until the caller commits its reference or rolls
+/// back), upload `bytes`, and return the verified record. The bytes are written every time: keys
+/// are content-addressed, so writing the same bytes again is harmless and repairs a store that
+/// lost or damaged them. A row that was already verified is checked by reading the bytes back
+/// here, because [`verify_object`] does not re-read verified objects.
+pub(crate) async fn upload_and_confirm(
     transaction: &mut TenantTransaction<'_>,
     store: &ObjectStore,
-    object: &NewObject,
+    registered: &ObjectRecord,
     bytes: Vec<u8>,
-) -> Result<(ObjectRecord, bool), SnapshotStoreError> {
-    let existing = match live_object_for_key(transaction, store.bucket_name(), &object.object_key).await? {
-        Some(id) => {
-            let existing = get_object(transaction, id).await.map_err(object_error)?.ok_or(SnapshotStoreError::Conflict)?;
-            let same = existing.kind == ObjectKind::Snapshot && existing.sha256 == object.sha256 && existing.size_bytes == object.size_bytes;
-            // A pending row is an earlier attempt that never finished; anything else cannot be
-            // reused (rejected or being deleted: operator repair and collection decide).
-            if !same || !matches!(existing.state, ObjectState::Verified | ObjectState::Pending) {
-                return Err(SnapshotStoreError::Conflict);
-            }
-            Some(existing)
-        }
-        None => None,
+    media_type: &str,
+) -> Result<ObjectRecord, SnapshotStoreError> {
+    let state: Option<String> = sqlx::query_scalar("SELECT state FROM objects WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE")
+        .bind(transaction.tenant_id().to_string())
+        .bind(registered.id.to_string())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(database_error)?;
+    let verified = match state.as_deref() {
+        Some("pending") => false,
+        Some("verified") => true,
+        // Collected or rejected between pre-registration and this lock: retry later.
+        _ => return Err(SnapshotStoreError::Conflict),
     };
-    let id = match &existing {
-        Some(existing) => existing.id,
-        None => register_object(transaction, store.bucket_name(), object).await.map_err(object_error)?.id,
-    };
-    let expected = u64::try_from(object.size_bytes).map_err(|_| SnapshotStoreError::InvalidInput)?;
-    store.put_object(&object.object_key, bytes, MEDIA_SNAPSHOT).await.map_err(SnapshotStoreError::Store)?;
-    let reused = existing.is_some();
-    if let Some(existing) = existing.filter(|existing| existing.state == ObjectState::Verified) {
-        let stored = match store.get_object(&object.object_key, expected).await {
+    let expected = u64::try_from(registered.size_bytes).map_err(|_| SnapshotStoreError::InvalidInput)?;
+    store.put_object(&registered.object_key, bytes, media_type).await.map_err(SnapshotStoreError::Store)?;
+    if verified {
+        let stored = match store.get_object(&registered.object_key, expected).await {
             Ok(stored) => stored,
             Err(ObjectStoreError::NotFound) => return Err(SnapshotStoreError::Rejected(Rejection::Missing)),
             Err(ObjectStoreError::TooLarge) => return Err(SnapshotStoreError::Rejected(Rejection::SizeMismatch)),
@@ -209,13 +240,15 @@ async fn stored_object(
         if u64::try_from(stored.len()).ok() != Some(expected) {
             return Err(SnapshotStoreError::Rejected(Rejection::SizeMismatch));
         }
-        if <[u8; 32]>::from(Sha256::digest(&stored)) != object.sha256 {
+        if <[u8; 32]>::from(Sha256::digest(&stored)) != registered.sha256 {
             return Err(SnapshotStoreError::Rejected(Rejection::ChecksumMismatch));
         }
-        return Ok((existing, true));
+        let mut record = registered.clone();
+        record.state = ObjectState::Verified;
+        return Ok(record);
     }
-    match verify_object(transaction, store, id).await.map_err(object_error)? {
-        Some(Verification::Verified(record)) => Ok((record, reused)),
+    match verify_object(transaction, store, registered.id).await.map_err(object_error)? {
+        Some(Verification::Verified(record)) => Ok(record),
         Some(Verification::Rejected(_, rejection)) => Err(SnapshotStoreError::Rejected(rejection)),
         None => Err(SnapshotStoreError::Conflict),
     }
@@ -262,12 +295,16 @@ async fn offer_pointer(
 /// Store `state` (a [`Server::state`](figcraft_collab::Server::state) of `document_id` at
 /// `state.seq`) as an immutable, verified snapshot and offer it to the document's pointer.
 ///
-/// Everything is written in `transaction`; the caller commits. The object bytes are uploaded
-/// before the commit, so a rolled-back attempt leaves bytes without a row under a
-/// content-addressed key, which a retry reuses. Storing the same state again reuses the verified
-/// object and snapshot row. A state past the document's committed sequence is `AheadOfLog` and
-/// nothing is uploaded.
+/// Register-first: the `pending` object row is registered and committed in a short transaction
+/// of its own on `pool` *before* the bytes are uploaded ([`preregister_object`]); the upload,
+/// read-back verification, snapshot row, reference and pointer offer then happen in
+/// `transaction`, which the caller commits. A crash or a rolled back `transaction` after the
+/// upload therefore leaves a `pending` row naming the bytes, which a retry reuses and which
+/// garbage collection retires after its minimum age if no retry comes. Storing the same state
+/// again reuses the verified object and snapshot row. A state past the document's committed
+/// sequence is `AheadOfLog`, and nothing is registered or uploaded.
 pub async fn store_snapshot(
+    pool: &PgPool,
     transaction: &mut TenantTransaction<'_>,
     store: &ObjectStore,
     document_id: CloudDocumentId,
@@ -291,7 +328,8 @@ pub async fn store_snapshot(
         media_type: MEDIA_SNAPSHOT.to_owned(),
         producer_version: producer_version.to_owned(),
     };
-    let (object, reused_object) = stored_object(transaction, store, &object, bytes).await?;
+    let (registered, reused_object) = preregister_object(pool, transaction.tenant_id(), store.bucket_name(), &object).await?;
+    let object = upload_and_confirm(transaction, store, &registered, bytes, MEDIA_SNAPSHOT).await?;
 
     let snapshot_id = match existing_snapshot(transaction, document_id, seq, object.id).await? {
         Some(id) => id,

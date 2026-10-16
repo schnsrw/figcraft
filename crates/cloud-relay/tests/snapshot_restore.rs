@@ -80,7 +80,7 @@ async fn snapshot(
     server: &Server,
 ) -> Result<StoredSnapshot, Box<dyn std::error::Error>> {
     let mut transaction = begin_tenant_transaction(pool, TENANT.parse()?).await.map_err(|error| format!("begin tenant: {error:?}"))?;
-    let stored = store_snapshot(&mut transaction, store, document, &server.state()?, "figcraft-cloud test").await?;
+    let stored = store_snapshot(pool, &mut transaction, store, document, &server.state()?, "figcraft-cloud test").await?;
     transaction.commit().await?;
     Ok(stored)
 }

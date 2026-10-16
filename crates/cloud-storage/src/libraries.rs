@@ -33,19 +33,25 @@
 //! or `editor` of the owning team or of a team granted `publisher`; for a library with no owning
 //! team, a tenant `editor`.
 //!
-//! # Known gap
+//! # Register-first
 //!
-//! The bytes are written while the transaction is open. If the transaction then rolls back, the
-//! object row disappears but the bytes stay in the bucket under a key no row names; the S3-015
-//! sweeper must list the `libraries/` prefix to retire such orphans.
+//! The `pending` object row is registered and committed in a short transaction of its own on the
+//! pool *before* the bytes are uploaded, so a publish that rolls back (or crashes) after the upload
+//! leaves a `pending` row naming the bytes instead of bytes no row names. A retry of the same bytes
+//! at the same version number reuses that row; otherwise garbage collection retires it after its
+//! minimum age (S3-015), and [`crate::garbage_collection::collect_orphans`] is the backstop for
+//! keys written by older code.
 
 use std::fmt;
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
 use sha2::{Digest, Sha256};
 
+use sqlx::PgPool;
+
 use crate::TenantTransaction;
-use crate::object_metadata::{NewObject, ObjectKind, ObjectRecord, ObjectRepositoryError, Verification, keys, register_object, verify_object};
+use crate::document_snapshots::{SnapshotStoreError, preregister_object, upload_and_confirm};
+use crate::object_metadata::{NewObject, ObjectKind, ObjectRecord, ObjectRepositoryError, keys};
 use crate::object_references::{ObjectReferenceError, OwnerKind, add_reference};
 use crate::objects::{ObjectStore, ObjectStoreError, valid_key};
 use crate::uploads::MAX_LIBRARY_BYTES;
@@ -128,6 +134,19 @@ fn object_error(error: ObjectRepositoryError) -> LibraryError {
         ObjectRepositoryError::CorruptRow => LibraryError::CorruptRow,
         ObjectRepositoryError::InvalidState => LibraryError::ObjectConflict,
         ObjectRepositoryError::Store(error) => LibraryError::Store(error),
+    }
+}
+
+/// Map a register-first failure (shared with document snapshots) onto library categories.
+fn staged_error(error: SnapshotStoreError) -> LibraryError {
+    match error {
+        SnapshotStoreError::Conflict => LibraryError::ObjectConflict,
+        SnapshotStoreError::Rejected(_) => LibraryError::VerificationFailed,
+        SnapshotStoreError::Store(error) => LibraryError::Store(error),
+        SnapshotStoreError::Object(error) => object_error(error),
+        SnapshotStoreError::CorruptRow => LibraryError::CorruptRow,
+        SnapshotStoreError::InvalidInput => LibraryError::TooLarge,
+        _ => LibraryError::Database,
     }
 }
 
@@ -452,9 +471,15 @@ async fn may_publish(transaction: &mut TenantTransaction<'_>, library: &Library,
 /// The bytes are validated as a `.figcraft` archive before any SQL runs. The library row is then
 /// locked `FOR UPDATE`, so concurrent publishers take consecutive version numbers; a publisher
 /// that the backstop check refuses is `NotPublisher`, and an archived or deleted library is
-/// `Archived` or `Deleted`. The object is written, registered and verified by read-back before
-/// the version row and its `library_version` reference are inserted, all in `transaction`.
+/// `Archived` or `Deleted`. The object row is then registered `pending` and committed on `pool`
+/// (register-first, see the module documentation), the bytes are written, and the row is locked
+/// and verified by read-back before the version row and its `library_version` reference are
+/// inserted, all in `transaction`.
+///
+/// `pool` lends a second connection while `transaction` holds the library row lock, so it needs at
+/// least one connection more than the publishers that can queue on one library.
 pub async fn publish_library_version(
+    pool: &PgPool,
     transaction: &mut TenantTransaction<'_>,
     store: &ObjectStore,
     library_id: Uuid,
@@ -499,13 +524,8 @@ pub async fn publish_library_version(
         media_type: MEDIA_FIGCRAFT.to_string(),
         producer_version: PRODUCER_VERSION.to_string(),
     };
-    let registered = register_object(transaction, store.bucket_name(), &object).await.map_err(object_error)?;
-    store.put_object(&object_key, bytes, MEDIA_FIGCRAFT).await.map_err(LibraryError::Store)?;
-    let object = match verify_object(transaction, store, registered.id).await.map_err(object_error)? {
-        Some(Verification::Verified(object)) => object,
-        Some(Verification::Rejected(..)) => return Err(LibraryError::VerificationFailed),
-        None => return Err(LibraryError::CorruptRow),
-    };
+    let (registered, _) = preregister_object(pool, transaction.tenant_id(), store.bucket_name(), &object).await.map_err(staged_error)?;
+    let object = upload_and_confirm(transaction, store, &registered, bytes, MEDIA_FIGCRAFT).await.map_err(staged_error)?;
 
     let row: VersionRow = sqlx::query_as(concat!(
         "INSERT INTO library_versions (id, tenant_id, library_id, version, object_id, sha256, published_by) ",
