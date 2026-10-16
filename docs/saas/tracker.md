@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (15/21) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 in progress (16/21) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 15 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 16 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -349,7 +349,16 @@ the same commit as the completed task.
   version. The disposable PostgreSQL integration probe covers consecutive multi-batch appends,
   every conflict shape, archived and missing documents, cross-tenant invisibility and both trigger
   rewinds under the limited runtime role.
-- [ ] **S2-015** Implement append transaction that validates current fencing token.
+- [x] **S2-015** Implement append transaction that validates current fencing token.
+  Evidence: `figcraft-cloud-storage::events::claim_sequencer` locks an `active` document and
+  advances its fencing token, returning the token and the committed sequence to resume from;
+  archived and missing documents are refused without advancing it. `append_events` reads the
+  token under the same `FOR UPDATE` lock as the sequence and refuses any token that is not the
+  current one (superseded, never issued, or 0) as `StaleFence` before the sequence check, and each
+  event row records the token that wrote it. The S2-014 trigger keeps the token monotonic. The
+  disposable PostgreSQL probe covers unclaimed tokens, an in-transaction takeover, a not-yet-issued
+  token, per-row token provenance, refused claims, and an old owner's late append after a takeover
+  committed in another transaction. The distributed lease that decides who may claim remains S5.
 - [ ] **S2-016** Implement bounded event replay from a requested sequence.
 - [x] **S2-017** Implement snapshot metadata registration without object bytes.
   Evidence: `figcraft-cloud-storage::snapshots` adds `register_snapshot` (inserts a `'pending'`
@@ -785,3 +794,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S2-010 fix: granted the runtime role access to `external_mappings` (its repository probe failed with a permission error in the full Compose smoke); `role-preflight.sql` now requires migrator ownership and runtime `SELECT` on every public table, so a future table missing from the grant list fails the smoke. |
 | 2026-10-17 | S2-013: defined durable event payloads as the existing collaboration `Accepted` wire form with a domain-separated SHA-256 checksum bound to tenant, document and sequence. S2 reaches 14/21. |
 | 2026-10-17 | S2-014: added the locked, gap-free event append and a trigger keeping document sequence and fencing token monotonic; readiness advanced to schema version 20261016000005. S2 reaches 15/21. |
+| 2026-10-17 | S2-015: added `claim_sequencer` and a current-fencing-token check in the append under the document row lock. S2 reaches 16/21. |

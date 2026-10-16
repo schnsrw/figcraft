@@ -150,6 +150,9 @@ pub enum EventRepositoryError {
     SequenceConflict {
         current: i64,
     },
+    /// The caller's fencing token is not the document's current one: another sequencer claimed
+    /// the document since (or the token was never issued). The caller must stop writing.
+    StaleFence,
     Conflict,
     Constraint,
     Database,
@@ -171,6 +174,44 @@ fn event_database_error(error: sqlx::Error) -> EventRepositoryError {
     }
 }
 
+/// A sequencer's claim on a document: the fencing token its appends must carry and the committed
+/// sequence it resumes from.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SequencerClaim {
+    pub fencing_token: i64,
+    pub current_seq: i64,
+}
+
+/// Take over as a document's sequencer by advancing its fencing token.
+///
+/// Every earlier token becomes stale at commit, so a previous owner's later appends fail with
+/// `StaleFence` even if it still believes it holds the lease. The distributed lease that decides
+/// *who* may claim is S5 work; this is the database half of the fence.
+pub async fn claim_sequencer(transaction: &mut TenantTransaction<'_>, document_id: CloudDocumentId) -> Result<SequencerClaim, EventRepositoryError> {
+    let state: Option<(String,)> = sqlx::query_as("SELECT state FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE")
+        .bind(transaction.tenant_id().to_string())
+        .bind(document_id.to_string())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(event_database_error)?;
+    match state {
+        None => return Err(EventRepositoryError::NotFound),
+        Some((state,)) if state != "active" => return Err(EventRepositoryError::InvalidState),
+        Some(_) => {}
+    }
+    let (fencing_token, current_seq): (i64, i64) = sqlx::query_as(
+        "UPDATE documents SET fencing_token = fencing_token + 1, updated_at = now() \
+         WHERE tenant_id = $1::uuid AND id = $2::uuid \
+         RETURNING fencing_token, current_seq",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(document_id.to_string())
+    .fetch_one(transaction.connection())
+    .await
+    .map_err(event_database_error)?;
+    Ok(SequencerClaim { fencing_token, current_seq })
+}
+
 /// The committed sequence range one append wrote, inclusive.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Appended {
@@ -183,8 +224,10 @@ pub struct Appended {
 /// The document row is locked (`FOR UPDATE`) for the rest of the caller's transaction, so
 /// concurrent appends to one document serialize. `batches` must continue the committed sequence
 /// exactly (`current_seq + 1`, `+ 2`, ...); anything else is `SequenceConflict` carrying the
-/// committed sequence, and nothing is written. The caller confirms the batches only after
-/// committing the transaction.
+/// committed sequence, and nothing is written. `fencing_token` must be the document's current
+/// token from [`claim_sequencer`]; a superseded or never-issued token is `StaleFence`, checked
+/// under the same row lock so a takeover cannot interleave. The caller confirms the batches only
+/// after committing the transaction.
 pub async fn append_events(
     transaction: &mut TenantTransaction<'_>,
     document_id: CloudDocumentId,
@@ -202,18 +245,21 @@ pub async fn append_events(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| EventRepositoryError::InvalidInput)?;
 
-    let row: Option<(i64, String)> =
-        sqlx::query_as("SELECT current_seq, state FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE")
+    let row: Option<(i64, i64, String)> =
+        sqlx::query_as("SELECT current_seq, fencing_token, state FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE")
             .bind(tenant_id.to_string())
             .bind(document_id.to_string())
             .fetch_optional(transaction.connection())
             .await
             .map_err(event_database_error)?;
-    let Some((current, state)) = row else {
+    let Some((current, current_token, state)) = row else {
         return Err(EventRepositoryError::NotFound);
     };
     if state != "active" {
         return Err(EventRepositoryError::InvalidState);
+    }
+    if fencing_token != current_token || fencing_token <= 0 {
+        return Err(EventRepositoryError::StaleFence);
     }
     let consecutive = encoded.iter().zip(1_i64..).all(|(event, offset)| current.checked_add(offset) == Some(event.seq));
     let (Some(first), Some(last)) = (encoded.first(), encoded.last()) else {
