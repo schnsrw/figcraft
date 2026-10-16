@@ -74,7 +74,8 @@ the continuation point, a blocker or a major decision changes.
   tenant/document/sequence-bound SHA-256 checksum (`figcraft-cloud-storage::events`); S2-014 adds the locked, gap-free `append_events` and a monotonic-counter
   trigger; S2-015 adds `claim_sequencer` and stale-token rejection; S2-016 adds bounded checksum-verified `read_events`;
   S2-019 adds multi-connection race probes; S2-021 adds the read-only `legacy_scan` filesystem
-  scanner and `filesystem-migration-report.md`; S2 reaches 19/21. Production RLS policies remain S4-014 work, and durable collaboration is
+  scanner and `filesystem-migration-report.md`; S2-018 adds `figcraft-cloud-relay::DurableRoom` (commit before
+  broadcast, fenced reopen by replay); S2 reaches 20/21. Production RLS policies remain S4-014 work, and durable collaboration is
   still pending. The cloud image builds with workspace Rust 1.95 (SQLx declares MSRV 1.94).
 - `S1-001` adds compileable workspace members for the modular
   cloud application and seven cloud libraries. `S1-002` defines distinct UUID-backed tenant,
@@ -121,11 +122,10 @@ the continuation point, a blocker or a major decision changes.
    identities are provided; never invent approvals.
 2. D-001 local dependency image choice and data-service validation are complete; see
    `docs/saas/dependency-images.md`. S1-018 and S1-GATE pass their transport and startup criteria.
-   S2-001 through S2-017, S2-019 and S2-021 are complete; see `docs/saas/postgres-client-decision.md`, the
+   S2-001 through S2-019 and S2-021 are complete; see `docs/saas/postgres-client-decision.md`, the
    `--migrate` and `--provision-db-roles` commands, cloud-storage migrations, transaction helper
    and metadata/document/external-mapping/idempotency/audit/snapshot repositories. Continue with
-   the S2-018/S2-020/S2-GATE collaboration-event chain (sequential: each depends on the previous),
-   then S2-019..S2-021 (concurrency/failure tests and the filesystem migration scanner).
+   S2-020 (failure injection for commit, connection loss and retry boundaries) and then S2-GATE.
    Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
 3. Update task evidence and milestone counts in the same commit as each completed task.
 

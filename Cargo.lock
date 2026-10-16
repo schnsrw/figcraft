@@ -1557,6 +1557,14 @@ version = "0.6.0"
 [[package]]
 name = "figcraft-cloud-relay"
 version = "0.6.0"
+dependencies = [
+ "figcraft-cloud-domain",
+ "figcraft-cloud-storage",
+ "figcraft-collab",
+ "figcraft-doc",
+ "sqlx",
+ "tokio",
+]
 
 [[package]]
 name = "figcraft-cloud-storage"

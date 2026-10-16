@@ -6,5 +6,15 @@ license.workspace = true
 publish = false
 description = "Distributed collaboration relay for FigCraft Cloud"
 
+[dependencies]
+figcraft-cloud-domain = { path = "../cloud-domain" }
+figcraft-cloud-storage = { path = "../cloud-storage" }
+figcraft-collab = { workspace = true }
+sqlx = { workspace = true }
+
+[dev-dependencies]
+figcraft-doc = { workspace = true }
+tokio = { workspace = true, features = ["macros"] }
+
 [lints]
 workspace = true

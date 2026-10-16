@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 in progress (19/21) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 in progress (20/21) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -19,7 +19,7 @@ the same commit as the completed task.
 |---|---|---:|---|
 | S0 Documentation and fork governance | in progress | 14 / 15 | Reviewer assignment |
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
-| S2 PostgreSQL metadata and events | in progress | 19 / 21 | Durable transactional event path |
+| S2 PostgreSQL metadata and events | in progress | 20 / 21 | Durable transactional event path |
 | S3 Object storage and migration | not started | 0 / 20 | Verified object storage and repeatable migration |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
@@ -386,7 +386,21 @@ the same commit as the completed task.
   integration probe covers registration, both idempotent transitions, the invalid-state rejection,
   an unknown-document constraint rejection, and the cross-document pointer rejection, each isolated
   from the main rolled-back transaction where it would otherwise abort unrelated assertions.
-- [ ] **S2-018** Adapt cloud collaboration durability to commit before broadcast.
+- [x] **S2-018** Adapt cloud collaboration durability to commit before broadcast.
+  Evidence: `figcraft-cloud-relay::DurableRoom` wraps the collaboration `Server`: `receive` takes
+  the server's journal, appends its accepted batches with `append_events` under the room's fencing
+  token and commits, and only then returns the confirmations and broadcasts to deliver. Any append
+  or commit failure drops them and poisons the room, which refuses every later message and join so
+  the transport closes it and clients reconcile from durable state, matching the filesystem
+  server's flush-before-answers rule without its transport. `DurableRoom::open` commits a
+  `claim_sequencer` takeover first, fencing every earlier owner, then replays the committed log page
+  by page with `read_events` over the supplied base document and refuses (`Replay`) a log that does
+  not apply rather than serving uncertain state; snapshot restore arrives with S3. Joins and
+  refusals stay session state. `xtask layers` gains one documented same-layer edge,
+  `cloud-relay -> cloud-storage`. The PostgreSQL probe proves an accepted batch is committed before
+  its broadcast is returned, a refused batch writes nothing, a takeover fences the old room (nothing
+  written or returned, then `Poisoned`), a reopened room replays exactly the confirmed state and
+  keeps accepting edits, and a mismatched base is refused.
 
 ### Verification and migration input
 
@@ -841,3 +855,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S2-014: added the locked, gap-free event append and a trigger keeping document sequence and fencing token monotonic; readiness advanced to schema version 20261016000005. S2 reaches 15/21. |
 | 2026-10-17 | S2-015: added `claim_sequencer` and a current-fencing-token check in the append under the document row lock. S2 reaches 16/21. |
 | 2026-10-17 | S2-016/S2-019/S2-021: added bounded checksum-verified event replay, multi-connection PostgreSQL race probes for sequence, fencing and idempotency, and a read-only filesystem-server scanner with a versioned migration report (three parallel worktree agents, merged and verified together). S2 reaches 19/21. |
+| 2026-10-17 | S2-018: added `DurableRoom`, committing accepted batches under the fencing token before confirming or broadcasting them and reopening rooms by fenced takeover plus checksum-verified replay. S2 reaches 20/21. |
