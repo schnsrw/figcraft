@@ -259,9 +259,13 @@ async fn a_connection_killed_in_the_row_lock_queue_writes_nothing_and_frees_the_
     let writer_pid = timeout(BOUND, writer_pid_receiver).await??;
     wait_until_blocked(&pool, writer_pid).await?;
 
-    // Killing the queued victim surfaces as a typed database error and leaves its queue slot.
+    // Killing the queued victim surfaces as a typed connection-loss error and leaves its queue
+    // slot. Connection loss is ambiguous in general (a commit may have landed), so it is not
+    // flagged as blindly retryable.
     kill(&pool, victim_pid).await?;
-    assert_eq!(join(victim).await?, Err(EventRepositoryError::Database));
+    let killed = join(victim).await?;
+    assert_eq!(killed, Err(EventRepositoryError::Unavailable));
+    assert!(killed.is_err_and(|error| error.is_ambiguous() && !error.is_retryable()));
     assert_eq!(log_shape(&pool, document).await?, before, "the killed waiter wrote nothing");
     wait_until_blocked(&pool, writer_pid).await?;
 
@@ -338,7 +342,8 @@ async fn lock_and_statement_timeouts_cancel_cleanly_with_a_typed_error() -> Test
     sqlx::query("SET LOCAL lock_timeout = '50ms'").execute(victim.connection()).await?;
     let started = Instant::now();
     let result = append_events(&mut victim, document, claim.fencing_token, actor, &[batch(next, run_batch_id())?]).await;
-    assert_eq!(result, Err(EventRepositoryError::Database));
+    assert_eq!(result, Err(EventRepositoryError::Timeout));
+    assert!(result.is_err_and(EventRepositoryError::is_retryable), "an aborted, cancelled transaction is safe to retry");
     assert!(started.elapsed() < BOUND, "the lock timeout did not fire");
     // The transaction is aborted: further statements fail, and a COMMIT the caller sends anyway is
     // turned into a rollback by the server, so nothing partial can become durable.
@@ -349,7 +354,7 @@ async fn lock_and_statement_timeouts_cancel_cleanly_with_a_typed_error() -> Test
     // `statement_timeout` cancels a takeover the same way; the fencing token does not move.
     let mut takeover = begin(&pool).await?;
     sqlx::query("SET LOCAL statement_timeout = '50ms'").execute(takeover.connection()).await?;
-    assert_eq!(claim_sequencer(&mut takeover, document).await, Err(EventRepositoryError::Database));
+    assert_eq!(claim_sequencer(&mut takeover, document).await, Err(EventRepositoryError::Timeout));
     let _ = takeover.commit().await;
     assert_eq!(log_shape(&pool, document).await?, before, "a cancelled takeover moved nothing");
 

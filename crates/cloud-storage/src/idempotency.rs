@@ -55,7 +55,19 @@ pub enum ReservationOutcome {
     /// retry that caught the first attempt before it completed). The caller should signal this
     /// distinctly (for example, a 409) rather than proceed.
     InFlight,
+    /// A prior attempt with the same request reserved the key more than
+    /// [`RESERVATION_LEASE_SECONDS`] ago and never completed: its worker is presumed dead. The
+    /// reservation now belongs to this caller, which should perform the real work again and then
+    /// call [`complete_idempotency_key`]. If the earlier worker was only slow and completes first,
+    /// this caller's completion is refused with [`RepositoryError::InvalidState`] and the next
+    /// retry replays the earlier response.
+    TakenOver,
 }
+
+/// How long a `pending` reservation is honoured before a retry with the same request may take it
+/// over. It must exceed the longest time a request may legitimately take between reserving and
+/// completing its key, or a slow first attempt and its takeover both execute.
+pub const RESERVATION_LEASE_SECONDS: i64 = 5 * 60;
 
 /// Validate a requested TTL before issuing any SQL. Mirrors `PageSize::new`'s up-front validation
 /// style in `metadata.rs`.
@@ -102,9 +114,12 @@ fn resolve_existing_attempt(row: StoredAttemptRow, request_hash: &[u8]) -> Resul
 /// prior attempt.
 ///
 /// On first use the row does not exist: a new `pending` row is inserted and
-/// [`ReservationOutcome::Reserved`] is returned. On repeated use with the same `request_hash`, the
-/// stored response is replayed if the prior attempt completed, or [`ReservationOutcome::InFlight`]
-/// is returned if it is still pending. On repeated use with a *different* `request_hash`, the same
+/// [`ReservationOutcome::Reserved`] is returned. A row whose `expires_at` has passed is treated as
+/// absent and reset to a fresh reservation (also `Reserved`). On repeated use with the same
+/// `request_hash`, the stored response is replayed if the prior attempt completed, the reservation
+/// is taken over ([`ReservationOutcome::TakenOver`]) if it is still pending after
+/// [`RESERVATION_LEASE_SECONDS`], or [`ReservationOutcome::InFlight`] is returned if it is pending
+/// within its lease. On repeated use with a *different* `request_hash`, the same
 /// key was reused for a materially different request and `Err(RepositoryError::Conflict)` is
 /// returned.
 ///
@@ -141,6 +156,56 @@ pub async fn reserve_idempotency_key(
 
     if inserted.is_some() {
         return Ok(ReservationOutcome::Reserved);
+    }
+
+    // An expired key is treated as absent, whatever its state or request: the row is reset to a
+    // fresh reservation for this request. The `UPDATE` takes the row lock, so of several racing
+    // retries exactly one resets it; the others re-check the predicate against the reset row
+    // (READ COMMITTED) and fall through to the lease and replay checks below.
+    let reset: Option<(String,)> = sqlx::query_as(
+        "UPDATE idempotency_keys \
+         SET request_hash = $5, state = 'pending', response_status = NULL, response_body = NULL, response_content_type = NULL, \
+             created_at = now(), updated_at = now(), expires_at = now() + make_interval(secs => $6) \
+         WHERE tenant_id = $1::uuid AND principal_id = $2::uuid AND route = $3 AND key_hash = $4 AND expires_at <= now() \
+         RETURNING tenant_id::text",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(principal_id.to_string())
+    .bind(route)
+    .bind(key_hash)
+    .bind(request_hash)
+    .bind(ttl_seconds)
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+
+    if reset.is_some() {
+        return Ok(ReservationOutcome::Reserved);
+    }
+
+    // A pending reservation for the same request whose lease ran out is taken over. `updated_at`
+    // is the reservation time of a pending row (it is set on insert, reset, takeover and
+    // completion only), so a takeover renews the lease and a racing second takeover no longer
+    // matches. A different request never takes over: it is a key reuse, refused below.
+    let taken_over: Option<(String,)> = sqlx::query_as(
+        "UPDATE idempotency_keys SET updated_at = now() \
+         WHERE tenant_id = $1::uuid AND principal_id = $2::uuid AND route = $3 AND key_hash = $4 \
+           AND state = 'pending' AND request_hash = $5 AND expires_at > now() \
+           AND updated_at <= now() - make_interval(secs => $6) \
+         RETURNING tenant_id::text",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(principal_id.to_string())
+    .bind(route)
+    .bind(key_hash)
+    .bind(request_hash)
+    .bind(RESERVATION_LEASE_SECONDS)
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+
+    if taken_over.is_some() {
+        return Ok(ReservationOutcome::TakenOver);
     }
 
     let existing: Option<StoredAttemptRow> = sqlx::query_as(
