@@ -15,6 +15,7 @@ pub mod exports;
 pub mod external_mappings;
 pub mod garbage_collection;
 pub mod idempotency;
+pub mod invitations;
 pub mod legacy_import;
 pub mod legacy_scan;
 pub mod libraries;
@@ -32,6 +33,8 @@ pub mod service_accounts;
 pub mod sessions;
 pub mod share_links;
 pub mod snapshots;
+pub mod teams;
+pub mod tenants;
 pub mod uploads;
 pub mod validation;
 
