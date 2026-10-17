@@ -150,6 +150,17 @@ hold both).
   same lockout and per-login backoff as sign-in), stores a new Argon2id hash, revokes **every**
   session of the person and signs the browser in again with a fresh one; a person lists and revokes
   only their own sessions (another person's session id is a plain `404`; tokens are never returned).
+* **Administration** (S6-037, `member.manage`; owners need `member.manage_owners`): an
+  administrator creates a password account (the person gets a one-time **setup token**, valid one
+  day by default and at most seven, to choose their first password), disables or re-enables it, issues
+  a **reset token** and ends all of a person's sessions. Tokens are 256 random bits, stored only as a
+  SHA-256, shown once, single use (of any number of concurrent uses exactly one wins, the row is
+  locked), a person has at most one live link, a reset link lives at most one hour (a database CHECK
+  enforces both maxima), and a link for a disabled account is refused. Using a link ends every session
+  of the person and clears lockout. Disabling suspends the membership (so every request is refused at
+  once), disables the credential, revokes sessions and revokes pending links; the last active owner
+  cannot be disabled. Audit: `account.admin_create`, `credential.reset_issue`, `credential.reset_used`,
+  `credential.disable`/`enable`, `account.revoke_sessions` (no logins, passwords or tokens).
 * **Never** logged, returned or audited: passwords, hashes, reset or invitation tokens.
 
 ## Authorization controls

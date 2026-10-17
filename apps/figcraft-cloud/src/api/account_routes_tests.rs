@@ -86,9 +86,12 @@ async fn whoami(caller: Authenticated) -> Json<Value> {
 /// The router: the auth routes under test, the account-settings resource routes and `whoami`.
 fn app(state: AppState) -> Router {
     let auth = super::super::auth_routes::routes().merge(super::auth_routes());
-    let auth = auth.merge(super::super::accounts_contract::routes());
-    let resources =
-        Router::new().route("/tenants/{tenant}/whoami", get(whoami)).merge(super::resource_routes()).merge(super::super::me_routes::routes());
+    let auth = auth.merge(super::super::accounts_contract::routes()).merge(super::super::admin_users_routes::auth_routes());
+    let resources = Router::new()
+        .route("/tenants/{tenant}/whoami", get(whoami))
+        .merge(super::resource_routes())
+        .merge(super::super::me_routes::routes())
+        .merge(super::super::admin_users_routes::resource_routes());
     let api = api_router_with(state, auth, resources);
     crate::health::app(CloudRole::Api, true, Some(api), ContextSettings::new(CloudRole::Api, 64, Duration::from_secs(20), 1 << 20))
 }
@@ -453,6 +456,7 @@ async fn a_self_hoster_bootstraps_with_a_password_and_no_identity_provider() -> 
     // While bootstrap is pending the sign-in methods are readable (no provider is configured).
     let reply = call(&app, Method::GET, "/api/v1/auth/methods", &[], None).await;
     assert_eq!((reply.status, reply.body["password"].as_bool(), reply.body["oidc"].as_bool()), (StatusCode::OK, Some(true), Some(false)));
+    assert_eq!(reply.body["bootstrap_required"], true, "the sign-in screen can tell first-run from sign-in");
     // CSRF, a wrong token and a weak password create nothing.
     assert_eq!(call(&app, Method::POST, path, &[], Some(body(&token, "owner@example.test"))).await.status, StatusCode::FORBIDDEN);
     assert_eq!(post(&app, path, body(&"B".repeat(43), "owner@example.test")).await.status, StatusCode::FORBIDDEN);
@@ -468,6 +472,8 @@ async fn a_self_hoster_bootstraps_with_a_password_and_no_identity_provider() -> 
     let cookie = reply.session().ok_or("cookie")?;
     let reply = call(&app, Method::GET, "/api/v1/auth/session", &[("cookie", &cookie)], None).await;
     assert_eq!((reply.body["tenant"]["role"].as_str(), reply.body["bootstrap_required"].as_bool()), (Some("tenant_owner"), Some(false)));
+    let reply = call(&app, Method::GET, "/api/v1/auth/methods", &[], None).await;
+    assert_eq!(reply.body["bootstrap_required"], false);
     // The token worked once.
     assert_eq!(post(&app, path, body(&token, "second@example.test")).await.status, StatusCode::FORBIDDEN);
     let credentials: i64 =
@@ -912,5 +918,265 @@ async fn people_list_and_revoke_only_their_own_sessions() -> TestResult {
     assert_eq!(reply.status, StatusCode::NO_CONTENT);
     assert!(reply.headers.get(header::SET_COOKIE).is_some_and(|value| value.to_str().is_ok_and(|v| v.contains("Max-Age=0"))));
     assert_eq!(call(&app, Method::GET, "/api/v1/me/sessions", &[("cookie", &b)], None).await.status, StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------ S6-037
+
+fn users_path(w: &World) -> String {
+    format!("/api/v1/tenants/{}/users", w.tenant)
+}
+
+async fn as_owner(app: &Router, w: &World, method: Method, path: &str, body: Option<Value>) -> Result<Reply, Error> {
+    let cookie = w.owner_cookie().await?;
+    Ok(call(app, method, path, &[("cookie", &cookie), ("origin", ORIGIN)], body).await)
+}
+
+async fn create(app: &Router, w: &World, login: &str, role: &str) -> Result<Reply, Error> {
+    as_owner(app, w, Method::POST, &users_path(w), Some(json!({"login": login, "display_name": "Made By Admin", "role": role}))).await
+}
+
+const RESET: &str = "/api/v1/auth/password/reset";
+
+#[tokio::test]
+async fn an_administrator_creates_an_account_and_the_person_sets_their_password_once() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let login = email();
+
+    // Only people with member.manage may create accounts; CSRF applies.
+    let (viewer_login, _) = account(&w, &app).await?;
+    let viewer = sign_in(&app, &w, &viewer_login, GOOD).await?;
+    let body = json!({"login": login, "display_name": "Made By Admin"});
+    assert_eq!(call(&app, Method::POST, &users_path(&w), &authed(&viewer), Some(body.clone())).await.status, StatusCode::FORBIDDEN);
+    let owner = w.owner_cookie().await?;
+    assert_eq!(call(&app, Method::POST, &users_path(&w), &[("cookie", &owner)], Some(body.clone())).await.status, StatusCode::FORBIDDEN, "CSRF");
+    assert_eq!(create(&app, &w, "x y", "viewer").await?.status, StatusCode::BAD_REQUEST);
+    assert_eq!(create(&app, &w, &login, "emperor").await?.status, StatusCode::BAD_REQUEST);
+
+    let reply = create(&app, &w, &login, "editor").await?;
+    assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    let token = reply.body["setup_token"].as_str().ok_or("token")?.to_string();
+    let principal = reply.body["principal_id"].as_str().ok_or("principal")?.to_string();
+    assert_eq!((token.len(), reply.body["role"].as_str()), (43, Some("editor")));
+    assert_eq!(create(&app, &w, &login, "viewer").await?.status, StatusCode::CONFLICT);
+    // Until they choose a password nobody can sign in as them.
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::UNAUTHORIZED);
+    // Only a hash of the token is stored, and the audit trail never carries it.
+    let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM password_resets WHERE principal_id = $1::uuid AND token_hash = $2")
+        .bind(&principal)
+        .bind(figcraft_cloud_storage::sessions::session_token_hash(&token).to_vec())
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(stored, 1);
+    let leaked: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE tenant_id = $1::uuid AND metadata::text LIKE '%' || $2 || '%'")
+        .bind(w.tenant.to_string())
+        .bind(&token)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(leaked, 0);
+
+    // A weak password is explained and does not burn the link; CSRF and junk tokens are refused.
+    let weak = post(&app, RESET, json!({"token": token, "new_password": "short"})).await;
+    assert_eq!((weak.status, weak.body["error"]["reason"].as_str()), (StatusCode::BAD_REQUEST, Some("password_policy")));
+    assert_eq!(call(&app, Method::POST, RESET, &[], Some(json!({"token": token, "new_password": GOOD}))).await.status, StatusCode::FORBIDDEN);
+    for junk in ["", "A".repeat(43).as_str(), "not a token", "A".repeat(500).as_str()] {
+        assert_eq!(post(&app, RESET, json!({"token": junk, "new_password": GOOD})).await.status, StatusCode::NOT_FOUND, "{junk}");
+    }
+    // The person's first password; the link is single use even under concurrency.
+    let mut tasks = Vec::new();
+    for n in 0..6 {
+        let (app, token) = (app.clone(), token.clone());
+        tasks.push(tokio::spawn(async move { (n, post(&app, RESET, json!({"token": token, "new_password": format!("{GOOD} {n}")})).await.status) }));
+    }
+    let mut winners = Vec::new();
+    for task in tasks {
+        match task.await? {
+            (n, StatusCode::OK) => winners.push(n),
+            (_, StatusCode::NOT_FOUND) => {}
+            (_, other) => return Err(format!("unexpected {other}").into()),
+        }
+    }
+    assert_eq!(winners.len(), 1, "exactly one use of the link succeeds");
+    let used: i64 = sqlx::query_scalar("SELECT count(*) FROM password_resets WHERE principal_id = $1::uuid AND used_at IS NOT NULL")
+        .bind(&principal)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(used, 1);
+    // The winner's password is the one that works.
+    let loser = (winners[0] + 1) % 6;
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, &format!("{GOOD} {loser}"))).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, &format!("{GOOD} {}", winners[0]))).await.status, StatusCode::OK);
+
+    // The new account is listed with its role.
+    let listed = as_owner(&app, &w, Method::GET, &users_path(&w), None).await?;
+    let items = listed.body["items"].as_array().ok_or("items")?;
+    let mine = items.iter().find(|item| item["principal_id"] == principal.as_str()).ok_or("listed")?;
+    assert_eq!((mine["role"].as_str(), mine["state"].as_str(), mine["member_state"].as_str()), (Some("editor"), Some("active"), Some("active")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn reset_links_expire_in_an_hour_replace_each_other_and_end_sessions() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, principal) = account(&w, &app).await?;
+    let session = sign_in(&app, &w, &login, GOOD).await?;
+    // The person is locked out by their own guesses.
+    sqlx::query("UPDATE local_credentials SET failed_attempts = 5, locked_until = now() + interval '10 minutes' WHERE principal_id = $1::uuid")
+        .bind(&principal)
+        .execute(&w.admin)
+        .await?;
+    let path = format!("{}/{principal}/reset-link", users_path(&w));
+    let first = as_owner(&app, &w, Method::POST, &path, Some(json!({}))).await?;
+    assert_eq!(first.status, StatusCode::CREATED, "{:?}", first.body);
+    assert!(first.body["expires_in_secs"].as_i64().is_some_and(|secs| secs <= 3600));
+    let lifetime: f64 = sqlx::query_scalar("SELECT extract(epoch FROM expires_at - created_at)::float8 FROM password_resets WHERE principal_id = $1::uuid ORDER BY created_at DESC LIMIT 1")
+        .bind(&principal)
+        .fetch_one(&w.admin)
+        .await?;
+    assert!(lifetime <= 3600.0);
+    let first_token = first.body["reset_token"].as_str().ok_or("token")?.to_string();
+    // A newer link replaces the older one.
+    let second = as_owner(&app, &w, Method::POST, &path, Some(json!({}))).await?;
+    let second_token = second.body["reset_token"].as_str().ok_or("token")?.to_string();
+    assert_ne!(first_token, second_token);
+    assert_eq!(post(&app, RESET, json!({"token": first_token, "new_password": GOOD})).await.status, StatusCode::NOT_FOUND);
+    // An expired link is refused.
+    let third = as_owner(&app, &w, Method::POST, &path, Some(json!({}))).await?;
+    let third_token = third.body["reset_token"].as_str().ok_or("token")?.to_string();
+    sqlx::query("UPDATE password_resets SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' WHERE token_hash = $1")
+        .bind(figcraft_cloud_storage::sessions::session_token_hash(&third_token).to_vec())
+        .execute(&w.admin)
+        .await?;
+    assert_eq!(post(&app, RESET, json!({"token": third_token, "new_password": GOOD})).await.status, StatusCode::NOT_FOUND);
+    // The live one works: sessions end, the lock clears, the old password stops working.
+    let fresh = as_owner(&app, &w, Method::POST, &path, Some(json!({}))).await?;
+    let token = fresh.body["reset_token"].as_str().ok_or("token")?.to_string();
+    let new_password = "my replacement passphrase 31";
+    let reply = post(&app, RESET, json!({"token": token, "new_password": new_password})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let whoami = format!("/api/v1/tenants/{}/whoami", w.tenant);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &session)], None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, new_password)).await.status, StatusCode::OK);
+    assert_eq!(post(&app, RESET, json!({"token": token, "new_password": GOOD})).await.status, StatusCode::NOT_FOUND, "single use");
+    let mut actions: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT action FROM audit_events WHERE tenant_id = $1::uuid AND action LIKE 'credential.reset%'")
+            .bind(w.tenant.to_string())
+            .fetch_all(&w.admin)
+            .await?;
+    actions.sort();
+    assert_eq!(actions, ["credential.reset_issue", "credential.reset_used"]);
+    // A link for a disabled account is refused, and none can be issued.
+    let disabled_path = format!("{}/{principal}/disable", users_path(&w));
+    let link = as_owner(&app, &w, Method::POST, &path, Some(json!({}))).await?;
+    assert_eq!(as_owner(&app, &w, Method::POST, &disabled_path, None).await?.status, StatusCode::NO_CONTENT);
+    let token = link.body["reset_token"].as_str().ok_or("token")?;
+    assert_eq!(post(&app, RESET, json!({"token": token, "new_password": GOOD})).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(as_owner(&app, &w, Method::POST, &path, Some(json!({}))).await?.status, StatusCode::CONFLICT);
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabling_ends_live_sessions_at_once_and_enabling_restores_access() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, principal) = account(&w, &app).await?;
+    let one = sign_in(&app, &w, &login, GOOD).await?;
+    let two = sign_in(&app, &w, &login, GOOD).await?;
+    let whoami = format!("/api/v1/tenants/{}/whoami", w.tenant);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &one)], None).await.status, StatusCode::OK);
+    let base = format!("{}/{principal}", users_path(&w));
+
+    // Not for ordinary members, not for strangers' tenants.
+    let (other_login, _) = account(&w, &app).await?;
+    let other = sign_in(&app, &w, &other_login, GOOD).await?;
+    assert_eq!(call(&app, Method::POST, &format!("{base}/disable"), &authed(&other), None).await.status, StatusCode::FORBIDDEN);
+    let elsewhere = world().await?.ok_or("world")?;
+    let foreign = elsewhere.owner_cookie().await?;
+    let foreign_app = self::app(state(elsewhere.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    assert_eq!(
+        call(&foreign_app, Method::POST, &format!("{}/{principal}/disable", users_path(&elsewhere)), &authed(&foreign), None).await.status,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &one)], None).await.status, StatusCode::OK, "nothing changed");
+
+    assert_eq!(as_owner(&app, &w, Method::POST, &format!("{base}/disable"), None).await?.status, StatusCode::NO_CONTENT);
+    // Both live sessions are refused at once, the password no longer signs in, and the listing says so.
+    for cookie in [&one, &two] {
+        assert!(matches!(
+            call(&app, Method::GET, &whoami, &[("cookie", cookie)], None).await.status,
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+        ));
+    }
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::UNAUTHORIZED);
+    let live: i64 = sqlx::query_scalar("SELECT count(*) FROM browser_sessions WHERE principal_id = $1::uuid AND revoked_at IS NULL")
+        .bind(&principal)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(live, 0, "the sessions were revoked, not just refused");
+    let listed = as_owner(&app, &w, Method::GET, &users_path(&w), None).await?;
+    let mine =
+        listed.body["items"].as_array().ok_or("items")?.iter().find(|item| item["principal_id"] == principal.as_str()).ok_or("listed")?.clone();
+    assert_eq!((mine["state"].as_str(), mine["member_state"].as_str()), (Some("disabled"), Some("suspended")));
+    // Disabling again is harmless; enabling restores sign-in.
+    assert_eq!(as_owner(&app, &w, Method::POST, &format!("{base}/disable"), None).await?.status, StatusCode::NO_CONTENT);
+    assert_eq!(as_owner(&app, &w, Method::POST, &format!("{base}/enable"), None).await?.status, StatusCode::NO_CONTENT);
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
+    // Audited.
+    let mut actions: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT action FROM audit_events WHERE tenant_id = $1::uuid AND action IN ('credential.disable', 'credential.enable')",
+    )
+    .bind(w.tenant.to_string())
+    .fetch_all(&w.admin)
+    .await?;
+    actions.sort();
+    assert_eq!(actions, ["credential.disable", "credential.enable"]);
+
+    // An administrator may not touch an owner; the last owner cannot be disabled even by themselves.
+    let (admin_login, admin_id) = account(&w, &app).await?;
+    sqlx::query("UPDATE tenant_members SET role = 'tenant_admin' WHERE principal_id = $1::uuid").bind(&admin_id).execute(&w.admin).await?;
+    let admin_cookie = sign_in(&app, &w, &admin_login, GOOD).await?;
+    let owner_path = format!("{}/{}/disable", users_path(&w), w.owner);
+    assert_eq!(
+        call(&app, Method::POST, &owner_path, &authed(&admin_cookie), None).await.status,
+        StatusCode::NOT_FOUND,
+        "the owner has no password account here"
+    );
+    // Give the owner a password account, then check the two protections.
+    let owner_hash = "$argon2id$v=19$m=8192,t=1,p=1$c29tZXNhbHRzb21l$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNo";
+    sqlx::query("INSERT INTO local_credentials (tenant_id, principal_id, login, password_hash) VALUES ($1::uuid, $2::uuid, $3, $4)")
+        .bind(w.tenant.to_string())
+        .bind(w.owner.to_string())
+        .bind(email())
+        .bind(owner_hash)
+        .execute(&w.admin)
+        .await?;
+    assert_eq!(call(&app, Method::POST, &owner_path, &authed(&admin_cookie), None).await.status, StatusCode::FORBIDDEN);
+    assert_eq!(as_owner(&app, &w, Method::POST, &owner_path, None).await?.status, StatusCode::CONFLICT, "the last active owner stays");
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_administrator_can_end_every_session_of_a_person() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, principal) = account(&w, &app).await?;
+    let (one, two) = (sign_in(&app, &w, &login, GOOD).await?, sign_in(&app, &w, &login, GOOD).await?);
+    let path = format!("{}/{principal}/revoke-sessions", users_path(&w));
+    let (viewer_login, _) = account(&w, &app).await?;
+    let viewer = sign_in(&app, &w, &viewer_login, GOOD).await?;
+    assert_eq!(call(&app, Method::POST, &path, &authed(&viewer), None).await.status, StatusCode::FORBIDDEN);
+    let reply = as_owner(&app, &w, Method::POST, &path, None).await?;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(reply.body["revoked"].as_u64().is_some_and(|n| n >= 2));
+    let whoami = format!("/api/v1/tenants/{}/whoami", w.tenant);
+    for cookie in [&one, &two] {
+        assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", cookie)], None).await.status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &viewer)], None).await.status, StatusCode::OK);
+    // They can sign in again (sessions are not a ban).
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
     Ok(())
 }

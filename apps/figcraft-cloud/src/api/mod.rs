@@ -22,6 +22,7 @@
 
 pub(crate) mod account_routes;
 pub(crate) mod accounts_contract;
+pub(crate) mod admin_users_routes;
 pub(crate) mod auth;
 pub(crate) mod auth_routes;
 pub(crate) mod authenticator;
@@ -262,6 +263,7 @@ pub(crate) fn api_router(state: AppState) -> Router {
     let auth: Router<AppState> = Router::new()
         .merge(auth_routes::routes())
         .merge(account_routes::auth_routes())
+        .merge(admin_users_routes::auth_routes())
         .merge(accounts_contract::routes())
         .merge(host_api::auth_router());
     let resources: Router<AppState> = Router::new()
@@ -269,6 +271,7 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(account_routes::resource_routes())
         .merge(me_routes::routes())
         .merge(me_api::me_routes())
+        .merge(admin_users_routes::resource_routes())
         .merge(documents_api::routes())
         .merge(host_api::router());
     // The platform realm (`/platform/v1`) is a separate router with its own authenticator.

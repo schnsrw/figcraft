@@ -4,7 +4,7 @@
 //!
 //! | Route (under `/api/v1`) | What it does |
 //! |---|---|
-//! | `GET auth/methods?tenant=` | the sign-in methods the workspace offers: `{tenant_id, password, oidc, open_registration}`. Unauthenticated (the sign-in screen needs it); `tenant` is an id or a slug, ignored in single-tenant mode; `404` for an unknown or inactive tenant |
+//! | `GET auth/methods?tenant=` | the sign-in methods the workspace offers: `{tenant_id, password, oidc, open_registration, bootstrap_required}` (`bootstrap_required` is true only while a single-tenant deployment awaits its first owner). Unauthenticated (the sign-in screen needs it); `tenant` is an id or a slug, ignored in single-tenant mode; `404` for an unknown or inactive tenant |
 //! | `POST auth/password/signup` | `{invitation, display_name, password}` (the holder of an invitation creates their account; the login is the invited address) or `{tenant, login, display_name, password}` (only when the tenant turned open registration on). Creates the account and its membership atomically and signs the person in (session cookie, `201`) |
 //! | `POST auth/password/login` | `{tenant?, login, password}`: password sign-in (S6-035). Every failure (unknown login, wrong password, disabled or locked account, suspended member) is the same fixed `401`; a login that keeps failing is answered `429` with `Retry-After` whatever it is. A tenant that turned passwords off answers `403`. Success rotates the browser's session (the old cookie is revoked) and sets a new one |
 //! | `POST auth/password/bootstrap` | `{token, login, display_name, password}` while a single-tenant deployment awaits its owner: the person who holds the printed bootstrap token becomes `tenant_owner` with a password account, so a self-hoster needs no external identity provider (session cookie, `200`) |
@@ -151,6 +151,18 @@ async fn methods(State(state): State<AppState>, Query(query): Query<MethodsQuery
     }
     let settings = account_settings::get_settings(&mut transaction).await.map_err(storage_unavailable)?;
     transaction.rollback().await.map_err(storage_unavailable)?;
+    // True only while a single-tenant deployment still awaits its first owner (the same value
+    // `GET auth/session` reports to a signed-in caller).
+    let bootstrap_required = match identity(&state)?.bootstrap_tenant() {
+        Some(single) if single == tenant && !identity(&state)?.bootstrap_known_done() => {
+            let required = bootstrap::bootstrap_required(state.pool(), tenant).await.map_err(|_| ApiError::unavailable())?;
+            if !required {
+                identity(&state)?.mark_bootstrap_done();
+            }
+            required
+        }
+        _ => false,
+    };
     // A method is offered only when the tenant allows it and this deployment can serve it.
     let password = settings.password_enabled && state.passwords().is_some();
     let body = json!({
@@ -158,6 +170,7 @@ async fn methods(State(state): State<AppState>, Query(query): Query<MethodsQuery
         "password": password,
         "oidc": settings.oidc_enabled && state.oidc().is_some(),
         "open_registration": password && settings.open_registration,
+        "bootstrap_required": bootstrap_required,
     });
     respond(StatusCode::OK, &[], None, Some(body))
 }
