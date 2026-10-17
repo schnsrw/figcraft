@@ -163,7 +163,8 @@ impl Win {
     }
 }
 
-const CMD: Modifiers = Modifiers::COMMAND.plus(Modifiers::CTRL);
+// macOS treats Ctrl+Cmd as a different chord from Cmd. On Windows/Linux Ctrl is the command key.
+const CMD: Modifiers = if cfg!(target_os = "macos") { Modifiers::COMMAND } else { Modifiers::CTRL };
 
 fn key(key: Key, pressed: bool, modifiers: Modifiers) -> Event {
     Event::Key { key, physical_key: Some(key), pressed, repeat: false, modifiers }
