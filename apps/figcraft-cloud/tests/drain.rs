@@ -159,6 +159,17 @@ impl Raw {
     }
 }
 
+/// Kills the process when the test ends any way at all, so a failed assertion can't leave a
+/// relay holding the ports for the next run.
+struct Killed(Child);
+
+impl Drop for Killed {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn terminate(child: &Child) {
     let status = Command::new("kill").arg("-TERM").arg(child.id().to_string()).status().unwrap();
     assert!(status.success());
@@ -169,7 +180,8 @@ fn a_stopping_process_drains_then_stops_cleanly() {
     let Some(stack) = stack() else { return };
     let (file, token) = create_link(&stack);
     let document: CloudDocumentId = file.parse().unwrap();
-    let mut relay = binary().envs(stack.envs.clone()).arg("--role").arg("relay").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap();
+    let mut relay =
+        Killed(binary().envs(stack.envs.clone()).arg("--role").arg("relay").stdout(Stdio::null()).stderr(Stdio::piped()).spawn().unwrap());
     wait_for("the process to be ready", Duration::from_secs(60), || get("/readyz").is_some_and(|(status, _)| status.contains("200")));
 
     // A session in the room, with one confirmed edit.
@@ -206,7 +218,7 @@ fn a_stopping_process_drains_then_stops_cleanly() {
     };
     assert!(lease_held(document), "the open room is leased");
 
-    terminate(&relay);
+    terminate(&relay.0);
     let told = Instant::now();
     // Not ready from now on, and says why.
     wait_for("readiness to turn to draining", Duration::from_secs(2), || {
@@ -230,8 +242,8 @@ fn a_stopping_process_drains_then_stops_cleanly() {
     }
     assert!(told.elapsed() >= Duration::from_secs(DRAIN_SECONDS), "the drain period was honoured: {:?}", told.elapsed());
     // ...the process exits cleanly, having released the room's lease.
-    wait_for("the process to exit", Duration::from_secs(20), || relay.try_wait().unwrap().is_some());
-    let status = relay.wait().unwrap();
+    wait_for("the process to exit", Duration::from_secs(20), || relay.0.try_wait().unwrap().is_some());
+    let status = relay.0.wait().unwrap();
     assert!(status.success(), "clean exit, got {status:?}");
     assert!(!lease_held(document), "the room's lease was released on the way out");
 }
