@@ -163,6 +163,27 @@ setting a single relay serves rooms without leases.
 Single-tenant mode still stores the configured tenant identifier on every row. It may provide an
 initial bootstrap administrator, but bootstrap credentials expire or are removed after setup.
 
+### Platform operators (S6-044, S6-045)
+
+The platform realm (`/platform/v1`) is for the people who run the deployment, separate from every
+workspace. It needs `DATABASE_URL`, `SESSION_SIGNING_KEY` (the TOTP secrets are sealed with a
+subkey of it) and `FIGCRAFT_PUBLIC_URL` (the same-origin check for state-changing requests).
+
+1. Create the first operator: `figcraft-cloud --print-platform-bootstrap-token` prints a one-time
+   token (valid one hour; running it again replaces it; refused once a platform admin exists).
+2. Spend it: `POST /platform/v1/bootstrap` with `token`, `login`, `display_name` and `password`
+   (the same password policy as workspace accounts, Argon2id).
+3. Sign in at `POST /platform/v1/session`, enrol the authenticator app
+   (`POST /platform/v1/session/totp/enrol`, then verify a code at `/session/totp`). A session is
+   accepted by the API only after the second factor. Sessions last 15 minutes idle and 4 hours
+   at most; five failed attempts lock an admin for 15 minutes; sign-in is rate limited per client.
+4. Create further operators with `POST /platform/v1/admins`. The last active admin cannot be
+   disabled. Every action is appended to `platform_audit_events`.
+
+The platform cookie is `__Secure-figcraft-platform` with `Path=/platform/v1`, so it is never sent
+to the workspace API. The contract is `apps/figcraft-cloud/openapi/platform-api-v1.json`, served at
+`/platform/v1/openapi.json`.
+
 ## Container requirements
 
 - Run as a numeric, non-root user.

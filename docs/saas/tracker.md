@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (16/57) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (17/57) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 16 / 57 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 17 / 57 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2610,10 +2610,29 @@ holds projects. The platform API calls the company `workspace` in its paths and 
   tenant-table inventory. Design and limits in `security.md` ("Platform realm"). Not done: one
   database role serves both realms (the separation is RLS plus a single code path, documented); a
   second role is S8 hardening.
-- [ ] **S6-045** Platform admin identity: first admin bootstrapped from the CLI with a one-time token
+- [x] **S6-045** Platform admin identity: first admin bootstrapped from the CLI with a one-time token
   (like `--print-bootstrap-token`), password through the Argon2id module of S6-033, mandatory
   TOTP-ready second factor, separate session cookie name, path and shorter lifetime, separate rate
   limits, every action audited to the platform audit log. Depends on S6-033 (hashing module).
+  Evidence: `crates/cloud-storage/src/platform_admins.rs` (admins, one-time bootstrap token hashed at
+  rest and spent atomically, sessions with a second-factor flag, lockout counters, single-use TOTP
+  steps, last-active-admin protection) and `apps/figcraft-cloud/src/platform_api/` (`session.rs`,
+  `admins.rs`, `totp.rs` RFC 6238 with the RFC vectors, `mod.rs`): `figcraft-cloud
+  --print-platform-bootstrap-token`; `POST /platform/v1/bootstrap`; password sign-in through
+  `PasswordService` (Argon2id, unknown login costs the same, fixed 401); TOTP enrol and verify (secret
+  sealed with `secret_box`); the cookie `__Secure-figcraft-platform` (Path=/platform/v1, HttpOnly,
+  Secure, SameSite=Strict), 15 minutes idle and 4 hours absolute; separate limiters (5 attempts then one
+  per 12 s for sign-in, 120 then 2 per second for the API); same-origin check for unsafe methods; five
+  failures lock an admin for 15 minutes. OpenAPI `apps/figcraft-cloud/openapi/platform-api-v1.json`
+  (served at `/platform/v1/openapi.json`). Live tests: `crates/cloud-storage/tests/platform_admins.rs`
+  (5: bootstrap once, wrong, expired and spent tokens; last-admin protection; session states, idle expiry,
+  revocation on logout, password change and disable; lockout; TOTP step replay) and
+  `platform_api/tests.rs` (full sign-in flow with audit rows for refusals and successes and no secrets,
+  CSRF, workspace credentials refused on `/platform/v1` and platform credentials refused on `/api/v1`
+  in every cookie, a service-account bearer refused, lockout including the right password, per-client
+  rate limit, admin create/disable/enable with the audit log, bootstrap refusals, every documented
+  operation routed and 401 without a session). Not done: password change and TOTP reset for an
+  admin by another admin (disabling and recreating is the recovery for now); no recovery codes.
 - [ ] **S6-046** Platform API under `/platform/v1` with its own authenticator that a workspace
   session cannot satisfy: create workspace (name, slug, owner invite or owner email and link, plan,
   region), list/get, suspend, restore, archive, set plan, list/create/disable platform admins,
@@ -2926,5 +2945,6 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-032: local credentials table (tenant-scoped, forced RLS, unique login per tenant, PHC hash with parameters, lockout counters) and its repository (schema 20261018000014). S6 reaches 12/57. |
 | 2026-10-18 | S6-033: Argon2id password hashing module, policy and bounded hashing service (decision record password-hashing-decision.md). S6 reaches 13/57. |
 | 2026-10-18 | S6-044: platform realm tables with their own row-level-security scope, append-only platform audit log and metadata-only workspace reads (schema 20261018000020). S6 reaches 14/57. |
-| 2026-10-18 | S6-034: invitation-based sign-up, off-by-default open registration, password bootstrap for self-hosters, per-tenant account settings and the accounts OpenAPI contract (schema 20261018000021). S6 reaches 15/57. |
+| 2026-10-18 | S6-034: invitation-based sign-up, off-by-default open registration, password bootstrap for self-hosters, per-tenant account settings and the accounts OpenAPI contract (schema 20261018000021). S6 reaches 17/57. |
 | 2026-10-18 | S6-035: password sign-in with enumeration-resistant failures, per-address, per-login and per-account limits, session rotation, rehash on login and per-tenant allowed methods. S6 reaches 16/57. |
+| 2026-10-18 | S6-045: platform admins sign in at /platform/v1 with Argon2id passwords and a mandatory TOTP second factor in their own cookie, with the one-time CLI bootstrap token, lockout, rate limits and audit; OpenAPI published. S6 reaches 17/57. |

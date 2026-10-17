@@ -4,6 +4,7 @@ mod api;
 mod config;
 mod health;
 mod logging;
+mod platform_api;
 mod relay;
 
 use config::{CloudConfig, CloudRole, Secret};
@@ -24,6 +25,7 @@ enum Arguments {
     InitObjectStore,
     ProvisionDatabaseRoles,
     PrintBootstrapToken,
+    PrintPlatformBootstrapToken,
     CreateShareLink { document: Option<CloudDocumentId>, role: ShareRole },
     Role(Option<CloudRole>),
 }
@@ -70,6 +72,13 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
                 Ok(Arguments::PrintBootstrapToken)
             } else {
                 Err("--print-bootstrap-token cannot be combined with other arguments")
+            };
+        }
+        if argument == "--print-platform-bootstrap-token" {
+            return if role.is_none() && args.next().is_none() {
+                Ok(Arguments::PrintPlatformBootstrapToken)
+            } else {
+                Err("--print-platform-bootstrap-token cannot be combined with other arguments")
             };
         }
         if argument == "--create-share-link" {
@@ -202,9 +211,58 @@ async fn issue_bootstrap_token(pool: &sqlx::PgPool, tenant: figcraft_cloud_domai
     Ok(token)
 }
 
+/// `--print-platform-bootstrap-token` (S6-045): issue the one-time token that creates the first
+/// platform admin (`POST /platform/v1/bootstrap`) and print exactly one line, the token. Each run
+/// replaces the previous token; refused once a platform admin exists. Valid for one hour.
+fn run_print_platform_bootstrap_token() -> ExitCode {
+    let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
+    let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
+    let Ok(config) = CloudConfig::parse(settings) else {
+        eprintln!("figcraft-cloud: invalid cloud configuration");
+        return ExitCode::from(2);
+    };
+    let Some(database_url) = config.database_url() else {
+        eprintln!("figcraft-cloud: DATABASE_URL or DATABASE_URL_FILE is required for --print-platform-bootstrap-token");
+        return ExitCode::from(2);
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        eprintln!("figcraft-cloud: unable to initialize the bootstrap runtime");
+        return ExitCode::FAILURE;
+    };
+    let outcome = runtime.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .connect(database_url)
+            .await
+            .map_err(|_| "database connection failed")?;
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let mut transaction =
+                figcraft_cloud_storage::platform::begin_platform_transaction(&pool).await.map_err(|_| "the database refused the bootstrap")?;
+            let token = figcraft_cloud_storage::platform_admins::issue_bootstrap_token(&mut transaction, 3600)
+                .await
+                .map_err(|_| "a platform admin already exists (or the database refused the bootstrap)")?;
+            transaction.commit().await.map_err(|_| "the database refused the bootstrap")?;
+            Ok::<String, &str>(token)
+        })
+        .await
+        .map_err(|_| "the database timed out")?
+    });
+    match outcome {
+        Ok(token) => {
+            println!("{token}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("figcraft-cloud: no platform bootstrap token issued: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn usage() {
     println!(
-        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n       figcraft-cloud --print-bootstrap-token\n       figcraft-cloud --create-share-link [--document <uuid>] [--role editor|viewer]\n\nDefaults to --role all."
+        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n       figcraft-cloud --print-bootstrap-token\n       figcraft-cloud --print-platform-bootstrap-token\n       figcraft-cloud --create-share-link [--document <uuid>] [--role editor|viewer]\n\nDefaults to --role all."
     );
 }
 
@@ -381,6 +439,7 @@ fn main() -> ExitCode {
         Ok(Arguments::InitObjectStore) => run_object_store_init(),
         Ok(Arguments::ProvisionDatabaseRoles) => run_role_provisioning(),
         Ok(Arguments::PrintBootstrapToken) => run_print_bootstrap_token(),
+        Ok(Arguments::PrintPlatformBootstrapToken) => run_print_platform_bootstrap_token(),
         Ok(Arguments::CreateShareLink { document, role }) => run_create_share_link(document, role),
         Ok(Arguments::Role(cli_role)) => {
             // The long-running roles log to stderr, filtered by RUST_LOG (the CLI commands don't).
@@ -570,6 +629,14 @@ mod tests {
         transaction.commit().await?;
         assert!(super::issue_bootstrap_token(&pool, tenant).await.is_err(), "refused once bootstrap is completed");
         Ok(())
+    }
+
+    #[test]
+    fn platform_bootstrap_token_command_is_standalone() {
+        assert_eq!(arguments(&["--print-platform-bootstrap-token"]), Ok(Arguments::PrintPlatformBootstrapToken));
+        assert!(arguments(&["--print-platform-bootstrap-token", "--role", "api"]).is_err());
+        assert!(arguments(&["--role", "api", "--print-platform-bootstrap-token"]).is_err());
+        assert!(arguments(&["--print-platform-bootstrap-token", "--migrate"]).is_err());
     }
 
     #[test]

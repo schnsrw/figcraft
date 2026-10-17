@@ -35,6 +35,8 @@ pub mod object_references;
 pub mod objects;
 pub mod oidc_logins;
 pub mod platform;
+pub mod platform_admins;
+pub mod platform_workspaces;
 pub mod plugin_store;
 pub mod quarantine;
 pub mod realtime_tickets;

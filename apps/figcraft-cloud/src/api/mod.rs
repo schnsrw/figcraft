@@ -106,6 +106,8 @@ pub(crate) struct AppState {
     /// Failed-sign-in lockout policy and the per-login backoff table (S6-035).
     lockout: figcraft_cloud_storage::credentials::LockoutPolicy,
     login_throttle: Arc<login_throttle::LoginThrottle>,
+    /// The platform realm's limiters and session limits (S6-045).
+    platform: Arc<crate::platform_api::PlatformRuntime>,
 }
 
 impl AppState {
@@ -126,6 +128,7 @@ impl AppState {
             passwords: None,
             lockout: figcraft_cloud_storage::credentials::LockoutPolicy::default(),
             login_throttle: Arc::new(login_throttle::LoginThrottle::new(figcraft_cloud_storage::credentials::LockoutPolicy::default())),
+            platform: Arc::new(crate::platform_api::PlatformRuntime::new()),
         }
     }
 
@@ -168,6 +171,17 @@ impl AppState {
 
     pub(crate) fn login_throttle(&self) -> &login_throttle::LoginThrottle {
         &self.login_throttle
+    }
+
+    /// Replace the platform realm's runtime (tests use generous limits).
+    #[cfg(test)]
+    pub(crate) fn with_platform_runtime(mut self, runtime: crate::platform_api::PlatformRuntime) -> Self {
+        self.platform = Arc::new(runtime);
+        self
+    }
+
+    pub(crate) fn platform(&self) -> &crate::platform_api::PlatformRuntime {
+        &self.platform
     }
 
     pub(crate) fn passwords(&self) -> Option<&passwords::PasswordService> {
@@ -250,7 +264,9 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(host_api::auth_router());
     let resources: Router<AppState> =
         Router::new().merge(tenants_api::routes()).merge(account_routes::resource_routes()).merge(documents_api::routes()).merge(host_api::router());
-    api_router_with(state, auth, resources)
+    // The platform realm (`/platform/v1`) is a separate router with its own authenticator.
+    let platform = crate::platform_api::router(state.clone()).layer(DefaultBodyLimit::max(state.config().max_body_bytes));
+    api_router_with(state, auth, resources).merge(platform)
 }
 
 /// [`api_router`] with explicit `auth` (mounted at `/api/v1/auth`, rate limited) and `resources`

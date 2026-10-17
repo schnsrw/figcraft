@@ -79,7 +79,7 @@ pub async fn begin_platform_transaction(pool: &PgPool) -> Result<PlatformTransac
 /// workspace and the platform audit log atomically (create, suspend, restore, archive). It is the
 /// only place besides [`begin_platform_transaction`] that sets the scope; its callers are the
 /// functions of [`crate::platform_workspaces`].
-pub async fn enter_platform_scope(transaction: &mut crate::TenantTransaction<'_>) -> Result<(), PlatformError> {
+pub(crate) async fn enter_platform_scope(transaction: &mut crate::TenantTransaction<'_>) -> Result<(), PlatformError> {
     sqlx::query("SELECT set_config('figcraft.platform_scope', 'on', true)")
         .execute(transaction.connection())
         .await
