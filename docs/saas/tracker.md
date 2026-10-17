@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); **Core slice complete (4/4): browser co-editing works on the cloud stack** · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); **Core slice: browser co-editing works on the cloud stack (4/5; CS-005 runtime branding in progress)** · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -21,7 +21,7 @@ the same commit as the completed task.
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
-| **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 4 / 4 | Two browsers co-edit through the gateway and survive a cloud restart |
+| **Core slice** Browser co-editing on the cloud stack (pulled forward) | in progress | 4 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -1207,6 +1207,8 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   real time and edits appear in the other browser. Known gap: a drag is sent when the command
   completes (on drop), not while dragging, because the protocol syncs committed batches; live
   in-progress transforms need an ephemeral channel beside presence (follow-up).
+- [ ] **CS-005** Make branding (product name, colours, logo, favicon, links) and deployment
+  configuration settable from Docker environment variables, with no code change or image rebuild.
 
 ## S4 — Identity, tenancy and authorization
 
