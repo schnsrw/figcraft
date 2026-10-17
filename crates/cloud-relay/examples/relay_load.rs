@@ -242,7 +242,7 @@ impl Env {
 
     fn serve(&self) -> R<Hosting> {
         let mut config = CloudBackendConfig::new(self.database_url.clone(), self.objects.clone());
-        config.max_connections = 4;
+        config.max_connections = std::env::var("RELAY_LOAD_POOL").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
         config.timeout = self.timeout;
         let backend = CloudBackend::connect(&config).map_err(err)?;
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))?;

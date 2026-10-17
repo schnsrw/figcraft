@@ -59,7 +59,7 @@ use figcraft_cloud_storage::realtime_tickets::{TicketKey, looks_like_ticket, ver
 use figcraft_cloud_storage::revocation::{
     MAX_CHECKED_MEMBERS, MemberAdmission, RevocationError, admit_member, dead_member_admissions, parse_member_token,
 };
-use figcraft_cloud_storage::room_leases::{AcquireRoom, RoomLease, acquire_room_claim, release_room, renew_room};
+use figcraft_cloud_storage::room_leases::{AcquireRoom, RoomLease, acquire_or_reclaim_room, release_room, renew_room};
 use figcraft_cloud_storage::sessions::SessionLimits;
 use figcraft_cloud_storage::share_links::{MAX_CHECKED_LINKS, ShareRole, dead_share_links, resolve_share_link};
 use figcraft_collab::message::{Access, Admin, AdminReply};
@@ -572,26 +572,11 @@ impl CloudBackend {
             return true;
         }
         let pending = std::mem::take(&mut doc.pending);
-        let (pool, tenant, document, token) = (&self.pool, doc.tenant, doc.document, doc.fencing_token);
-        let committed = self.block(async move {
-            let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| "begin")?;
-            let mut actor = None;
-            let mut chunk = Vec::new();
-            for (batch_actor, batch) in pending {
-                if actor != Some(batch_actor) || chunk.len() == MAX_APPEND_BATCHES {
-                    if let Some(previous) = actor {
-                        append_events(&mut transaction, document, token, previous, &chunk).await.map_err(|_| "append")?;
-                        chunk.clear();
-                    }
-                    actor = Some(batch_actor);
-                }
-                chunk.push(batch);
-            }
-            if let Some(last) = actor {
-                append_events(&mut transaction, document, token, last, &chunk).await.map_err(|_| "append")?;
-            }
-            transaction.commit().await.map_err(|_| "commit")
-        });
+        let committed = self.block(commit_batches(&self.pool, doc.tenant, doc.document, doc.fencing_token, pending));
+        Self::commit_outcome(file, committed)
+    }
+
+    fn commit_outcome(file: &str, committed: Option<Result<(), &'static str>>) -> bool {
         match committed {
             Some(Ok(())) => true,
             Some(Err(stage)) => {
@@ -603,6 +588,35 @@ impl CloudBackend {
                 false
             }
         }
+    }
+
+    /// Commit every given document's pending batches at once, each in its own transaction on the
+    /// runtime, and wait for all of them (each bounded by the storage timeout): one slow room
+    /// doesn't make the others wait their turn. The documents whose commit failed.
+    fn commit_all(&mut self, files: Vec<String>) -> Vec<String> {
+        let mut jobs = Vec::new();
+        for file in files {
+            let Some(doc) = self.open.get_mut(&file) else { continue };
+            if doc.pending.is_empty() {
+                continue;
+            }
+            let pending = std::mem::take(&mut doc.pending);
+            let (pool, tenant, document, token, timeout) = (self.pool.clone(), doc.tenant, doc.document, doc.fencing_token, self.timeout);
+            let handle =
+                self.runtime.spawn(async move { tokio::time::timeout(timeout, commit_batches(&pool, tenant, document, token, pending)).await.ok() });
+            jobs.push((file, handle));
+        }
+        let mut failed = Vec::new();
+        for (file, handle) in jobs {
+            let outcome = self.runtime.block_on(handle).unwrap_or(None);
+            if !Self::commit_outcome(&file, outcome) {
+                if let Some(doc) = self.open.remove(&file) {
+                    self.release(&file, &doc);
+                }
+                failed.push(file);
+            }
+        }
+        failed
     }
 
     /// Store `server`'s state as `doc`'s snapshot unless one at its sequence exists.
@@ -661,8 +675,11 @@ async fn acquire_lease(
             Ok(Some(_)) => return Err("quarantined"),
             Err(_) => return Err("quarantine check"),
         }
-        let (acquired, claim) =
-            acquire_room_claim(&mut transaction, document, params.owner, &params.endpoint, params.lifetime_seconds).await.map_err(|_| "acquire")?;
+        // A live lease at this replica's own address is its earlier process (one process per
+        // address): reclaimed at once, the fence moving past that process's.
+        let (acquired, claim) = acquire_or_reclaim_room(&mut transaction, document, params.owner, &params.endpoint, params.lifetime_seconds)
+            .await
+            .map_err(|_| "acquire")?;
         match (acquired, claim) {
             (AcquireRoom::Acquired(_), Some(claim)) => {
                 transaction.commit().await.map_err(|_| "commit")?;
@@ -673,10 +690,10 @@ async fn acquire_lease(
     };
     match tokio::time::timeout(timeout, attempt).await {
         Ok(Ok(Leased::Claimed(claim))) => Ok(claim),
-        // A live lease at this replica's own address belongs to an earlier process of it (this
-        // one holds none for a closed room): passing the client on would loop back here.
+        // Held at this replica's own address by this very process (it already has the room, which
+        // is open): never pass a client on to itself.
         Ok(Ok(Leased::Held(lease))) if lease.endpoint == params.endpoint => {
-            log::info!("document {file}: its room lease at this relay's own address hasn't expired yet");
+            log::warn!("document {file}: its room lease at this relay's own address is held by this process");
             Err(OpenFailure::Refused(OWNED_ELSEWHERE.into()))
         }
         Ok(Ok(Leased::Held(lease))) => {
@@ -759,6 +776,34 @@ async fn renew_leases(pool: PgPool, timeout: Duration, config: LeaseConfig, owne
             }
         }
     }
+}
+
+/// Append `pending` (accepted batches, in order) to `document`'s log under `fencing_token` and
+/// commit, all in one tenant transaction: the batches are durable or none of them is.
+async fn commit_batches(
+    pool: &PgPool,
+    tenant: TenantId,
+    document: CloudDocumentId,
+    fencing_token: i64,
+    pending: Vec<(PrincipalId, Accepted)>,
+) -> Result<(), &'static str> {
+    let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| "begin")?;
+    let mut actor = None;
+    let mut chunk = Vec::new();
+    for (batch_actor, batch) in pending {
+        if actor != Some(batch_actor) || chunk.len() == MAX_APPEND_BATCHES {
+            if let Some(previous) = actor {
+                append_events(&mut transaction, document, fencing_token, previous, &chunk).await.map_err(|_| "append")?;
+                chunk.clear();
+            }
+            actor = Some(batch_actor);
+        }
+        chunk.push(batch);
+    }
+    if let Some(last) = actor {
+        append_events(&mut transaction, document, fencing_token, last, &chunk).await.map_err(|_| "append")?;
+    }
+    transaction.commit().await.map_err(|_| "commit")
 }
 
 /// Store `state` as the document's snapshot in one tenant transaction.
@@ -1069,15 +1114,7 @@ impl Backend for CloudBackend {
             }
         }
         let files: Vec<String> = self.open.iter().filter(|(_, doc)| !doc.pending.is_empty()).map(|(file, _)| file.clone()).collect();
-        for file in files {
-            let Some(mut doc) = self.open.remove(&file) else { continue };
-            if self.commit(&file, &mut doc) {
-                self.open.insert(file, doc);
-            } else {
-                self.release(&file, &doc);
-                failed.push(file);
-            }
-        }
+        failed.extend(self.commit_all(files));
         for file in &failed {
             self.idle_since.remove(file);
         }

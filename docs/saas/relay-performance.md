@@ -226,14 +226,19 @@ from the runs above. Assumptions are stated and are deliberately conservative.
   plus about 4 KiB per node of an open document. A relay holding 200 small documents and five
   20k-node documents needs about 9 + 460 + 400 ≈ 870 MiB. Request 1 GiB and limit 2 GiB per
   replica; `max_open` (1024 by default) needs a matching memory budget, or a lower value.
-- **Commit throughput per relay process:** the hub runs storage calls on its own thread, so the
-  document commits in a flush are serial. At 4 to 9 ms p50 per commit, plan on about **100
-  commits/s per relay replica**. Several batches of the same document can share one commit, so
-  under load this is a floor, not a ceiling. At the measured 2 batches/s per active editor that is
-  about 50 continuously typing editors per replica. Real editors send far fewer batches (drags and
-  typing are coalesced): at an assumed 0.2 batches/s it is about 500 active editors per replica.
-  Scale on commit latency p95 and active rooms (`deployment-operations.md`, "Scaling
-  thresholds").
+- **Commit throughput per relay process:** one flush commits every room's pending batches at the
+  same time, each in its own transaction on the relay's runtime (the pool, 8 connections by
+  default, bounds the concurrency), and answers only after they all committed. Measured with the
+  steady phase over 100 rooms (one editor each, closed loop) on the dev PostgreSQL, same machine,
+  two runs each: at 1,000 batches/s offered the relay sustained 999 commits/s with a median of
+  1.6 to 1.9 ms and a 99th percentile of 5 to 25 ms; the serial commits it replaced reached 570
+  to 799 commits/s with medians of 104 to 126 ms and 99th percentiles of 253 ms to 1.2 s. At 500
+  batches/s the serial code kept up only when the machine was otherwise idle (99th percentile 38
+  ms, against 3 to 5 ms) and collapsed once under noise. The ceiling is now the database, not the
+  hub thread: size it from commit latency p95 and PostgreSQL's write capacity
+  (`deployment-operations.md`, "Scaling thresholds"). Several batches of the same document still
+  share one commit. A single hot room is still one transaction at a time. At an assumed 0.2
+  batches/s per active editor, 1,000 batches/s is about 5,000 active editors per replica.
 - **Recovery no longer stalls other rooms:** a cold open runs on the backend's runtime
   (`Backend::begin_open`), not the hub thread. While a 20k-frame document restores (4.2 s) other
   rooms keep committing (isolation run below). The restore itself is still 4.2 s for that room, so
@@ -268,6 +273,9 @@ from the runs above. Assumptions are stated and are deliberately conservative.
 
 ## Revision history
 
+- 2026-10-18: commits of different rooms in one flush now run concurrently (`commit_all`), lifting
+  the measured ceiling from about 100 (serial) to at least 1,000 commits/s per replica with
+  millisecond latency; see "Sizing from measurements".
 - 2026-10-17: moved room restore off the hub thread (`Backend::begin_open`) and added the
   isolation phase; a 4.2 s cold open of a 20k-frame document no longer stalls other rooms
   (4,246 ms worst commit before, 6.1 ms after). Commits are still serial per flush.

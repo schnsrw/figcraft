@@ -5,7 +5,7 @@
 //! room taken over at once; and a room whose lease was taken away closing without confirming more.
 //!
 //! The tests are synchronous: the backend owns its own runtime, and fixtures use another one.
-#![allow(clippy::unwrap_used, clippy::panic)]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
@@ -108,8 +108,14 @@ impl Fixture {
     /// A relay replica advertising its own address, renewing every `renew` with a lease of
     /// `lifetime`: the hub and the endpoint other replicas reach it at.
     fn replica(&self, renew: Duration, lifetime: Duration) -> (Hosting, String) {
+        self.replica_as(None, renew, lifetime)
+    }
+
+    /// [`replica`](Self::replica), advertising `endpoint` when given: a new process at the address
+    /// an earlier one used (a restart), whichever port it actually listens on.
+    fn replica_as(&self, endpoint: Option<&str>, renew: Duration, lifetime: Duration) -> (Hosting, String) {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
-        let endpoint = format!("ws://{}/ws/v1/collab", listener.local_addr().unwrap());
+        let endpoint = endpoint.map_or_else(|| format!("ws://{}/ws/v1/collab", listener.local_addr().unwrap()), str::to_string);
         let mut config = CloudBackendConfig::new(self.database_url.clone(), self.objects.clone());
         config.max_connections = 2;
         config.leases = Some(LeaseConfig { endpoint: endpoint.clone(), lifetime, renew_every: renew });
@@ -259,6 +265,12 @@ impl Raw {
         }
     }
 
+    /// Rename and wait for the confirmation: its sequence.
+    fn confirmation_of(&mut self, me: u32, base_seq: u64, batch_id: u64, page: NodeId, name: &str) -> u64 {
+        self.rename(base_seq, batch_id, page, name);
+        self.confirmation(me, batch_id).expect("confirmed")
+    }
+
     /// Read until the connection ends.
     fn until_closed(&mut self) {
         while self.next().is_some() {}
@@ -349,6 +361,39 @@ fn a_link_revoked_while_its_client_is_passed_on_ends_that_clients_connection() {
     drop(owner_client);
     a.stop();
     b.stop();
+}
+
+#[test]
+fn a_restarted_replica_reclaims_its_own_stale_lease_at_once() {
+    let Some(fx) = Fixture::new() else { return };
+    let (document, secret) = fx.document();
+    let file = document.to_string();
+    // The earlier process: holds the room under a lease that will not expire for a long time.
+    let (mut before, endpoint) = fx.replica(Duration::from_millis(200), Duration::from_secs(60));
+    let mut old_client = Raw::join(before.addr(), &file, &secret);
+    let (me_old, seq, page) = old_client.welcome().unwrap();
+    assert_eq!(old_client.confirmation_of(me_old, seq, 1, page, "before the crash"), 1);
+    let old_lease = fx.lease(document).unwrap();
+
+    // The replica comes back at the same address as a new process, while the old lease is live
+    // (nothing released it). It takes the room over straight away: no waiting for 60 s, no refusal.
+    let (mut after, same) = fx.replica_as(Some(&endpoint), Duration::from_secs(5), Duration::from_secs(60));
+    assert_eq!(same, endpoint);
+    let started = Instant::now();
+    let mut new_client = Raw::join(after.addr(), &file, &secret);
+    let (me_new, seq_new, page_new) = new_client.welcome().unwrap();
+    assert!(started.elapsed() < Duration::from_secs(5), "served at once: {:?}", started.elapsed());
+    assert_eq!(seq_new, 1, "it restored what the earlier process committed");
+    let lease = fx.lease(document).unwrap();
+    assert!(lease.fencing_token > old_lease.fencing_token, "the new process is fenced above the old one");
+    assert_eq!(new_client.confirmation_of(me_new, seq_new, 1, page_new, "after the restart"), 2);
+
+    // The earlier process learns it lost the room at its next renewal and lets its clients go; its
+    // late writes would be fenced regardless.
+    old_client.until_closed();
+    drop(new_client);
+    before.stop();
+    after.stop();
 }
 
 #[test]

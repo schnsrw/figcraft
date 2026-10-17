@@ -117,6 +117,33 @@ pub async fn acquire_room_claim(
     endpoint: &str,
     lifetime_seconds: i32,
 ) -> Result<(AcquireRoom, Option<SequencerClaim>), RoomLeaseError> {
+    acquire_room_inner(transaction, document_id, owner_id, endpoint, lifetime_seconds, false).await
+}
+
+/// [`acquire_room_claim`] for a replica at a fixed address: a live lease naming this same
+/// `endpoint` under another owner id is its own earlier process (a restart after a crash: one
+/// process per address), so it is taken over at once instead of waiting for it to expire. The
+/// fence advances, so the dead process's late writes are rejected exactly as after an expiry. Needs
+/// every replica to advertise a distinct endpoint; two live replicas sharing one would take rooms
+/// from each other (safe, because of the fence, but each takeover closes the other's room).
+pub async fn acquire_or_reclaim_room(
+    transaction: &mut TenantTransaction<'_>,
+    document_id: CloudDocumentId,
+    owner_id: Uuid,
+    endpoint: &str,
+    lifetime_seconds: i32,
+) -> Result<(AcquireRoom, Option<SequencerClaim>), RoomLeaseError> {
+    acquire_room_inner(transaction, document_id, owner_id, endpoint, lifetime_seconds, true).await
+}
+
+async fn acquire_room_inner(
+    transaction: &mut TenantTransaction<'_>,
+    document_id: CloudDocumentId,
+    owner_id: Uuid,
+    endpoint: &str,
+    lifetime_seconds: i32,
+    reclaim_own_endpoint: bool,
+) -> Result<(AcquireRoom, Option<SequencerClaim>), RoomLeaseError> {
     if owner_id.is_nil() || !valid_endpoint(endpoint) || !(MIN_LEASE_SECONDS..=MAX_LEASE_SECONDS).contains(&lifetime_seconds) {
         return Err(RoomLeaseError::InvalidInput);
     }
@@ -133,7 +160,9 @@ pub async fn acquire_room_claim(
         Some((state, _)) if state != "active" => return Err(RoomLeaseError::InvalidState),
         Some((_, token)) => token,
     };
-    if let Some(lease) = current_room(transaction, document_id).await? {
+    if let Some(lease) = current_room(transaction, document_id).await?
+        && !(reclaim_own_endpoint && lease.endpoint == endpoint && lease.owner_id != owner_id)
+    {
         return Ok((AcquireRoom::Held(lease), None));
     }
     if current_token == i64::MAX {
