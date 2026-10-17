@@ -117,6 +117,8 @@ mod home_tests;
 #[cfg(test)]
 mod idle_tests;
 #[cfg(test)]
+mod ime_tests;
+#[cfg(test)]
 mod import_report_tests;
 #[cfg(test)]
 mod layers_behaviour_tests;

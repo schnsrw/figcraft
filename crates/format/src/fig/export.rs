@@ -73,7 +73,7 @@ enum StrokeJoin MITER=0 BEVEL=1 ROUND=2
 enum ConstraintType MIN=0 CENTER=1 MAX=2 STRETCH=3 SCALE=4
 enum StackMode NONE=0 HORIZONTAL=1 VERTICAL=2 GRID=3
 enum StackAlign MIN=0 CENTER=1 MAX=2 BASELINE=3
-enum StackJustify MIN=0 CENTER=1 MAX=2 SPACE_EVENLY=3 SPACE_BETWEEN=4 SPACE_AROUND=5
+enum StackJustify MIN=0 CENTER=1 MAX=2 SPACE_EVENLY=3 SPACE_BETWEEN=4 SPACE_AROUND=5 SPACE_EVENLY_CSS=6
 enum StackCounterAlign MIN=0 CENTER=1 MAX=2 STRETCH=3 AUTO=4 BASELINE=5
 enum StackSize FIXED=0 RESIZE_TO_FIT=1
 enum StackWrap NO_WRAP=0 WRAP=1
@@ -1371,7 +1371,7 @@ impl<'d> Exporter<'d> {
             MainAlign::Max => "MAX",
             MainAlign::SpaceBetween => "SPACE_BETWEEN",
             MainAlign::SpaceAround => "SPACE_AROUND",
-            MainAlign::SpaceEvenly => "SPACE_EVENLY",
+            MainAlign::SpaceEvenly => "SPACE_EVENLY_CSS",
         };
         let cross = match l.cross_align {
             CrossAlign::Min => "MIN",

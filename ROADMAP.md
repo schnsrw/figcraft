@@ -117,7 +117,7 @@ French, German, Brazilian Portuguese, Japanese, Korean, Simplified Chinese and I
 Language; Traditional Chinese has no catalog; CJK UI
 text uses an installed CJK font, loaded only when needed; adding a language:
 [`docs/translating.md`](docs/translating.md)). Document text in any script (bidi, Arabic shaping,
-IME) already works. Detail: [`docs/localization-parity.md`](docs/localization-parity.md).
+IME) already works (macOS IME composition fixed for #747, not yet checked on a Mac). Detail: [`docs/localization-parity.md`](docs/localization-parity.md).
 
 ## Upcoming
 

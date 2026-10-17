@@ -1,6 +1,6 @@
 # Localization parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-17 · **Change:** minor (string counts re-measured: 2,272 entries, the drafts at 95–99%; Swedish command labels and menu wordings; Russian, Swedish, Turkish, Czech and Indonesian listed; a duplicated paragraph removed; draft catalogs catch up: every draft translates every string again; Simplified Chinese draft catalog) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-17 · **Change:** minor (macOS finds its downloadable CJK system fonts (#406); string counts re-measured: 2,272 entries, the drafts at 95–99%; Swedish command labels and menu wordings; Russian, Swedish, Turkish, Czech and Indonesian listed; a duplicated paragraph removed; draft catalogs catch up: every draft translates every string again; Simplified Chinese draft catalog) · **Target:** Figma Design (desktop app 126.10.7)
 
 FigCraft's interface has a localization layer with an English catalog, a Russian catalog reviewed
 by a native speaker, and Spanish (with a Latin American overlay), French, German, Brazilian
@@ -68,7 +68,9 @@ supported by both apps (CJK, Arabic and Devanagari shaping, IME); Figma has no v
 - **CJK UI fonts:** egui's fonts and Inter have no CJK glyphs. Once the UI language, the open
   file's names or comments, typed text or the language picker needs Japanese kana, Hangul or Han,
   the desktop app adds one installed face per script to the UI's fallbacks (Windows: Yu Gothic UI,
-  Meiryo, Malgun Gothic, Microsoft YaHei; macOS: Hiragino Sans, Apple SD Gothic Neo, PingFang SC;
+  Meiryo, Malgun Gothic, Microsoft YaHei; macOS: Hiragino Sans, Apple SD Gothic Neo, PingFang SC,
+  Hiragino Sans GB, Heiti SC, also from the system's downloaded font assets
+  (`/System/Library/AssetsV2/com_apple_MobileAsset_Font*`, where current versions keep PingFang);
   Linux and BSD: Noto Sans CJK, Source Han Sans, Nanum, WenQuanYi; the craft-fonts build's BIZ
   UDPGothic first), the UI language's script first; Han without kana outside a Japanese or Korean UI
   reads as Chinese, and a Chinese UI puts its Chinese face (Microsoft YaHei, PingFang SC, Noto Sans
@@ -118,6 +120,7 @@ Hindi, Vietnamese and Arabic. Traditional Chinese is not planned (no catalog; it
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-17 | minor | Chinese showed as boxes on macOS (#406): the font scan also walks the system's downloaded font assets (`/System/Library/AssetsV2` and the older `/System/Library/Assets`, only their `com_apple_MobileAsset_Font*` folders), where current versions keep PingFang SC, and Hiragino Sans GB and Heiti SC join the Chinese UI faces and the text fallbacks. Tested with a folder laid out the same way; not yet run on a Mac |
 | 2026-10-17 | minor | String counts re-measured from the catalogs: 1,680 UI keys, 561 command labels and 31 menu wordings (2,272 entries); Spanish complete, the other drafts at 95.3–99.2% (strings added since 2026-10-12 show English), es-419 101 entries. Indonesian has a draft (98.8%; it was listed as none); Russian (98.8%, reviewed), Swedish (99.6%, command labels and menu wordings from #599), Turkish (98.7%) and Czech (98.8%) listed with counts; the language picker's list updated; a paragraph repeated by a merge removed. Grade and hours unchanged (Indonesian's draft is offset by the drafts' new gaps) |
 | 2026-10-14 | minor | Windows UI language (#291): the interface language comes from Windows' first preferred language alone; that list is also the input-language list (a German keyboard on a Polish system adds Deutsch), and taking the first entry with a catalog turned the interface German there. A first preferred language without a catalog reads English; macOS AppleLanguages and gettext's `LANGUAGE` still take the first language with a catalog |
 | 2026-10-12 | minor | Drafts catch up again, and the counts with them: French, German, Brazilian Portuguese, Japanese, Korean and Simplified Chinese translate the 71 UI strings and 5 command labels they lacked since sharing with a join code and open hosting (the Share popover, join codes, owner tokens, reports, the .fig export notes), and with Spanish the 26 strings and 3 command labels of your online files (Home ▸ Online, its menu and dialogs, the marks on tabs); machine-drafted in each file's conventions, still drafts. The Latin American overlay adds computadora and agrega where the new Spanish says ordenador and añade (98 entries). 2,076 entries per catalog (1,503 UI strings, 544 command labels, 29 menu wordings) |
