@@ -1,0 +1,27 @@
+# HTTPS for a team that hosts FigCraft on a LAN name or a public domain. Use it on top of the
+# base file and set the public address first:
+#
+#   FIGCRAFT_DOMAIN=figcraft.office.lan
+#   FIGCRAFT_PUBLIC_URL=https://figcraft.office.lan
+#   FIGCRAFT_TLS=internal            # or the administrator's email for a public domain
+#
+#   docker compose --env-file deploy/saas/.env -f deploy/saas/compose.yaml -f deploy/saas/compose.tls.yaml up -d
+#
+# See docs/saas/self-host-guide.md. The base file keeps serving plain HTTP on 127.0.0.1:8080 for
+# local trials.
+services:
+  gateway:
+    ports: !override
+      - "80:80"
+      - "443:443"
+    environment:
+      FIGCRAFT_DOMAIN: ${FIGCRAFT_DOMAIN:?set FIGCRAFT_DOMAIN to the name people will type}
+      FIGCRAFT_TLS: ${FIGCRAFT_TLS:-internal}
+    volumes: !override
+      - ./Caddyfile.tls:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

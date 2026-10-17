@@ -102,9 +102,19 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
 - [ ] **TS-008** Recover from mistakes: per-file history with named versions and restore as a new
   head that keeps history (S6-040 to S6-042).
 - [ ] **TS-009** Large images in documents sync and reload correctly through the relay (S5-018).
-- [ ] **TS-010** Self-host operations a team can follow: a "host it for your team" guide (domain,
+- [x] **TS-010** Self-host operations a team can follow: a "host it for your team" guide (domain,
   TLS, first admin, invite people, upgrade), a backup and restore script for the database and
   object store, and one restore drill run and recorded.
+  Evidence (2026-10-18): `docs/saas/self-host-guide.md` (clone, secrets, address, start, first
+  workspace, trusting a LAN certificate, People screens, backups, upgrade, limits),
+  `deploy/saas/init-secrets.sh` (all 14 compose secrets; refuses to overwrite; directory 0700),
+  `deploy/saas/backup.sh` and `restore.sh` (database dump, object-store copy, secrets, checksums,
+  a short stop of the cloud service for a consistent copy, `--replace` required to restore).
+  Restore drill on a running stack built from main: backup, create a workspace, restore; the
+  workspace made after the backup was gone and the two from the backup were back, and the
+  service came back healthy. Not done: the guide has not yet been followed by someone else on a
+  clean machine (that is TS-GATE), no scheduled backups, and the drill did not compare the
+  contents of a restored file byte for byte.
 - [ ] **TS-011** The team can find its work: recents, search across the workspace's files,
   libraries and settings screens (rest of S6-020).
   Progress (not complete): recents on the home page (this browser), name search across workspaces, projects and files (`/search`, client-side over the lists the caller can read, bounded; no server search yet) and a Settings page for the sign-in methods (`/settings`, owners and admins) in `webapp/saas/src/screens/{search,settings}.tsx`, with DB-free tests (`find.test.tsx`; 149 web tests). Not built: libraries; full-text or server-side search.
@@ -116,6 +126,14 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
   look finished (validation next to the field, loading and success states), responsive down to a
   tablet, and the file name, collaborator names and avatars carried into the editor. Reviewed with
   before and after screenshots from `webapp/e2e`.
+- [ ] **TS-016** HTTPS for a team's own hostname: sign-in cookies are `Secure`, so a name other
+  than localhost must be served over HTTPS (a LAN name with Caddy's own authority, or a public
+  domain with an automatic certificate). `deploy/saas/compose.tls.yaml` and `Caddyfile.tls` exist
+  and `docker compose config` accepts them; a standalone Caddy built from the Caddyfile served the
+  web app and the API over HTTPS with HSTS, nosniff and no-referrer headers. Not yet verified: a
+  full sign-in and editing session through the HTTPS gateway with `FIGCRAFT_PUBLIC_URL` set to the
+  HTTPS address (the browser run in `webapp/e2e` should run against it), the certificate trust
+  steps on a second computer, and the WebSocket relay path over `wss`.
 - [ ] **TS-GATE** A team of three installs it from the guide on a clean machine, signs in with
   passwords, creates a workspace, two teams and a project, invites two people, and all three edit
   one file at the same time, close and reopen, and restore an earlier version. Recorded run with
@@ -3121,7 +3139,7 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-045: platform admins sign in at /platform/v1 with Argon2id passwords and a mandatory TOTP second factor in their own cookie, with the one-time CLI bootstrap token, lockout, rate limits and audit; OpenAPI published. S6 reaches 17/57. |
 | 2026-10-18 | S6-046: workspace create (owner principal or invitation link), list, read, suspend, restore, archive, deletion request and cancel, plan and platform audit under /platform/v1, each change audited on both sides in one transaction. S6 reaches 18/57. |
 | 2026-10-18 | S6-036: profile (display name, palette colour), password change that revokes other sessions, own-session list and revoke. S6 reaches 19/58. |
-| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-015 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
+| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-016 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
 | 2026-10-18 | S6-047: workspace lifecycle enforced and proven on every surface (members 409, relay, service accounts, share links, host issuers, webhooks, jobs); /me/workspaces lists a person's workspaces with state. S6 reaches 20/58. |
 | 2026-10-18 | Priority track: added TS-012 email delivery (optional SMTP with a durable outbox) and TS-013 admin-set and admin-reset passwords (temporary, change at next sign-in); email delivery removed from the backlog. |
 | 2026-10-18 | Priority track: added TS-014 (accounts, invitations and resets work with or without email; login name identifies a person, email optional, invitations no longer require a verified email). |
@@ -3135,3 +3153,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | TS-013 and TS-014 (API side, schema 20261018000025): invitations need no email (link-only invitations; the invitee chooses a login name and password; `login_taken` is a named 409), administrators create people with a typed or generated temporary password (shown once) and set new ones for people below them, a temporary password limits the session to changing it (`password_change_required`), sessions of the person end, audited without the value; `/auth/methods` also reports `bootstrap_required` and `mail_configured` (false: email delivery, TS-012, is not built yet). Endpoints are in `accounts-api-v1.json`; the screens are not built, so TS-013 and TS-014 stay open. |
 | 2026-10-18 | TS-003 checked off: real-browser run of setup, sign-in, workspace, project, file and editor with two live sessions and a late joiner (webapp/e2e). TS-004 progress recorded. Added TS-015 (UI quality pass) after owner feedback. |
 | 2026-10-18 | TS-012..014 screens: login name at invitation sign-up, link-only invitations, admin temporary passwords (typed or generated, shown once), set a new password, must-change-password screen. 157 web tests. |
+| 2026-10-18 | TS-010 checked off (self-host guide, init-secrets, backup and restore with a rehearsed drill); added TS-016 (HTTPS gateway for a team hostname, partly verified). |

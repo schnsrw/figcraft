@@ -1,0 +1,48 @@
+# Gateway with HTTPS, for a team that hosts FigCraft on a LAN name or a public domain
+# (compose.tls.yaml). Browsers only keep the sign-in cookie over HTTPS (it is `Secure`), so a
+# hostname other than localhost needs this.
+#
+#   FIGCRAFT_DOMAIN  the name people type, e.g. figcraft.office.lan or design.example.com
+#   FIGCRAFT_TLS     `internal` (default): Caddy's own certificate authority, for LAN names; people
+#                    install its root certificate once (see docs/saas/self-host-guide.md).
+#                    Or the administrator's email: a public domain gets a free certificate
+#                    automatically (ports 80 and 443 must reach this machine).
+{$FIGCRAFT_DOMAIN} {
+	tls {$FIGCRAFT_TLS:internal}
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		X-Content-Type-Options nosniff
+		Referrer-Policy no-referrer
+	}
+
+	@api path /api/v1 /api/v1/*
+	handle @api {
+		reverse_proxy cloud:8081
+	}
+
+	@collab path /ws/v1/collab /ws/v1/collab/*
+	handle @collab {
+		reverse_proxy cloud:8082
+	}
+
+	@realtime path /ws/v1 /ws/v1/*
+	handle @realtime {
+		reverse_proxy cloud:8081
+	}
+
+	redir /edit /edit/ 308
+	handle /edit/* {
+		reverse_proxy web:8080
+	}
+
+	handle {
+		reverse_proxy web:8080
+	}
+}
+
+# Container health probe only; not published.
+:8080 {
+	respond /healthz "ok" 200
+}
