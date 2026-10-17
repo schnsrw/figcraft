@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (10/43) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (10/57) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 10 / 43 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 10 / 57 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2555,6 +2555,78 @@ already allow "local accounts or OIDC" (`product-requirements.md`, "Libraries, r
   and colour from the signed-in account (a share link shows the link's label), instead of trusting
   what the client says, so cursors, comments and undo history belong to real people.
 
+### Platform layer and organisation hierarchy
+
+Added 2026-10-18 at the owner's request. The product has four levels and every level is managed by
+the one above it: **Platform** (the deployment; its operators run servers, create, suspend and
+restore workspaces and assign plans) > **Workspace** (a company or tenant: owner and workspace
+admins manage members, teams, sign-in, policies, billing) > **Team** (team leads manage members,
+projects, access) > **Project** > files. A lower level can never reach up or sideways; the owner is
+the last word inside a workspace; the platform can suspend or restore a workspace but cannot read
+its content. Built-in accounts (S6-032..S6-043) are the default sign-in; OIDC is a per-workspace
+option; both coexist. Billing attaches to the workspace (S8 builds billing; this section builds its
+prerequisites). The same code serves SaaS, a self-hosted team or company (one workspace; the platform
+admin is the installer) and host products that provision workspaces through integration APIs.
+
+Terminology. The product's "workspace" (the company) is the `tenants` table and the `/tenants/...`
+routes of the workspace API; the database table named `workspaces` is a space inside a tenant that
+holds projects. The platform API calls the company `workspace` in its paths and documents the mapping.
+
+#### Block A: Platform layer
+
+- [ ] **S6-044** Platform realm storage: platform admins live in their own tables (not principals,
+  not tenant members), platform sessions, a platform audit log and the workspace-lifecycle data,
+  protected by forced row-level security that opens only inside a platform transaction (a workspace
+  transaction can never read or write them) plus a SECURITY DEFINER read of workspace metadata only
+  (never content). Depends on S4-014.
+- [ ] **S6-045** Platform admin identity: first admin bootstrapped from the CLI with a one-time token
+  (like `--print-bootstrap-token`), password through the Argon2id module of S6-033, mandatory
+  TOTP-ready second factor, separate session cookie name, path and shorter lifetime, separate rate
+  limits, every action audited to the platform audit log. Depends on S6-033 (hashing module).
+- [ ] **S6-046** Platform API under `/platform/v1` with its own authenticator that a workspace
+  session cannot satisfy: create workspace (name, slug, owner invite or owner email and link, plan,
+  region), list/get, suspend, restore, archive, set plan, list/create/disable platform admins,
+  platform audit; its own OpenAPI document. Depends on S6-044, S6-045.
+- [ ] **S6-047** Workspace lifecycle states (active, suspended, archived, pending-deletion) enforced
+  on every surface: API, browser sessions, service accounts, relay admission and live rooms, share
+  links, embed and host tokens, webhooks. A documented policy per state; live sessions end promptly
+  through the existing revocation machinery; suspension never deletes data. Depends on S6-046.
+- [ ] **S6-048** Plan assignment data model: plan id, a limits placeholder that references S8-001 and
+  entitlements answered by one function (`entitlement(workspace, key)`), no payment logic. Depends
+  on S6-044.
+- [ ] **S6-049** Operator console contract: the API and OpenAPI the console needs plus a short UI
+  contract note for the UI agent (served by figcraft-cloud under `/platform`, same-origin, strict
+  CSP, like the workspace app). No `webapp/` change here. Depends on S6-046.
+- [ ] **S6-050** Integration provisioning: a host product's service account with the platform scope
+  `platform:provision` creates, suspends and restores workspaces for its customers through the same
+  `/platform/v1` endpoints with a narrower scope set and per-host quotas; it never sees another
+  host's workspaces. Depends on S6-046.
+- [ ] **S6-051** Self-hosted mode: one command creates the platform admin, the first workspace and
+  its owner; documented in `deploy/saas/README.md`. Depends on S6-045, S6-046.
+
+#### Block B: Hierarchy rules
+
+- [ ] **S6-052** The project level: projects belong to a workspace and optionally a team, documents
+  belong to a project, team-to-project grants and inheritance (extend `effective_roles.rs` and the
+  existing tables; no duplicate model). Depends on S4-010.
+- [ ] **S6-053** Management direction as an explicit authorization matrix in code
+  (`cloud-auth` authz) and in `security.md`: owner > workspace admin > team lead > member > guest;
+  an admin cannot remove or demote the owner or grant above their own level; a team lead cannot
+  touch workspace settings or other teams; two-step audited ownership transfer; last-owner
+  protection. Depends on S4-012.
+- [ ] **S6-054** Hierarchy test matrix as live tests: every route family by every level, same and
+  other team, same and other workspace, expecting 200/403/404 exactly (relay-action-matrix style).
+  Depends on S6-052, S6-053.
+- [ ] **S6-055** Delegated administration: a workspace admin creates teams and assigns team leads; a
+  team lead creates projects and invites members to their team within workspace policy. Depends on
+  S6-053.
+- [ ] **S6-056** Per-workspace policy settings (allowed sign-in methods `oidc|password`, who may
+  invite, guest access, share-link policy) editable only by owner and admins and enforced on the
+  server. Depends on S6-053; sign-in method enforcement depends on S6-035.
+- [ ] **S6-057** SSO sync: OIDC group or claim to team membership mapping per workspace (the design
+  in `identity-mapping-policy.md`, not yet built) and deprovisioning when a member disappears from
+  the identity provider. Depends on S6-053.
+
 ### S6 gate
 
 - [ ] **S6-GATE** Demonstrate browser and desktop access to one cloud document identity, recoverable
@@ -2818,3 +2890,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-015: webhook events published transactionally for host and browser document changes, filtered by endpoint subscription, ids-only payloads enforced by an allow-list. S6 reaches 10/31; the API and webhooks block (S6-011 to S6-015) is complete, and the process now starts the delivery dispatcher in the worker and all roles. |
 | 2026-10-18 | Core slice follow-up closed: a drag is now visible to others while it moves. The mover's engine sends the dragged layers' boxes as a throttled `drag` signal (about 20 a second, repeated while held, an empty one on drop); everyone else sees ghosts at the live position with "<name> is moving" until the drop commits the real batch. No protocol change (a new signal kind; the server relays it to signal readers and drops it from viewers). Tested in collab, engine, the headless UI and the live relay matrix. |
 | 2026-10-18 | S6 scope: built-in accounts, edit attribution and history added as S6-032 to S6-043 (S6 is now 43 tasks): local accounts beside OIDC, a person-versus-team attribution record, a history API, named versions with restore, and relay-authenticated collaborator names. Requested by the owner; the design docs already allowed local accounts and required restore-without-losing-history. |
+| 2026-10-18 | S6 scope: the platform layer (operator realm, platform API, workspace lifecycle, plans, provisioning, self-hosted bootstrap) and the organisation hierarchy rules (project level, authorization matrix, delegation, policies, SSO sync) added as S6-044 to S6-057 (S6 is now 57 tasks; the terminology note in that section maps the product's workspace to the tenants table). |
