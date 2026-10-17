@@ -55,7 +55,7 @@ the continuation point, a blocker or a major decision changes.
 - S1 is complete at 22/22 tasks and its cloud foundation gate passes. The cloud binary now serves
   `/api/v1/healthz` and diagnostic `/ws/v1/health` upgrades in the `api`, `relay` and `all` roles;
   `/readyz` checks transport startup and the SQLx schema-version range, not database-backed product
-  operations. The cloud binary requires schema version `20261017000005`; Compose runs the one-shot
+  operations. The cloud binary requires schema version `20261017000007`; Compose runs the one-shot
   migration job before cloud roles. A disposable smoke starts each role from one image, checks
   web/API/WebSocket routing and rejects unsafe production settings. S2 is in progress: S2-001
   selects SQLx 0.9 with embedded SQL migrations, PostgreSQL advisory locking and Rustls; S2-002 adds explicit
@@ -158,6 +158,10 @@ the continuation point, a blocker or a major decision changes.
    commits and cold restores serially on one thread (a 20k-node restore blocked other rooms for
    8 s before the duplicate-restore fix and 4.2 s afterward); move storage work off the hub thread
    before multi-replica work.
+   S5-003/004 now have a PostgreSQL registry and lease repository at schema
+   `20261017000007`, including atomic fencing acquisition and compare-and-renew/release; the
+   relay has not yet been wired to it. Next: move storage work off the hub thread, then wire
+   acquisition, renewal, loss handling and owner routing. S5 remains 8/25 until integration.
    Testing policy (owner): targeted suites per step, quick scan (fmt, clippy on dependents,
    layers, affected tests) before push; full smoke/`cargo xtask ci` only when GitHub CI is red. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.

@@ -1,6 +1,6 @@
 # SaaS architecture
 
-> **Status:** target design · **Last updated:** 2026-10-16
+> **Status:** target design · **Last updated:** 2026-10-17
 
 ## Context
 
@@ -128,8 +128,8 @@ cannot open sockets, read host files or write a document outside the command gat
 1. The client requests a WebSocket ticket for a document.
 2. The API validates membership or a share link and returns a short-lived, single-purpose ticket.
 3. The gateway routes the WebSocket request to a relay replica.
-4. The relay looks up the room owner in Redis.
-5. If no owner is alive, one worker acquires a lease and fencing token.
+4. The relay looks up the tenant-scoped room owner in PostgreSQL.
+5. If no live lease exists, one relay atomically acquires a PostgreSQL lease and fencing token.
 6. The owner restores the latest verified snapshot and replays later PostgreSQL events.
 7. The client sends the existing protocol hello and resumes or receives a snapshot.
 8. For each edit, the owner validates the batch, appends it transactionally and then broadcasts the
@@ -159,7 +159,7 @@ cannot open sockets, read host files or write a document outside the command gat
 ### Authority
 
 - Exactly one relay owns a document room at a time.
-- Ownership is a renewable Redis lease with a PostgreSQL fencing token.
+- Ownership is a renewable PostgreSQL lease with a PostgreSQL fencing token.
 - The fencing token increases whenever ownership changes.
 - Every event row carries the fencing token used to append it.
 - PostgreSQL rejects an append from a token older than the document's current token.
@@ -245,7 +245,7 @@ versioning, lifecycle rules, network isolation and restore-tested backups.
 | API replica stops | Requests retry against another replica; no durable state is local |
 | Relay stops before commit | No confirmation was sent; clients reconnect and resubmit through reconciliation |
 | Relay stops after commit | Event is replayed by the next owner; clients learn its accepted sequence |
-| Redis unavailable | New ownership pauses; current rooms may continue only while fenced database writes remain valid |
+| Redis unavailable | Presence and replaceable cache data may be delayed; room ownership remains in PostgreSQL |
 | PostgreSQL unavailable | Mutations and control-plane writes stop; no edit is confirmed |
 | Object store unavailable | Existing warm rooms may edit while event limits permit; uploads, snapshots and exports pause |
 | Worker stops | Its expired job lease permits another worker to retry idempotently |

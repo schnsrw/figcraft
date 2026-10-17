@@ -1,6 +1,6 @@
 # Data, tenancy and integration
 
-> **Status:** target design · **Last updated:** 2026-10-16
+> **Status:** target design · **Last updated:** 2026-10-17
 
 ## Identifier policy
 
@@ -67,6 +67,7 @@ RLS policy work must account for membership-based tenant discovery before a tena
 |---|---|
 | `projects` | `id`, `tenant_id`, `workspace_id`, optional owning `team_id`, `name`, `state`, timestamps |
 | `documents` | `id`, `tenant_id`, `workspace_id`, `project_id`, `name`, `state`, `current_seq`, `fencing_token`, snapshot pointer, timestamps |
+| `room_leases` | `tenant_id`, `document_id`, `owner_id`, bounded WebSocket endpoint, `fencing_token`, expiry and update time |
 | `document_members` | `tenant_id`, `document_id`, `principal_id`, `role`, timestamps |
 | `document_team_grants` | `tenant_id`, `document_id`, `team_id`, `role`, timestamps |
 | `share_links` | `id`, `tenant_id`, `document_id`, `token_hash`, `role`, expiry, revocation, timestamps |

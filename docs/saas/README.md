@@ -1,6 +1,6 @@
 # FigCraft SaaS platform
 
-> **Status:** architecture baseline · **Last updated:** 2026-10-16 · **Owner:** fork maintainers
+> **Status:** architecture baseline · **Last updated:** 2026-10-17 · **Owner:** fork maintainers
 
 This directory defines the SaaS extension maintained by this fork. It turns FigCraft's existing
 local-first editor and collaboration server into a deployable platform for three product modes:
@@ -44,7 +44,7 @@ These decisions are the default until a replacement is recorded in this director
 | SAAS-ADR-003 | Keep `figcraft-server` as the filesystem self-hosted option | Existing offline and small-team users retain a low-dependency server |
 | SAAS-ADR-004 | Use PostgreSQL as the metadata and ordered-event source of truth | Transactions, constraints, tenancy and recoverability belong in a relational store |
 | SAAS-ADR-005 | Use MinIO or S3-compatible storage for immutable binary objects | Snapshots, images, libraries, plugins, exports and thumbnails are large and content-oriented |
-| SAAS-ADR-006 | Use Redis only for ephemeral coordination | Room leases, presence, routing, caching and rate limits may be rebuilt; confirmed edits may not depend on Redis persistence |
+| SAAS-ADR-006 | Use Redis only for replaceable coordination data | Presence, caching and rate limits may be rebuilt; confirmed edits may not depend on Redis persistence. S5 room leases and routing live in PostgreSQL by the later [owner decision](relay-orchestration-decision.md) |
 | SAAS-ADR-007 | Assign one authoritative relay worker to a document at a time | The current collaboration protocol relies on one server order and last-writer-wins properties |
 | SAAS-ADR-008 | Require fencing tokens on room ownership | A worker that lost its lease must not append events or confirm edits |
 | SAAS-ADR-009 | Use one tenant-aware schema for all deployment modes | Single-tenant installations can migrate to multi-tenant without moving to a different data model |

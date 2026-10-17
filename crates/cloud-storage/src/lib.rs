@@ -34,6 +34,7 @@ pub mod realtime_tickets;
 pub mod reconciliation;
 pub mod resource_admin;
 pub mod revocation;
+pub mod room_leases;
 pub mod service_accounts;
 pub mod sessions;
 pub mod share_links;
@@ -199,7 +200,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                     'upload_reservations', 'libraries', 'library_team_grants', 'library_versions', 'library_usages',
                     'plugins', 'plugin_versions', 'exports', 'document_thumbnails', 'retention_holds', 'share_links', 'oidc_login_attempts', 'browser_sessions',
                     'tenant_bootstrap', 'service_accounts', 'service_account_credentials', 'team_invitations',
-                    'member_permissions', 'support_access_grants'
+                    'member_permissions', 'support_access_grants', 'room_leases'
                 ])
             LOOP
                 EXECUTE format('ALTER TABLE public.%I OWNER TO figcraft_migrator', table_name);

@@ -2188,8 +2188,18 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   room. It passed against disposable PostgreSQL 18 and SeaweedFS 4.48. The existing admission and
   relay action matrix covers ticket principal, tenant and maximum document role; share-link
   sessions remain intentionally anonymous and their event actor is the link creator.
-- [ ] **S5-003** Implement Redis room registry with bounded, namespaced keys.
+- [ ] **S5-003** Implement PostgreSQL room registry with bounded, tenant-scoped rows (owner decision
+  supersedes the earlier Redis-key design).
+  Partial (2026-10-17): migration `20261017000007_room_leases.sql` adds one forced-RLS row per
+  tenant/document, with a bounded endpoint, owner UUID, fencing token and expiry. The
+  `room_leases` repository looks up only an unexpired lease whose token still matches the
+  document. The PostgreSQL probe covers tenant isolation. The live relay does not consult it yet.
 - [ ] **S5-004** Implement renewable room leases and ownership identity.
+  Partial (2026-10-17): `acquire_room` serializes contenders on the document row and claims its
+  fencing token in the same transaction. `renew_room` and `release_room` compare the owner and
+  token, and renewal refuses an expired or superseded lease. PostgreSQL uses its own clock for
+  expiry. A three-case PostgreSQL probe covers simultaneous acquisition, expiry/takeover and a
+  superseded fence. The relay still needs a renewal loop and close-on-loss path.
 - [x] **S5-005** Implement monotonically increasing PostgreSQL fencing tokens.
   Evidence: Implemented in S2-015: `figcraft-cloud-storage::events::claim_sequencer` advances a
   per-document PostgreSQL fencing token that the S2-014 trigger keeps monotonic, and `append_events`
@@ -2588,3 +2598,5 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S5-002: bound each accepted relay batch to the principal of its own admitted client, rather than the room opener; a two-editor PostgreSQL/S3 regression verifies per-event actors and commit order. S5 reaches 6/25. |
 | 2026-10-17 | S5-025 follow-up: removed a duplicate server restore from cold room recovery; comparable latency measurement remains open. S5 stays 6/25. |
 | 2026-10-17 | S5-024/025: repeated the release load on disposable PostgreSQL/S3 after the recovery fix: 4,800/4,800 edits confirmed, commit p95 3.7 ms, 20k-frame plus 500-event recovery p95 4.24 s, two slow readers evicted, 20 reconnects committed within 110 ms. Capped cloud rooms at the measured 20,001 nodes and verified both the boundary and an oversized stored snapshot. S5 reaches 8/25; production-scale and multi-replica tests remain in the gate. |
+| 2026-10-17 | S5 lease prerequisite: corrected cloud startup and Compose preflight to require the checked-in `20261017000006` row-level security migration; the previous `...05` bound left a fully migrated service unready. S5 remains 8/25. |
+| 2026-10-17 | S5-003/004 partial: added tenant-scoped PostgreSQL lease rows, atomic acquisition with a fencing claim, lookup, renewal and compare-and-release. Live relay integration and routing remain open; S5 stays 8/25. |

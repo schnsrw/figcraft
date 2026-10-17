@@ -178,9 +178,9 @@ the configured `DATABASE_URL` secret and reports fixed diagnostics without echoi
 driver errors. Migration application is deliberately separate from readiness and normal role
 startup. At process startup, readiness checks the highest successfully applied migration version
 against the binary's supported inclusive range. A missing ledger or unsupported version keeps
-`/readyz` at 503 while liveness remains available. The S2-010 external mapping migration has
-version `20261017000005`, which is the current supported version. Schema rollback policy is handled by
-later S2 tasks.
+`/readyz` at 503 while liveness remains available. The current room lease migration has version
+`20261017000007`, which is the binary's supported version. Schema rollback policy is handled by
+the release migration procedure.
 
 The database administrator URL is available only to the role-provisioning jobs. The migration job
 gets a separate migrator URL; cloud roles get only the runtime URL. The provisioning command binds
