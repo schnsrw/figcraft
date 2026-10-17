@@ -7,7 +7,8 @@
 //! and never read), a reconnect storm (K editors drop at once and reconnect together), a large
 //! document (seeded with many nodes, then cold-opened and edited) and room recovery (cold opens of
 //! documents with a snapshot of S nodes and E events after it, the events left by a relay that
-//! died without snapshotting).
+//! died without snapshotting) and isolation (an editor commits steadily in one room while a large
+//! document cold-opens in another: how long the first room's commits stall).
 //!
 //! It reports commit latency (batch sent to confirmation received), welcome and recovery times,
 //! the process RSS per open document (clients run in the same process but keep no replicas),
@@ -142,7 +143,7 @@ impl Options {
     }
 }
 
-const PHASES: [&str; 4] = ["steady", "storm", "large", "recovery"];
+const PHASES: [&str; 5] = ["steady", "storm", "large", "recovery", "isolation"];
 
 /// Relay warnings and errors to stderr, so a refused hello says why.
 struct StderrLog;
@@ -575,6 +576,9 @@ fn main() -> R<()> {
     }
     hosting.stop();
     drop(hosting);
+    if options.runs("isolation") && options.large_nodes > 0 {
+        isolation(&options, &env)?;
+    }
     if options.runs("recovery") {
         recovery(&options, &env)?;
     }
@@ -782,6 +786,68 @@ fn large(options: &Options, env: &Env, addr: SocketAddr) -> R<()> {
         second.welcome.as_secs_f64() * 1000.0,
         rss_after.saturating_sub(rss_before)
     );
+    Ok(())
+}
+
+/// One room commits every `ISOLATION_PACE` while another room cold-opens a large document: the
+/// first room's commit latencies during the open show whether a slow restore stops other rooms.
+fn isolation(options: &Options, env: &Env) -> R<()> {
+    const ISOLATION_PACE: Duration = Duration::from_millis(20);
+    let (large, large_token) = env.document()?;
+    let (small, small_token) = env.document()?;
+    // Seed the large document, then close its room (commit and snapshot) so the next open is cold.
+    let mut seeding = env.serve()?;
+    let mut seeder = Editor::join(seeding.addr(), &large.to_string(), &large_token, "seeder")?.editor;
+    seeder.seed(options.large_nodes)?;
+    drop(seeder);
+    seeding.stop();
+
+    let mut hosting = env.serve()?;
+    let addr = hosting.addr();
+    let mut steady = Editor::join(addr, &small.to_string(), &small_token, "steady")?.editor;
+    // Warm: a few commits before the cold open starts.
+    for n in 0..20 {
+        steady.rename(&format!("warm {n}"))?.ok_or("a warm-up commit was refused")?;
+    }
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker = {
+        let stop = stop.clone();
+        std::thread::spawn(move || -> R<Vec<(Instant, Duration)>> {
+            let mut samples = Vec::new();
+            let mut n = 0u64;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let at = Instant::now();
+                if let Some(latency) = steady.rename(&format!("during {n}"))? {
+                    samples.push((at, latency));
+                }
+                n += 1;
+                std::thread::sleep(ISOLATION_PACE);
+            }
+            Ok(samples)
+        })
+    };
+    std::thread::sleep(Duration::from_millis(300));
+    let opening_from = Instant::now();
+    let opened = Editor::join(addr, &large.to_string(), &large_token, "large");
+    let opening_until = Instant::now();
+    std::thread::sleep(Duration::from_millis(300));
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let samples = worker.join().map_err(|_| "the steady editor panicked")??;
+    let during: Vec<Duration> = samples.iter().filter(|(at, _)| *at >= opening_from && *at <= opening_until).map(|(_, l)| *l).collect();
+    let before: Vec<Duration> = samples.iter().filter(|(at, _)| *at < opening_from).map(|(_, l)| *l).collect();
+    println!(
+        "\n## isolation: a {}-frame document cold-opens while another room commits every {} ms",
+        options.large_nodes,
+        ISOLATION_PACE.as_millis()
+    );
+    match &opened {
+        Ok(joined) => println!("\ncold open (hello to welcome): {:.0} ms", joined.welcome.as_secs_f64() * 1000.0),
+        Err(error) => println!("\ncold open failed: {error}"),
+    }
+    println!("\n| the steady room's commits | n | p50 ms | p95 ms | p99 ms | max ms |\n|---|---|---|---|---|---|");
+    show("before the cold open", summary(&before));
+    show("during the cold open", summary(&during));
+    hosting.stop();
     Ok(())
 }
 

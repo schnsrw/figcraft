@@ -149,19 +149,19 @@ the continuation point, a blocker or a major decision changes.
    S5-024/025 measured the repeat release load against disposable PostgreSQL/S3: 4,800 edits
    confirmed, commit p95 3.7 ms and 20k-frame plus 500-event recovery p95 4.24 s. Cloud rooms
    now cap at the measured 20,001 nodes. Production-scale evidence remains in the S5 gate.
-   RESUME HERE (S5): implement PostgreSQL room leases and owner routing, then move storage work
-   off the hub thread (see below). Orchestration is decided (owner): our own PostgreSQL leases beside the
+   RESUME HERE (S5): wire the PostgreSQL room leases into the relay and add owner routing. Orchestration is decided (owner): our own PostgreSQL leases beside the
    fencing tokens, any relay redirects to the owner, drain on shutdown; not Plane/Rivet. Next:
    S5-003/004 lease rows, S5-006 redirect, S5-012 drain, S5-014 commenter/viewer enforcement at
    message level, S5-016..018 quotas/presence/large assets, S5-020..023 two-replica and kill
-   tests. PRIORITY FINDING from S5-024 (`docs/saas/relay-performance.md`): the relay hub runs
-   commits and cold restores serially on one thread (a 20k-node restore blocked other rooms for
-   8 s before the duplicate-restore fix and 4.2 s afterward); move storage work off the hub thread
-   before multi-replica work.
-   S5-003/004 now have a PostgreSQL registry and lease repository at schema
-   `20261017000007`, including atomic fencing acquisition and compare-and-renew/release; the
-   relay has not yet been wired to it. Next: move storage work off the hub thread, then wire
-   acquisition, renewal, loss handling and owner routing. S5-003/004 remain open until integration.
+   tests. DONE: restore now runs off the hub thread (`Backend::begin_open`/`opened`/`attach`, patch
+   FP-008; isolation run in `docs/saas/relay-performance.md`: other rooms' worst commit during a
+   20k-frame cold open 4,246 ms -> 6.1 ms). Commits are still serial per flush (about 100/s per
+   replica), which is a capacity limit, not a stall.
+   S5-003/004 have a PostgreSQL registry and lease repository at schema `20261017000007`,
+   including atomic fencing acquisition and compare-and-renew/release; the relay is NOT yet wired
+   to it. Next: wire lease acquisition into `CloudBackend::begin_open` (acquire before restore,
+   renew on a timer, drop the room on loss: S5-010), then owner routing (S5-006) and drain
+   (S5-012). S5-003/004 remain open until integration.
    S5-015 is complete: the live PostgreSQL/S3 member-revocation and WebSocket race probes passed
    for tenant, team and document removal, session logout, editor downgrade and revoked links.
    S5-016 is complete: presence and signals remain ephemeral, with independent 33 ms and

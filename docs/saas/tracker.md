@@ -2623,3 +2623,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S5-015 audit: confirmed the already wired relay revocation sweeper with live PostgreSQL/S3 member and WebSocket race probes; checked off grant revocation. S5 reaches 9/25. |
 | 2026-10-17 | S5-016 audit: confirmed separate presence and signal throttles in the shared live hub and that only accepted edits reach the cloud journal. S5 reaches 10/25. |
 | 2026-10-17 | S5-014 audit: the live PostgreSQL/S3 relay action matrix passed for editor, viewer and commenter tickets and links, including forged edit access and client-ID resume. S5 reaches 11/25. |
+| 2026-10-17 | S5 prerequisite: room restore moved off the relay hub thread (additive `Backend::begin_open`/`opened`/`attach` hooks, patch FP-008). Measured: another room's worst commit during a 20k-frame cold open fell from 4,246 ms to 6.1 ms. No S5 task changes state; S5 stays 11/25. |

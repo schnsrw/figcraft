@@ -62,7 +62,7 @@ use figcraft_cloud_storage::sessions::SessionLimits;
 use figcraft_cloud_storage::share_links::{MAX_CHECKED_LINKS, ShareRole, dead_share_links, resolve_share_link};
 use figcraft_collab::message::{Access, Admin, AdminReply};
 use figcraft_collab::{Accepted, Document, Journal, Limits, Server};
-use figcraft_collab_net::hub::{Admission, Backend, Closing, Handled, OpenFile};
+use figcraft_collab_net::hub::{Admission, Backend, Closing, Handled, OpenFile, Wake};
 use figcraft_collab_net::{Endpoint, NetLimits};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -343,14 +343,23 @@ pub struct CloudBackend {
     failed: Vec<String>,
     watch: RevocationWatch,
     ticket_key: Option<TicketKey>,
+    /// How restores running on the runtime tell the hub they finished (set by the hub).
+    wake: Option<Wake>,
+    /// Restores finished on the runtime, not yet taken by the hub.
+    finished: Finished,
+    /// Files being restored on the runtime (they count against `max_open`).
+    opening: HashSet<String>,
 }
+
+type Finished = Arc<Mutex<Vec<(String, Result<(Server, OpenDoc), String>)>>>;
 
 impl CloudBackend {
     /// Connect to the database (lazily: the first storage call opens connections) and the object
     /// store.
     pub fn connect(config: &CloudBackendConfig) -> Result<Self, CloudBackendError> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
+            // Restores replay events on a worker while commits and admissions need others.
+            .worker_threads(4)
             .thread_name("cloud-relay-io")
             .enable_all()
             .build()
@@ -376,6 +385,9 @@ impl CloudBackend {
             failed: Vec::new(),
             watch: RevocationWatch::new(),
             ticket_key: config.ticket_key.clone(),
+            wake: None,
+            finished: Finished::default(),
+            opening: HashSet::new(),
         })
     }
 
@@ -390,6 +402,11 @@ impl CloudBackend {
     #[must_use]
     pub fn open_documents(&self) -> usize {
         self.open.len()
+    }
+
+    /// Documents open or being restored now.
+    fn open_or_opening(&self) -> usize {
+        self.open.len() + self.opening.len()
     }
 
     /// Run `future` on the backend's runtime, giving up after the timeout (`None`).
@@ -447,11 +464,7 @@ impl CloudBackend {
             return;
         };
         let (pool, store, tenant, document) = (&self.pool, &self.store, doc.tenant, doc.document);
-        let stored = self.block(async move {
-            let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| ())?;
-            store_snapshot(pool, &mut transaction, store, document, &state, PRODUCER).await.map_err(|_| ())?;
-            transaction.commit().await.map_err(|_| ())
-        });
+        let stored = self.block(put_snapshot(pool, store, tenant, document, &state));
         if matches!(stored, Some(Ok(()))) {
             doc.snapshot_seq = Some(server.seq());
         } else {
@@ -459,36 +472,71 @@ impl CloudBackend {
         }
     }
 
-    /// Recover `document` as its new sequencer.
+    /// Recover `document` as its new sequencer, on the calling (hub) thread.
     fn recover(&self, file: &str, admitted: Admitted, document: CloudDocumentId) -> Result<(Server, OpenDoc), String> {
-        let (pool, store, limits) = (self.pool.clone(), &self.store, self.limits);
-        let recovered = self.block(async move { DurableRoom::recover(pool, store, admitted.tenant, document, base_document(), "", limits).await });
-        let room = match recovered {
-            Some(Ok(room)) => room,
-            Some(Err(error)) => {
-                log::error!("document {file} couldn't be recovered: {error}");
-                return Err(UNAVAILABLE.into());
-            }
-            None => {
-                log::error!("document {file}: recovery timed out");
-                return Err(UNAVAILABLE.into());
-            }
-        };
-        let restored = room.restored_snapshot();
-        if room.server().document().node_count() > self.limits.max_nodes {
-            log::warn!("document {file}: recovered document exceeds the cloud node limit");
+        let (pool, store, limits, timeout) = (self.pool.clone(), self.store.clone(), self.limits, self.timeout);
+        self.runtime.block_on(recover_document(pool, store, limits, timeout, file.to_string(), admitted, document))
+    }
+}
+
+/// Store `state` as the document's snapshot in one tenant transaction.
+async fn put_snapshot(
+    pool: &PgPool,
+    store: &ObjectStore,
+    tenant: TenantId,
+    document: CloudDocumentId,
+    state: &figcraft_collab::SessionState,
+) -> Result<(), ()> {
+    let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| ())?;
+    store_snapshot(pool, &mut transaction, store, document, state, PRODUCER).await.map_err(|_| ())?;
+    transaction.commit().await.map_err(|_| ())
+}
+
+/// Restore `document` (latest verified snapshot plus later events) and claim it as its new
+/// sequencer. Runs on the runtime, on the hub's thread or away from it
+/// ([`Backend::begin_open`]); every storage step is bounded by `timeout`.
+async fn recover_document(
+    pool: PgPool,
+    store: ObjectStore,
+    limits: Limits,
+    timeout: Duration,
+    file: String,
+    admitted: Admitted,
+    document: CloudDocumentId,
+) -> Result<(Server, OpenDoc), String> {
+    let recovered =
+        tokio::time::timeout(timeout, DurableRoom::recover(pool.clone(), &store, admitted.tenant, document, base_document(), "", limits)).await;
+    let room = match recovered {
+        Ok(Ok(room)) => room,
+        Ok(Err(error)) => {
+            log::error!("document {file} couldn't be recovered: {error}");
             return Err(UNAVAILABLE.into());
         }
-        let fencing_token = room.fencing_token();
-        let server = room.into_server();
-        let snapshot_seq = restored.and_then(|(_, seq)| u64::try_from(seq).ok());
-        let mut doc = OpenDoc { tenant: admitted.tenant, document, fencing_token, actors: HashMap::new(), pending: Vec::new(), snapshot_seq };
-        if snapshot_seq.is_none() && server.seq() == 0 {
-            // A new document: its first state becomes durable before anyone edits it.
-            self.snapshot(file, &mut doc, &server);
+        Err(_) => {
+            log::error!("document {file}: recovery timed out");
+            return Err(UNAVAILABLE.into());
         }
-        Ok((server, doc))
+    };
+    let restored = room.restored_snapshot();
+    if room.server().document().node_count() > limits.max_nodes {
+        log::warn!("document {file}: recovered document exceeds the cloud node limit");
+        return Err(UNAVAILABLE.into());
     }
+    let fencing_token = room.fencing_token();
+    let server = room.into_server();
+    let snapshot_seq = restored.and_then(|(_, seq)| u64::try_from(seq).ok());
+    let mut doc = OpenDoc { tenant: admitted.tenant, document, fencing_token, actors: HashMap::new(), pending: Vec::new(), snapshot_seq };
+    if snapshot_seq.is_none() && server.seq() == 0 {
+        // A new document: its first state becomes durable before anyone edits it.
+        match server.state() {
+            Ok(state) => match tokio::time::timeout(timeout, put_snapshot(&pool, &store, admitted.tenant, document, &state)).await {
+                Ok(Ok(())) => doc.snapshot_seq = Some(server.seq()),
+                _ => log::warn!("document {file}: snapshot at seq {} couldn't be stored (its events still hold it)", server.seq()),
+            },
+            Err(_) => log::error!("document {file}: its state couldn't be captured for a snapshot"),
+        }
+    }
+    Ok((server, doc))
 }
 
 impl CloudBackend {
@@ -594,14 +642,58 @@ impl Backend for CloudBackend {
         let (Ok(document), Some(admitted)) = (file.parse::<CloudDocumentId>(), self.admitted.get(file).copied()) else {
             return Err(REFUSED.into());
         };
-        if self.open.len() >= self.max_open && !self.open.contains_key(file) {
-            log::warn!("document {file} refused: {} documents are open", self.open.len());
+        if self.open_or_opening() >= self.max_open && !self.open.contains_key(file) {
+            log::warn!("document {file} refused: {} documents are open", self.open_or_opening());
             return Err(UNAVAILABLE.into());
         }
         let (server, doc) = self.recover(file, admitted, document)?;
         log::info!("document {file} opened at seq {} (fencing token {})", server.seq(), doc.fencing_token);
         self.open.insert(file.to_string(), doc);
         Ok(server)
+    }
+
+    /// Restores run on the runtime, so one slow room never holds the hub's other rooms.
+    fn begin_open(&mut self, file: &str) -> Result<bool, String> {
+        let Some(wake) = self.wake.clone() else { return Ok(false) };
+        let (Ok(document), Some(admitted)) = (file.parse::<CloudDocumentId>(), self.admitted.get(file).copied()) else {
+            return Err(REFUSED.into());
+        };
+        if self.open_or_opening() >= self.max_open && !self.open.contains_key(file) {
+            log::warn!("document {file} refused: {} documents are open", self.open_or_opening());
+            return Err(UNAVAILABLE.into());
+        }
+        if !self.opening.insert(file.to_string()) {
+            return Ok(true);
+        }
+        let (pool, store, limits, timeout) = (self.pool.clone(), self.store.clone(), self.limits, self.timeout);
+        let (finished, file) = (self.finished.clone(), file.to_string());
+        self.runtime.spawn(async move {
+            let result = recover_document(pool, store, limits, timeout, file.clone(), admitted, document).await;
+            if let Ok(mut done) = finished.lock() {
+                done.push((file, result));
+            }
+            wake.wake();
+        });
+        Ok(true)
+    }
+
+    fn opened(&mut self) -> Vec<(String, Result<Server, String>)> {
+        let done = self.finished.lock().map(|mut done| std::mem::take(&mut *done)).unwrap_or_default();
+        done.into_iter()
+            .map(|(file, result)| {
+                self.opening.remove(&file);
+                let result = result.map(|(server, doc)| {
+                    log::info!("document {file} opened at seq {} (fencing token {})", server.seq(), doc.fencing_token);
+                    self.open.insert(file.clone(), doc);
+                    server
+                });
+                (file, result)
+            })
+            .collect()
+    }
+
+    fn attach(&mut self, wake: Wake) {
+        self.wake = Some(wake);
     }
 
     fn joined(&mut self, file: &str, id: u32) {

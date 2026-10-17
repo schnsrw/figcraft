@@ -125,6 +125,25 @@ pub trait Backend: Send + 'static {
     /// The session for a file that isn't open (after [`admit`](Self::admit) let someone in).
     fn open(&mut self, file: &str) -> Result<Server, String>;
 
+    /// Start opening `file` away from the hub's thread (a restore that takes seconds must not
+    /// stop every other room). `Ok(true)`: it is opening; the hub parks the hellos for it and
+    /// asks [`opened`](Self::opened) whenever the backend [`wake`s](Wake) it. `Ok(false)` (the
+    /// default): not supported, the hub calls [`open`](Self::open) on its own thread.
+    /// `Err`: refused, with the reason shown to the person joining.
+    fn begin_open(&mut self, _file: &str) -> Result<bool, String> {
+        Ok(false)
+    }
+
+    /// The files [`begin_open`](Self::begin_open) finished since the last call, each with its
+    /// session or why it couldn't be opened. Called on the hub's thread after a [`Wake`].
+    fn opened(&mut self) -> Vec<(String, Result<Server, String>)> {
+        Vec::new()
+    }
+
+    /// Called once, before the hub runs: `wake` makes the hub call [`opened`](Self::opened).
+    /// Cheap, any thread, never blocks.
+    fn attach(&mut self, _wake: Wake) {}
+
     /// A successfully admitted client was assigned `id`. Called before its first message.
     fn joined(&mut self, _file: &str, _id: u32) {}
 
@@ -397,7 +416,20 @@ impl InFlight {
     }
 }
 
+/// How a backend tells the hub that background work finished (see [`Backend::begin_open`]).
+#[derive(Clone)]
+pub struct Wake(Sender<HubIn>);
+
+impl Wake {
+    /// Make the hub call [`Backend::opened`] soon. A hub that has stopped ignores it.
+    pub fn wake(&self) {
+        let _ = self.0.send(HubIn::Wake);
+    }
+}
+
 enum HubIn {
+    /// A backend finished work started away from the hub's thread.
+    Wake,
     /// A connection's first message (`Hello`, `Manage`, `OpenLibrary`, `OpenPlugins`,
     /// `OpenHosting` or `Resolve`) and its client's address ([`ip_key`]).
     Open {
@@ -469,6 +501,7 @@ impl Hosting {
     pub(crate) fn start<B: Backend>(listener: TcpListener, backend: B, limits: NetLimits, local: Option<Local>) -> io::Result<Hosting> {
         let addr = listener.local_addr()?;
         let in_flight = InFlight(Arc::default());
+        let (hub_tx, hub_rx) = channel();
         let mut hub = Hub {
             backend,
             rooms: HashMap::new(),
@@ -477,6 +510,8 @@ impl Hosting {
             outbox: Vec::new(),
             in_flight: in_flight.clone(),
             barred: HashMap::new(),
+            opening: HashMap::new(),
+            parked: 0,
         };
         if let Some(l) = local {
             let mut room = Room::new(l.server);
@@ -484,9 +519,9 @@ impl Hosting {
             hub.rooms.insert(l.file.clone(), room);
             hub.local = Some(l.file);
         }
-        let (hub_tx, hub_rx) = channel();
         let stop = Arc::new(AtomicBool::new(false));
         let open = Arc::new(AtomicUsize::new(0));
+        hub.backend.attach(Wake(hub_tx.clone()));
         let hub_thread = spawn("live-hub", move || hub.run(&hub_rx))?;
         let shared = Shared {
             per_address: PerAddress::default(),
@@ -1162,7 +1197,22 @@ struct Hub<B> {
     /// Addresses ([`ip_key`]) removed from each open file: they can't join it again until its
     /// session closes (the file is closed or removed; the entry goes with it).
     barred: HashMap<String, HashSet<IpAddr>>,
+    /// Admitted hellos waiting for a file the backend is opening ([`Backend::begin_open`]).
+    opening: HashMap<String, Vec<Parked>>,
+    /// All of `opening`'s hellos (bounded: a slow restore must not hold unlimited connections).
+    parked: usize,
 }
+
+/// A hello admitted for a file that is still opening.
+struct Parked {
+    conn: u64,
+    hello: Hello,
+    c: Pending,
+    admission: Admission,
+}
+
+/// Hellos held while their files open, all files together.
+const MAX_PARKED: usize = 1024;
 
 impl<B: Backend> Hub<B> {
     fn run(mut self, rx: &Receiver<HubIn>) {
@@ -1262,6 +1312,7 @@ impl<B: Backend> Hub<B> {
                     shutdown(&c.sock);
                 }
             }
+            HubIn::Wake => self.opened(),
             HubIn::Stop => {}
         }
     }
@@ -1369,11 +1420,24 @@ impl<B: Backend> Hub<B> {
             log::info!("event=refused ip={} reason=removed", c.ip);
             return refuse(&c.out, BARRED);
         }
-        let hosting = reads_hosting(&hello.client_version);
         // The backend checked the secret: the sessions don't keep it.
         hello.token.clear();
         let file = hello.file.clone();
         if !self.rooms.contains_key(&file) {
+            // Someone else's hello already started this file's open: wait with them.
+            let away = self.opening.contains_key(&file)
+                || match self.backend.begin_open(&file) {
+                    Ok(away) => away,
+                    Err(why) => return refuse(&c.out, &why),
+                };
+            if away {
+                if self.parked >= MAX_PARKED {
+                    return refuse(&c.out, "this server is busy opening documents: try again in a moment");
+                }
+                self.parked += 1;
+                self.opening.entry(file).or_default().push(Parked { conn, hello, c, admission });
+                return;
+            }
             match self.backend.open(&file) {
                 Ok(server) => {
                     self.rooms.insert(file.clone(), Room::new(server));
@@ -1381,6 +1445,36 @@ impl<B: Backend> Hub<B> {
                 Err(why) => return refuse(&c.out, &why),
             }
         }
+        self.join_open(conn, hello, c, admission);
+    }
+
+    /// Files the backend finished opening: let in the hellos that waited for each.
+    fn opened(&mut self) {
+        for (file, result) in self.backend.opened() {
+            let waiting = self.opening.remove(&file).unwrap_or_default();
+            self.parked = self.parked.saturating_sub(waiting.len());
+            match result {
+                Ok(server) => {
+                    self.rooms.entry(file.clone()).or_insert_with(|| Room::new(server));
+                    for p in waiting {
+                        self.join_open(p.conn, p.hello, p.c, p.admission);
+                    }
+                    // Nobody got in (all gone or refused): don't keep the room open.
+                    self.close_if_empty(&file);
+                }
+                Err(why) => {
+                    for p in waiting {
+                        refuse(&p.c.out, &why);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Put an admitted hello into its (open) room.
+    fn join_open(&mut self, conn: u64, mut hello: Hello, c: Pending, admission: Admission) {
+        let hosting = reads_hosting(&hello.client_version);
+        let file = hello.file.clone();
         let info = if hosting { self.backend.hosting(&file) } else { None };
         let Some(room) = self.rooms.get_mut(&file) else { return };
         // Resuming takes over a client id (closing its connection): only with the credential it
@@ -1776,3 +1870,7 @@ mod queue_tests;
 #[cfg(test)]
 #[path = "barred_tests.rs"]
 mod barred_tests;
+
+#[cfg(test)]
+#[path = "async_open_tests.rs"]
+mod async_open_tests;

@@ -189,6 +189,23 @@ Run E rebuilt the release binary with the 20,001-node cap: its 20,000-frame cold
 An integration test separately proves an already stored document above its configured cap is
 refused on recovery.
 
+### Isolation: another room while a large document cold-opens (`--phases isolation`)
+
+One editor renames in a small room every 20 ms; a 20,000-frame document (snapshot, room closed)
+is cold-opened in another room on the same relay. Same machine, same database, one run each; the
+old code is the commit before the change.
+
+| the small room's commits | n | p50 ms | p95 ms | max ms |
+|---|---:|---:|---:|---:|
+| before the cold open (old code) | 12 | 2.2 | 3.4 | 3.4 |
+| **during** the cold open, old code (restore on the hub thread) | 1 | 4245.7 | 4245.7 | **4245.7** |
+| before the cold open (new code) | 12 | 2.5 | 3.8 | 3.8 |
+| **during** the cold open, new code (restore on the runtime) | 144 | 4.8 | 5.6 | **6.1** |
+
+The cold open itself took 4.26 s before and 4.22 s after: the restore is no faster, but it no
+longer blocks anything else. Commits during the open are slower (p50 4.8 ms instead of 2.5 ms)
+because the restore is using the same machine and database.
+
 ## Against the targets
 
 Targets come from `docs/saas/product-requirements.md` ("Non-functional requirements"). The
@@ -217,10 +234,11 @@ from the runs above. Assumptions are stated and are deliberately conservative.
   typing are coalesced): at an assumed 0.2 batches/s it is about 500 active editors per replica.
   Scale on commit latency p95 and active rooms (`deployment-operations.md`, "Scaling
   thresholds").
-- **Recovery is serial too:** a cold open runs on the hub thread, so while a 20k-frame document
-  restores (4.2 s in run D) every other room on that relay waits for its next flush. Until restore is
-  faster or moved off the hub thread, keep large documents spread across replicas and alert on
-  recovery time.
+- **Recovery no longer stalls other rooms:** a cold open runs on the backend's runtime
+  (`Backend::begin_open`), not the hub thread. While a 20k-frame document restores (4.2 s) other
+  rooms keep committing (isolation run below). The restore itself is still 4.2 s for that room, so
+  alert on recovery time; keep up to `max_open` restores in mind, since each uses a runtime worker
+  for its CPU-bound replay (the runtime has 4 workers).
 - **PostgreSQL:** each batch is one `document_events` row of about 152 B of row data, about
   350 B with indexes and up to about 860 B of WAL. At 2 batches/s that is about 1 MiB of rows,
   about 2.4 MiB of table and index, and up to about 6 MiB of WAL per editor-hour. Snapshots bound
@@ -230,8 +248,8 @@ from the runs above. Assumptions are stated and are deliberately conservative.
   a 20k-frame document sends 616 kB per join, and a reconnect storm of K editors on large
   documents sends K × welcome size at once.
 - **Reconnect storms:** 20 simultaneous reconnects finished in 100 to 221 ms for small documents.
-  For large documents the cold-open time per room (4.2 s at 20k frames, serial on the hub
-  thread) dominates. A relay restart with many large rooms open needs staggered reconnects or a
+  For large documents the cold-open time per room (4.2 s at 20k frames) dominates; opens now
+  overlap instead of queueing on the hub thread. A relay restart with many large rooms open needs staggered reconnects or a
   faster restore.
 - **Slow readers:** a non-reading client is disconnected after about `NetLimits::queue` (1024)
   queued messages. At 40 room messages/s that took 45 to 50 s. Lower `queue` or
@@ -250,6 +268,9 @@ from the runs above. Assumptions are stated and are deliberately conservative.
 
 ## Revision history
 
+- 2026-10-17: moved room restore off the hub thread (`Backend::begin_open`) and added the
+  isolation phase; a 4.2 s cold open of a 20k-frame document no longer stalls other rooms
+  (4,246 ms worst commit before, 6.1 ms after). Commits are still serial per flush.
 - 2026-10-17: run D repeated the full release workload after the duplicate-restore fix; cold
   recovery at the initial cloud size limit measured 4.24 s p95 and commit 3.7 ms p95. Run E
   rebuilt with the cap and verified that 20,000 frames still open.

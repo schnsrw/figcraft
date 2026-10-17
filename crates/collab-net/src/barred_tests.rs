@@ -42,6 +42,8 @@ fn a_closed_file_forgets_whom_it_barred() {
         local: None,
         outbox: Vec::new(),
         barred: HashMap::new(),
+        opening: HashMap::new(),
+        parked: 0,
     };
     let ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7));
     hub.barred.entry("f".into()).or_default().insert(ip);
