@@ -181,7 +181,9 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                     'document_team_grants', 'document_events', 'document_snapshots', 'jobs',
                     'idempotency_keys', 'audit_events', 'external_mappings', 'objects', 'object_references',
                     'upload_reservations', 'libraries', 'library_team_grants', 'library_versions', 'library_usages',
-                    'plugins', 'plugin_versions', 'exports', 'document_thumbnails', 'retention_holds', 'share_links'
+                    'plugins', 'plugin_versions', 'exports', 'document_thumbnails', 'retention_holds', 'share_links', 'oidc_login_attempts', 'browser_sessions',
+                    'tenant_bootstrap', 'service_accounts', 'service_account_credentials', 'team_invitations',
+                    'member_permissions', 'support_access_grants'
                 ])
             LOOP
                 EXECUTE format('ALTER TABLE public.%I OWNER TO figcraft_migrator', table_name);
