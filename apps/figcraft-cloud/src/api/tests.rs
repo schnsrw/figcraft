@@ -58,6 +58,7 @@ impl Authenticator for FakeAuthenticator {
                 tenant: TenantContext::new(tenant, principal, DeploymentMode::SingleTenant, Role::Editor, []),
                 session: SessionInfo { kind: CredentialKind::BrowserSession, id: "a1a10000-0000-4000-8000-0000000000ff".to_string() },
                 grant: super::auth::Grant::Member,
+                mutating: false,
             })
         })
     }

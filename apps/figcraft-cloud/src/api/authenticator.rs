@@ -38,12 +38,13 @@ use axum::http::{HeaderMap, Method, header};
 use base64::Engine as _;
 use figcraft_cloud_auth::session_policy::{COOKIE_NAME, SessionPolicy};
 use figcraft_cloud_domain::{CloudDocumentId, DeploymentMode, Permission, PrincipalId, Role, TenantContext, TenantId, Uuid};
-use figcraft_cloud_storage::begin_tenant_transaction;
+use figcraft_cloud_storage::access_guard::{self, AccessGuardError, HeldCredential, MembershipRequirement};
 use figcraft_cloud_storage::effective_roles::{TenantAccess, resolve_tenant_access};
 use figcraft_cloud_storage::memberships::MemberPermission;
 use figcraft_cloud_storage::service_accounts::{self, AuthenticatedServiceAccount, SECRET_PREFIX, ServiceAccountError};
 use figcraft_cloud_storage::sessions::{self, ResolvedSession, SessionError, SessionLimits};
 use figcraft_cloud_storage::share_links::{self, ShareGrant, ShareRole};
+use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
 use ring::hmac;
 use sqlx::PgPool;
 
@@ -442,6 +443,7 @@ impl CredentialAuthenticator {
                     tenant: context,
                     session: SessionInfo { kind: CredentialKind::BrowserSession, id: session.id.to_string() },
                     grant: Grant::Member,
+                    mutating: false,
                 })
             }
             Caller::ServiceAccount(account) => {
@@ -453,6 +455,7 @@ impl CredentialAuthenticator {
                     tenant: TenantContext::new(account.tenant_id, account.principal_id, self.identity.deployment, Role::Viewer, []),
                     session: SessionInfo { kind: CredentialKind::ServiceAccount, id: account.credential_id.to_string() },
                     grant: Grant::ServiceAccount { scopes: account.scopes },
+                    mutating: false,
                 })
             }
             Caller::Share(share) => {
@@ -474,6 +477,7 @@ impl CredentialAuthenticator {
                     tenant: TenantContext::new(share.tenant_id, creator, self.identity.deployment, role, []),
                     session: SessionInfo { kind: CredentialKind::ShareLink, id: share.link_id.to_string() },
                     grant: Grant::Share { document_id: share.document_id, role: share.role, expires_at: share.expires_at },
+                    mutating: false,
                 })
             }
         }
@@ -483,6 +487,86 @@ impl CredentialAuthenticator {
 impl Authenticator for CredentialAuthenticator {
     fn authenticate<'a>(&'a self, request: &'a AuthRequest<'a>) -> AuthFuture<'a> {
         Box::pin(self.authenticated(request))
+    }
+}
+
+/// S4-023: the one path every mutating handler takes to hold the caller's access inside the
+/// transaction that performs its mutation (`tenants_api::open`/`open_suspended`/`create_tenant`
+/// and `documents_api::begin` call it right after opening the tenant transaction, before their
+/// authorization reads and writes). It re-reads, `FOR SHARE`, the principal, the session or
+/// credential row and (for `membership` = active member) the caller's `tenant_members` row
+/// (`access_guard::hold_caller_access`), so a revocation that committed after the request was
+/// authenticated refuses it (`401` for a dead credential, `403` for a lost membership), and one
+/// that has not committed yet waits for this transaction to end. A concurrent revocation that
+/// deadlocks against the request aborts one of them (`503` here); neither half-commits.
+///
+/// Reads (GET/HEAD/OPTIONS) are not held: they change nothing, and holding share locks on the
+/// session row for every read would make sliding-expiry touches wait. Only the production
+/// credential authenticator (installed with an identity configuration) is held: the test
+/// authenticators carry synthetic credential ids that have no rows.
+pub(crate) async fn hold_caller_access(
+    state: &AppState,
+    transaction: &mut TenantTransaction<'_>,
+    caller: &Authenticated,
+    membership: MembershipRequirement,
+) -> Result<(), ApiError> {
+    if !caller.mutating || state.identity().is_none() {
+        return Ok(());
+    }
+    let id: Uuid = caller.session.id.parse().map_err(|_| ApiError::unauthenticated())?;
+    #[cfg(test)]
+    guard_pause::reached(&caller.session.id).await;
+    let (credential, membership) = match caller.session.kind {
+        CredentialKind::BrowserSession => (HeldCredential::BrowserSession(id), membership),
+        // Service principals and share sessions are not tenant members: their credential row is
+        // what binds them to the tenant.
+        CredentialKind::ServiceAccount => (HeldCredential::ServiceAccountCredential(id), MembershipRequirement::None),
+        CredentialKind::ShareLink => (HeldCredential::ShareLink(id), MembershipRequirement::None),
+    };
+    access_guard::hold_caller_access(transaction, caller.principal, credential, membership).await.map_err(|error| match error {
+        AccessGuardError::Revoked => ApiError::unauthenticated(),
+        AccessGuardError::NotMember => ApiError::forbidden(),
+        AccessGuardError::Database => ApiError::unavailable(),
+    })
+}
+
+/// Test-only pause point just before the guard's reads (`revocation_race_tests`): a test arms it
+/// for one credential id, the request stops there with its transaction open, the test commits a
+/// revocation, then releases the request. Requests with any other credential id never stop.
+#[cfg(test)]
+pub(crate) mod guard_pause {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex, OnceLock};
+
+    use tokio::sync::Notify;
+
+    /// `reached` is signalled when the request arrives; it then waits for `release`.
+    #[derive(Clone, Default)]
+    pub(crate) struct Pause {
+        pub(crate) reached: Arc<Notify>,
+        pub(crate) release: Arc<Notify>,
+    }
+
+    fn armed() -> &'static Mutex<HashMap<String, Pause>> {
+        static ARMED: OnceLock<Mutex<HashMap<String, Pause>>> = OnceLock::new();
+        ARMED.get_or_init(Mutex::default)
+    }
+
+    /// Stop the next mutating request authenticated with `credential_id` before its guard.
+    pub(crate) fn arm(credential_id: &str) -> Pause {
+        let pause = Pause::default();
+        if let Ok(mut armed) = armed().lock() {
+            armed.insert(credential_id.to_string(), pause.clone());
+        }
+        pause
+    }
+
+    pub(super) async fn reached(credential_id: &str) {
+        let pause = armed().lock().ok().and_then(|mut armed| armed.remove(credential_id));
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
     }
 }
 

@@ -28,6 +28,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use figcraft_cloud_auth::authz::{Action, Resource, SensitivePermission, Subject, decide};
 use figcraft_cloud_domain::{CloudDocumentId, ErrorCode, PrincipalId, ProjectId, ResourceState, Role, Uuid, WorkspaceId};
+use figcraft_cloud_storage::access_guard::MembershipRequirement;
 use figcraft_cloud_storage::effective_roles::{
     ResourceAccess, TenantAccess, resolve_document_access, resolve_project_access, resolve_tenant_access, resolve_workspace_access,
 };
@@ -50,6 +51,7 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use super::auth::{Authenticated, CredentialKind};
+use super::authenticator::hold_caller_access;
 use super::cursor::{CursorScope, ListQuery, PageRequest, Position, invalid_cursor};
 use super::error::{ApiError, ApiJson, authorize_resource};
 
@@ -269,7 +271,9 @@ async fn begin<'a>(state: &'a AppState, caller: &Authenticated) -> Result<Tenant
     if caller.session.kind == CredentialKind::ShareLink {
         return Err(ApiError::forbidden());
     }
-    begin_tenant_transaction(state.pool(), caller.tenant.tenant_id()).await.map_err(|_| ApiError::unavailable())
+    let mut transaction = begin_tenant_transaction(state.pool(), caller.tenant.tenant_id()).await.map_err(|_| ApiError::unavailable())?;
+    hold_caller_access(state, &mut transaction, caller, MembershipRequirement::ActiveMember).await?;
+    Ok(transaction)
 }
 
 async fn commit(transaction: TenantTransaction<'_>) -> Result<(), ApiError> {

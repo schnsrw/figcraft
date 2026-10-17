@@ -37,6 +37,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, put};
 use figcraft_cloud_auth::authz::{Action, Resource, SensitivePermission, Subject, decide, role_allows};
 use figcraft_cloud_domain::{DeploymentMode, ErrorCode, PrincipalId, ResourceState, Role, TenantId, Uuid};
+use figcraft_cloud_storage::access_guard::MembershipRequirement;
 use figcraft_cloud_storage::audit::record_audit_event;
 use figcraft_cloud_storage::effective_roles::{TenantAccess, resolve_tenant_access};
 use figcraft_cloud_storage::memberships::{self, MemberPermission, MemberState, MembershipError, parse_role, role_str, valid_tenant_role};
@@ -48,6 +49,7 @@ use serde::{Deserialize, Serialize};
 
 use super::AppState;
 use super::auth::{Authenticated, CredentialKind};
+use super::authenticator::hold_caller_access;
 use super::context::RequestContext;
 use super::cursor::{CursorScope, ListQuery, PageBody, PageRequest, Position, SearchTerm};
 use super::error::{ApiError, ApiJson};
@@ -117,6 +119,7 @@ pub(crate) async fn open<'a>(state: &'a AppState, caller: &Authenticated, tenant
     require_member_credential(caller)?;
     let tenant = path_tenant(caller, tenant)?;
     let mut transaction = begin_tenant_transaction(state.pool(), tenant).await.map_err(storage_unavailable)?;
+    hold_caller_access(state, &mut transaction, caller, MembershipRequirement::ActiveMember).await?;
     let access = resolve_tenant_access(&mut transaction, caller.principal).await.map_err(storage_unavailable)?.ok_or(ApiError::not_found())?;
     if access.tenant_role.is_none() {
         if access.tenant_state != ResourceState::Active
@@ -263,6 +266,7 @@ async fn create_tenant(State(state): State<AppState>, caller: Authenticated, Api
     }
     let id = TenantId::random();
     let mut transaction = begin_tenant_transaction(state.pool(), id).await.map_err(storage_unavailable)?;
+    hold_caller_access(&state, &mut transaction, &caller, MembershipRequirement::None).await?;
     let new = NewTenant {
         slug: &body.slug,
         name: &body.name,
@@ -357,6 +361,7 @@ async fn update_tenant(
 async fn open_suspended<'a>(state: &'a AppState, caller: &Authenticated, tenant: &str) -> Result<TenantCall<'a>, ApiError> {
     let tenant = path_tenant(caller, tenant)?;
     let mut transaction = begin_tenant_transaction(state.pool(), tenant).await.map_err(storage_unavailable)?;
+    hold_caller_access(state, &mut transaction, caller, MembershipRequirement::ActiveMember).await?;
     let access = resolve_tenant_access(&mut transaction, caller.principal).await.map_err(storage_unavailable)?.ok_or(ApiError::not_found())?;
     if access.tenant_state != ResourceState::Suspended || !access.principal_active {
         return Err(ApiError::not_found());
