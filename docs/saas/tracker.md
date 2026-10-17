@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (23/25); S6 in progress (6/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (6/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 23 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | in progress | 6 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2245,7 +2245,20 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   restore the newest verified snapshot (re-verified on read, falling back past corrupt ones) with
   `Server::restore` and replay only the events after it; the snapshot_restore and collab_backend
   probes prove snapshot-plus-replay equals pure replay.
-- [ ] **S5-008** Preserve client-id and reconnect state across room-owner failure.
+- [x] **S5-008** Preserve client-id and reconnect state across room-owner failure.
+  Evidence (2026-10-18): a restored room already kept the session identity (the snapshot carries it)
+  and the ids of clients that had edited (the event log replays them), but a client that had joined
+  and not edited since the last snapshot was forgotten: its resume was refused and its id could be
+  handed to someone else. Issued client ids are now durable: `room_clients` (migration
+  `20261018000010`, forced row-level security, at most 65,536 remembered per document) is written
+  in the same transaction as the edits, so an id is durable before its client's welcome is sent, and
+  recovery replays the ids into the restored server (a room refuses to open without them, rather
+  than risk issuing an id twice). Tests: `room_clients` (storage: recorded once, ordered, tenant
+  isolated, bounded and trimmed) and `kill.rs` against the real process: two clients join and
+  never edit, the ids are in the database before the kill, the process is SIGKILLed and
+  restarted, a newcomer gets an id above every earlier one, and the client that never edited
+  resumes with its own id. A client that already resumed with edits in flight still resends
+  what was not confirmed (S5-022/023).
 - [x] **S5-009** Implement commit-before-broadcast event processing.
   Evidence: Implemented in S2-018 and CS-002: `CloudBackend::flush` appends the hub's accepted
   batches under the fencing token and commits before the hub sends any confirmation or broadcast; a
@@ -2753,3 +2766,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S5-017: relay quotas (rooms, connections, clients per room, messages per second, message size, outbound queue bytes) are bounded operator settings, enforced and tested live through the real hub. S5 reaches 21/25. |
 | 2026-10-18 | S5-022, S5-023: SIGKILL tests against the real process: an edit whose commit was blocked is never confirmed and leaves nothing durable; confirmed edits all return after a restart that reclaims the dead process's lease. S5 reaches 23/25. |
 | 2026-10-18 | S6-011: versioned OpenAPI 1.0.0 for the host document and job operations, checked in, served at /api/v1/host/openapi.json and tied to a Rust route table by tests. S6 reaches 6/31. |
+| 2026-10-18 | S5-008: issued client ids are durable (`room_clients`, schema 20261018000010, written with the edits), so a restored room never reissues an id and a client that never edited reconnects as itself after the owner is killed. S5 reaches 24/25. |

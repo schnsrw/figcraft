@@ -31,8 +31,15 @@ fn start(stack: &Stack) -> Killed {
 
 /// Join and read the welcome: client id, sequence and the page to edit.
 fn join(file: &str, token: &str) -> (Raw, u32, u64, NodeId) {
+    let (raw, client_id, seq, page, _) = join_with_session(file, token);
+    (raw, client_id, seq, page)
+}
+
+/// [`join`], also giving the session id the welcome names (what a reconnecting client resumes into).
+fn join_with_session(file: &str, token: &str) -> (Raw, u32, u64, NodeId, u64) {
     let mut raw = Raw::hello(file, token);
-    let Ok(ServerMsg::Welcome { client_id, seq, catch_up: CatchUp::Snapshot(changes), .. }) = raw.until(|m| matches!(m, ServerMsg::Welcome { .. }))
+    let Ok(ServerMsg::Welcome { client_id, seq, session, catch_up: CatchUp::Snapshot(changes), .. }) =
+        raw.until(|m| matches!(m, ServerMsg::Welcome { .. }))
     else {
         panic!("no welcome")
     };
@@ -43,7 +50,7 @@ fn join(file: &str, token: &str) -> (Raw, u32, u64, NodeId) {
             _ => None,
         })
         .unwrap();
-    (raw, client_id, seq, page)
+    (raw, client_id, seq, page, session)
 }
 
 fn rename(raw: &mut Raw, base_seq: u64, batch_id: u64, page: NodeId, name: &str) {
@@ -82,6 +89,20 @@ impl Db {
                 .unwrap();
             transaction.rollback().await.unwrap();
             seq
+        })
+    }
+
+    /// The client ids recorded as issued for the document.
+    fn issued_clients(&self, document: CloudDocumentId) -> Vec<i64> {
+        self.runtime.block_on(async {
+            let mut transaction = begin_tenant_transaction(&self.pool, self.tenant).await.unwrap();
+            let ids = sqlx::query_scalar("SELECT client_id FROM room_clients WHERE document_id = $1::uuid ORDER BY client_id")
+                .bind(document.to_string())
+                .fetch_all(transaction.connection())
+                .await
+                .unwrap();
+            transaction.rollback().await.unwrap();
+            ids
         })
     }
 
@@ -135,8 +156,12 @@ impl Held {
     }
 }
 
+/// The tests start processes on fixed ports: one at a time.
+static PORTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
 fn a_killed_relay_never_confirmed_an_uncommitted_edit_and_loses_no_confirmed_one() {
+    let _ports = PORTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let Some(stack) = stack(1) else { return };
     let db = Db::new(&stack);
 
@@ -199,4 +224,33 @@ fn a_killed_relay_never_confirmed_an_uncommitted_edit_and_loses_no_confirmed_one
     rename(&mut after, seq3, 1, page3, "after the second crash");
     assert_eq!(confirmed(&mut after, me3, 1), 4, "and the room carries on from there");
     assert_eq!((db.committed_seq(document), db.events(document)), (4, 4));
+}
+
+/// S5-008: client ids survive the room's owner dying. Two clients join and never edit (so the log
+/// holds nothing of them), the relay is killed, and after the restart one of them reconnects as
+/// itself while a newcomer gets an id nobody had.
+#[test]
+fn a_client_that_never_edited_reconnects_as_itself_and_ids_are_not_reissued_after_a_kill() {
+    let _ports = PORTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(stack) = stack(1) else { return };
+    let db = Db::new(&stack);
+    let (file, token) = create_link(&stack);
+    let document: CloudDocumentId = file.parse().unwrap();
+    let mut first = start(&stack);
+    let (mut a, id_a, seq_a, _, session) = join_with_session(&file, &token);
+    let (mut b, id_b, _, _) = join(&file, &token);
+    // The ids were recorded before the welcomes were sent: they are in the database already.
+    assert_eq!(db.issued_clients(document), vec![i64::from(id_a.min(id_b)), i64::from(id_a.max(id_b))]);
+    first.0.kill().unwrap();
+    first.0.wait().unwrap();
+    assert!(a.until(|_| false).is_err() && b.until(|_| false).is_err());
+
+    let _second = start(&stack);
+    // A newcomer joins first: its id is one nobody was ever given, not a's or b's.
+    let (_newcomer, id_new, _, _) = join(&file, &token);
+    assert!(id_new > id_a.max(id_b), "an id handed out before the kill is never handed out again: {id_new} after {id_a}, {id_b}");
+    // Then a reconnects as a: the restored room still knows it.
+    let mut resumed = Raw::hello_resuming(&file, &token, message::Resume { session, client_id: id_a, seq: seq_a });
+    let Ok(ServerMsg::Welcome { client_id, .. }) = resumed.until(|m| matches!(m, ServerMsg::Welcome { .. })) else { panic!("no welcome") };
+    assert_eq!(client_id, id_a, "the client that never edited got its own id back across the kill");
 }

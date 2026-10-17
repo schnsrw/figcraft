@@ -129,6 +129,20 @@ impl Raw {
         raw
     }
 
+    /// Like [`hello`](Self::hello), asking to resume as `resume` (a client of an earlier connection).
+    pub fn hello_resuming(file: &str, token: &str, resume: message::Resume) -> Raw {
+        let stream = TcpStream::connect(SocketAddr::from(RELAY)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        let (ws, _) = tungstenite::client::client("ws://127.0.0.1:8082/ws/v1/collab", stream).unwrap();
+        let mut raw = Raw(ws);
+        let mut hello = Client::hello(file, token, "Raw", "");
+        if let ClientMsg::Hello(h) = &mut hello {
+            h.resume = Some(resume);
+        }
+        raw.send(&hello);
+        raw
+    }
+
     pub fn send(&mut self, msg: &ClientMsg) {
         self.0.send(Message::Binary(Bytes::from(message::encode(msg).unwrap()))).unwrap();
     }

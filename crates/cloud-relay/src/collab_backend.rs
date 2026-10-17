@@ -59,6 +59,7 @@ use figcraft_cloud_storage::realtime_tickets::{TicketKey, looks_like_ticket, ver
 use figcraft_cloud_storage::revocation::{
     MAX_CHECKED_MEMBERS, MemberAdmission, RevocationError, admit_member, dead_member_admissions, parse_member_token,
 };
+use figcraft_cloud_storage::room_clients::{load_and_trim, record_issued};
 use figcraft_cloud_storage::room_leases::{AcquireRoom, RoomLease, acquire_or_reclaim_room, release_room, renew_room};
 use figcraft_cloud_storage::sessions::SessionLimits;
 use figcraft_cloud_storage::share_links::{MAX_CHECKED_LINKS, ShareRole, dead_share_links, resolve_share_link};
@@ -379,6 +380,9 @@ struct OpenDoc {
     actors: HashMap<u32, PrincipalId>,
     /// Accepted batches not yet committed.
     pending: Vec<(PrincipalId, Accepted)>,
+    /// Client ids handed out since the last commit: recorded with the next one, so an id is
+    /// durable before its client's welcome is sent.
+    issued: Vec<u32>,
     /// The sequence of the latest snapshot stored (or restored).
     snapshot_seq: Option<u64>,
     /// Whether this relay holds the room's lease (under `fencing_token`).
@@ -568,11 +572,11 @@ impl CloudBackend {
 
     /// Commit `doc`'s pending batches; false when they couldn't be (they are dropped).
     fn commit(&self, file: &str, doc: &mut OpenDoc) -> bool {
-        if doc.pending.is_empty() {
+        if doc.pending.is_empty() && doc.issued.is_empty() {
             return true;
         }
-        let pending = std::mem::take(&mut doc.pending);
-        let committed = self.block(commit_batches(&self.pool, doc.tenant, doc.document, doc.fencing_token, pending));
+        let (pending, issued) = (std::mem::take(&mut doc.pending), std::mem::take(&mut doc.issued));
+        let committed = self.block(commit_batches(&self.pool, doc.tenant, doc.document, doc.fencing_token, pending, issued));
         Self::commit_outcome(file, committed)
     }
 
@@ -597,13 +601,14 @@ impl CloudBackend {
         let mut jobs = Vec::new();
         for file in files {
             let Some(doc) = self.open.get_mut(&file) else { continue };
-            if doc.pending.is_empty() {
+            if doc.pending.is_empty() && doc.issued.is_empty() {
                 continue;
             }
-            let pending = std::mem::take(&mut doc.pending);
+            let (pending, issued) = (std::mem::take(&mut doc.pending), std::mem::take(&mut doc.issued));
             let (pool, tenant, document, token, timeout) = (self.pool.clone(), doc.tenant, doc.document, doc.fencing_token, self.timeout);
-            let handle =
-                self.runtime.spawn(async move { tokio::time::timeout(timeout, commit_batches(&pool, tenant, document, token, pending)).await.ok() });
+            let handle = self
+                .runtime
+                .spawn(async move { tokio::time::timeout(timeout, commit_batches(&pool, tenant, document, token, pending, issued)).await.ok() });
             jobs.push((file, handle));
         }
         let mut failed = Vec::new();
@@ -778,6 +783,10 @@ async fn renew_leases(pool: PgPool, timeout: Duration, config: LeaseConfig, owne
     }
 }
 
+fn room_clients_batch() -> usize {
+    figcraft_cloud_storage::room_clients::MAX_RECORD_BATCH
+}
+
 /// Append `pending` (accepted batches, in order) to `document`'s log under `fencing_token` and
 /// commit, all in one tenant transaction: the batches are durable or none of them is.
 async fn commit_batches(
@@ -786,8 +795,12 @@ async fn commit_batches(
     document: CloudDocumentId,
     fencing_token: i64,
     pending: Vec<(PrincipalId, Accepted)>,
+    issued: Vec<u32>,
 ) -> Result<(), &'static str> {
     let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| "begin")?;
+    for ids in issued.chunks(room_clients_batch()) {
+        record_issued(&mut transaction, document, ids).await.map_err(|_| "record clients")?;
+    }
     let mut actor = None;
     let mut chunk = Vec::new();
     for (batch_actor, batch) in pending {
@@ -866,7 +879,33 @@ async fn recover_document(
         return Err(UNAVAILABLE.to_string().into());
     }
     let fencing_token = room.fencing_token();
-    let server = room.into_server();
+    let mut server = room.into_server();
+    // The client ids this document's rooms handed out: a restored room must not hand one out
+    // again, and a client that reconnects keeps its own (S5-008). Refusing to open without them
+    // is deliberate: an id could be issued twice.
+    let issued = tokio::time::timeout(timeout, async {
+        let mut transaction = begin_tenant_transaction(&pool, admitted.tenant).await.map_err(|_| ())?;
+        let ids = load_and_trim(&mut transaction, document).await.map_err(|_| ())?;
+        transaction.commit().await.map_err(|_| ())?;
+        Ok::<_, ()>(ids)
+    })
+    .await;
+    match issued {
+        Ok(Ok(ids)) => {
+            for client in ids {
+                if server.replay(Journal::Issued { client }).is_err() {
+                    log::warn!("document {file}: a remembered client id couldn't be restored");
+                }
+            }
+        }
+        _ => {
+            log::error!("document {file}: its issued client ids couldn't be read");
+            if let (Some(params), Some(claim)) = (&lease, claim) {
+                release_lease(&pool, timeout, &file, admitted.tenant, document, params.owner, claim.fencing_token).await;
+            }
+            return Err(OpenFailure::Refused(UNAVAILABLE.into()));
+        }
+    }
     let snapshot_seq = restored.and_then(|(_, seq)| u64::try_from(seq).ok());
     let mut doc = OpenDoc {
         tenant: admitted.tenant,
@@ -874,6 +913,7 @@ async fn recover_document(
         fencing_token,
         actors: HashMap::new(),
         pending: Vec::new(),
+        issued: Vec::new(),
         snapshot_seq,
         leased: lease.is_some(),
         snapshotting: false,
@@ -1066,14 +1106,20 @@ impl Backend for CloudBackend {
     }
 
     fn changed(&mut self, file: &str, server: &mut Server) {
-        let accepted: Vec<Accepted> = server
-            .take_journal()
-            .into_iter()
-            .filter_map(|entry| match entry {
-                Journal::Accepted(batch) => Some(batch),
-                Journal::Issued { .. } | Journal::Refused { .. } => None,
-            })
-            .collect();
+        let mut accepted: Vec<Accepted> = Vec::new();
+        let mut issued: Vec<u32> = Vec::new();
+        for entry in server.take_journal() {
+            match entry {
+                Journal::Accepted(batch) => accepted.push(batch),
+                // A client id handed out: recorded with the next commit, so a restored room never
+                // hands it out again and its client can reconnect as itself.
+                Journal::Issued { client } => issued.push(client),
+                Journal::Refused { .. } => {}
+            }
+        }
+        if let Some(doc) = self.open.get_mut(file) {
+            doc.issued.extend(issued);
+        }
         if accepted.is_empty() {
             return;
         }
@@ -1113,7 +1159,8 @@ impl Backend for CloudBackend {
                 failed.push(file);
             }
         }
-        let files: Vec<String> = self.open.iter().filter(|(_, doc)| !doc.pending.is_empty()).map(|(file, _)| file.clone()).collect();
+        let files: Vec<String> =
+            self.open.iter().filter(|(_, doc)| !doc.pending.is_empty() || !doc.issued.is_empty()).map(|(file, _)| file.clone()).collect();
         failed.extend(self.commit_all(files));
         for file in &failed {
             self.idle_since.remove(file);

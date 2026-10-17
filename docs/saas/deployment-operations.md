@@ -229,7 +229,7 @@ driver errors. Migration application is deliberately separate from readiness and
 startup. At process startup, readiness checks the highest successfully applied migration version
 against the binary's supported inclusive range. A missing ledger or unsupported version keeps
 `/readyz` at 503 while liveness remains available. The current room lease migration has version
-`20261018000002`, which is the binary's supported version. Schema rollback policy is handled by
+`20261018000010`, which is the binary's supported version. Schema rollback policy is handled by
 the release migration procedure.
 
 The database administrator URL is available only to the role-provisioning jobs. The migration job
