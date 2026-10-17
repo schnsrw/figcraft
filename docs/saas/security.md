@@ -50,6 +50,22 @@
 - Password authentication, if offered for standalone mode, uses a memory-hard password hash and
   rate-limited recovery flow.
 
+## Built-in accounts
+
+Local accounts sit beside OIDC; a tenant chooses its allowed sign-in methods and neither bypasses the
+other. The principal stays the identity (an OIDC user links through `identity_links`; one person may
+hold both).
+
+* **Storage** (`local_credentials`, forced RLS): normalised login (NFC, lowercase, 3 to 128
+  characters, unique per tenant), PHC password hash with its parameters, `active`/`disabled`, failure
+  counters. Nothing else about a password is stored.
+* **Hashing** (S6-033): Argon2id, 46 MiB / 2 passes / 1 lane by default, configurable inside fixed
+  bounds, parameters stored per hash and upgraded at the next successful sign-in. Verification does one
+  full computation for unknown logins and unusable hashes (no account oracle in text or timing).
+  Concurrent hashes are bounded. Passwords are NFKC-normalised; 12 to 128 characters; no composition
+  rules; common-password and pattern deny-list. Decision record: `password-hashing-decision.md`.
+* **Never** logged, returned or audited: passwords, hashes, reset or invitation tokens.
+
 ## Authorization controls
 
 - Deny by default.

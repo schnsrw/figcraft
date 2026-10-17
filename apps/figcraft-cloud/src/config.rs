@@ -62,6 +62,10 @@ pub(super) struct CloudConfig {
     mounted_secrets: BTreeSet<&'static str>,
     /// Peers whose `X-Forwarded-For` is believed (`FIGCRAFT_TRUSTED_PROXY_CIDRS`; default none).
     pub(super) trusted_proxies: Vec<crate::api::client_ip::Cidr>,
+    /// Argon2id cost for built-in accounts (`FIGCRAFT_PASSWORD_MEMORY_KIB`, `_PASSES`, `_LANES`).
+    password_params: figcraft_cloud_auth::password::HashParams,
+    /// Password hashes computed at once (`FIGCRAFT_PASSWORD_CONCURRENCY`).
+    password_concurrency: usize,
 }
 
 impl Default for CloudConfig {
@@ -88,6 +92,8 @@ impl Default for CloudConfig {
             s3_force_path_style: false,
             mounted_secrets: BTreeSet::new(),
             trusted_proxies: Vec::new(),
+            password_params: figcraft_cloud_auth::password::HashParams::default(),
+            password_concurrency: 4,
         }
     }
 }
@@ -224,6 +230,20 @@ impl CloudConfig {
                     config.relay_advertise_url = Some(value.to_string());
                 }
                 "FIGCRAFT_TRUSTED_PROXY_CIDRS" => config.trusted_proxies = crate::api::client_ip::parse_cidrs(value)?,
+                "FIGCRAFT_PASSWORD_MEMORY_KIB" => {
+                    config.password_params.memory_kib =
+                        bounded(value, 8192, 1_048_576, "FIGCRAFT_PASSWORD_MEMORY_KIB must be a whole number of KiB from 8192 to 1048576")? as u32;
+                }
+                "FIGCRAFT_PASSWORD_PASSES" => {
+                    config.password_params.passes = bounded(value, 1, 10, "FIGCRAFT_PASSWORD_PASSES must be a whole number from 1 to 10")? as u32;
+                }
+                "FIGCRAFT_PASSWORD_LANES" => {
+                    config.password_params.lanes = bounded(value, 1, 8, "FIGCRAFT_PASSWORD_LANES must be a whole number from 1 to 8")? as u32;
+                }
+                "FIGCRAFT_PASSWORD_CONCURRENCY" => {
+                    config.password_concurrency =
+                        bounded(value, 1, 64, "FIGCRAFT_PASSWORD_CONCURRENCY must be a whole number from 1 to 64")? as usize;
+                }
                 "OIDC_ISSUER" => config.oidc_issuer = Some(value.to_string()),
                 "OIDC_CLIENT_ID" => config.oidc_client_id = Some(value.to_string()),
                 "OIDC_REDIRECT_URL" => config.oidc_redirect_url = Some(value.to_string()),
@@ -291,6 +311,16 @@ impl CloudConfig {
     /// `FIGCRAFT_RELAY_ADVERTISE_URL`, when configured: it turns on room leases for this relay.
     pub(super) fn relay_advertise_url(&self) -> Option<&str> {
         self.relay_advertise_url.as_deref()
+    }
+
+    /// The Argon2id cost for new password hashes.
+    pub(super) const fn password_params(&self) -> figcraft_cloud_auth::password::HashParams {
+        self.password_params
+    }
+
+    /// How many password hashes may be computed at once.
+    pub(super) const fn password_concurrency(&self) -> usize {
+        self.password_concurrency
     }
 
     /// `FIGCRAFT_SINGLE_TENANT_ID`, when configured.
@@ -469,6 +499,10 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_SNAPSHOT_AFTER_EVENTS",
         "FIGCRAFT_SINGLE_TENANT_ID",
         "FIGCRAFT_TRUSTED_PROXY_CIDRS",
+        "FIGCRAFT_PASSWORD_MEMORY_KIB",
+        "FIGCRAFT_PASSWORD_PASSES",
+        "FIGCRAFT_PASSWORD_LANES",
+        "FIGCRAFT_PASSWORD_CONCURRENCY",
         "DATABASE_URL",
         "DATABASE_URL_FILE",
         "REDIS_URL",
@@ -587,6 +621,33 @@ mod tests {
         assert_eq!(period("120"), Ok(Duration::from_secs(120)));
         for bad in ["121", "-1", "5s", "1.5", "many"] {
             assert!(period(bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn password_settings_are_bounded() {
+        use figcraft_cloud_auth::password::HashParams;
+        assert_eq!(CloudConfig::default().password_params(), HashParams::default());
+        let config = CloudConfig::parse([
+            ("FIGCRAFT_PASSWORD_MEMORY_KIB", "65536"),
+            ("FIGCRAFT_PASSWORD_PASSES", "3"),
+            ("FIGCRAFT_PASSWORD_LANES", "2"),
+            ("FIGCRAFT_PASSWORD_CONCURRENCY", "8"),
+        ])
+        .unwrap();
+        assert_eq!(config.password_params(), HashParams { memory_kib: 65536, passes: 3, lanes: 2 });
+        assert_eq!(config.password_concurrency(), 8);
+        for (key, bad) in [
+            ("FIGCRAFT_PASSWORD_MEMORY_KIB", "1024"),
+            ("FIGCRAFT_PASSWORD_MEMORY_KIB", "2097152"),
+            ("FIGCRAFT_PASSWORD_PASSES", "0"),
+            ("FIGCRAFT_PASSWORD_PASSES", "11"),
+            ("FIGCRAFT_PASSWORD_LANES", "9"),
+            ("FIGCRAFT_PASSWORD_CONCURRENCY", "0"),
+            ("FIGCRAFT_PASSWORD_CONCURRENCY", "65"),
+            ("FIGCRAFT_PASSWORD_PASSES", "two"),
+        ] {
+            assert!(CloudConfig::parse([(key, bad)]).is_err(), "{key}={bad}");
         }
     }
 

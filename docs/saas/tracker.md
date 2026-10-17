@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (12/57) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (13/57) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 12 / 57 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 13 / 57 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2540,9 +2540,10 @@ already allow "local accounts or OIDC" (`product-requirements.md`, "Libraries, r
   threshold/escalation/cap/no extension/reset, 8 concurrent failures counted exactly to the lock,
   password change clears the lock, rehash only against the verified hash, audit rows, no login or hash in
   audit metadata) plus 5 unit tests. Not done: nothing signs in with it yet (S6-033 onward).
-- [ ] **S6-033** Memory-hard password hashing (Argon2id through a reviewed, permissively licensed
+- [x] **S6-033** Memory-hard password hashing (Argon2id through a reviewed, permissively licensed
   crate recorded in the dependency review), constant-time verification, and an unknown-account path
   that costs the same as a wrong password.
+  Evidence: `crates/cloud-auth/src/password.rs` (Argon2id through `argon2` 0.6 with default features off, own PHC string, parameters bounded on write and on read, 16-byte salt, 32-byte tag, constant-time compare, NFKC, policy 12..128 characters with deny-list and pattern rules, `verify_unknown` for the no-account path, `needs_rehash` when parameters are weaker), `apps/figcraft-cloud/src/api/passwords.rs` (blocking-thread service with a bounded semaphore and 5 s queue wait) and settings `FIGCRAFT_PASSWORD_MEMORY_KIB/PASSES/LANES/CONCURRENCY` (bounded, tested in `config.rs`). Decision and dependency record: `docs/saas/password-hashing-decision.md`; ledger FP-012. Tests: 10 unit tests in password.rs (round trip and embedded params, weaker hash asks for rehash and stronger never does, malformed or oversized stored hashes are Invalid, unknown-login cost within 2.5x of a wrong password, parameter bounds, Unicode forms verify, default parameters cost real time, policy accepts and refuses) and 4 in the app (service round trip, policy surfaced, bounded concurrency, config bounds). Not done: no route uses it yet (S6-034 onward); passwords live in ordinary Strings while hashed (no zeroisation crate added).
 - [ ] **S6-034** Invitation-based sign-up: accepting an invitation creates the account (name and
   password) and the membership it grants; open registration exists only as an explicit, off-by-default
   tenant setting.
@@ -2906,3 +2907,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6 scope: the platform layer (operator realm, platform API, workspace lifecycle, plans, provisioning, self-hosted bootstrap) and the organisation hierarchy rules (project level, authorization matrix, delegation, policies, SSO sync) added as S6-044 to S6-057 (S6 is now 57 tasks; the terminology note in that section maps the product's workspace to the tenants table). |
 | 2026-10-18 | S6-021 and part of S6-020: the browser workspace. Typed API client and session states, stable routes with deep links through sign-in, first-run (setup token) and sign-in problem screens, workspace home with files, people, invitations and a share dialog; additive `can` summaries on workspace, project and document reads. First TypeScript tests with jsdom and Testing Library (96). S6-020 stays open (libraries, search, notifications, settings). |
 | 2026-10-18 | S6-032: local credentials table (tenant-scoped, forced RLS, unique login per tenant, PHC hash with parameters, lockout counters) and its repository (schema 20261018000014). S6 reaches 12/57. |
+| 2026-10-18 | S6-033: Argon2id password hashing module, policy and bounded hashing service (decision record password-hashing-decision.md). S6 reaches 13/57. |

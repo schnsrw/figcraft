@@ -26,6 +26,13 @@ sha2 = { workspace = true }
 # Already built for openidconnect: the ID-token verifier's clock is a chrono time.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 
+# S6-033: Argon2id password hashing (RustCrypto, MIT OR Apache-2.0), used through raw
+# `hash_password_into` with our own PHC string; no password-hash or RNG crate. See
+# docs/saas/password-hashing-decision.md.
+argon2 = { version = "0.6", default-features = false, features = ["alloc"] }
+# S6-033: NFKC-normalised passwords (already resolved in the workspace).
+unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
+
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form"] }

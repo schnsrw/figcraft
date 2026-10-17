@@ -94,6 +94,14 @@ FIGCRAFT_RELAY_MESSAGES_PER_SECOND=100     # per connection, burst 4x; past it t
 FIGCRAFT_RELAY_MAX_MESSAGE_BYTES=67108864  # largest message a client may send (1024 to 67108864)
 FIGCRAFT_RELAY_MAX_QUEUED_BYTES=167772160  # outbound bytes queued per connection; a reader this far behind is dropped
 
+# Built-in accounts (S6-033): Argon2id cost for new password hashes (stored inside every hash, so
+# raising them upgrades old hashes at the next sign-in) and how many hashes run at once. Memory in use
+# is at most CONCURRENCY x MEMORY_KIB. Defaults are shown; see password-hashing-decision.md.
+FIGCRAFT_PASSWORD_MEMORY_KIB=47104         # 8192 to 1048576
+FIGCRAFT_PASSWORD_PASSES=2                 # 1 to 10
+FIGCRAFT_PASSWORD_LANES=1                  # 1 to 8
+FIGCRAFT_PASSWORD_CONCURRENCY=4            # 1 to 64
+
 DATABASE_URL_FILE=/run/secrets/database_url
 REDIS_URL_FILE=/run/secrets/redis_url
 S3_ENDPOINT=http://seaweedfs:8333

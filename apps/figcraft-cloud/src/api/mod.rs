@@ -30,6 +30,7 @@ pub(crate) mod documents_api;
 pub(crate) mod error;
 pub(crate) mod host_api;
 pub(crate) mod host_events;
+pub(crate) mod passwords;
 pub(crate) mod rate_limit;
 pub(crate) mod realtime;
 pub(crate) mod teams_api;
@@ -97,6 +98,8 @@ pub(crate) struct AppState {
     /// The realtime-ticket key (derived from `SESSION_SIGNING_KEY`); `None` leaves
     /// `POST /documents/{id}/realtime-ticket` answering `503` and collab links on share links.
     realtime: Option<Arc<figcraft_cloud_storage::realtime_tickets::TicketKey>>,
+    /// Password hashing for built-in accounts (S6-033); `None` leaves password routes answering `503`.
+    passwords: Option<passwords::PasswordService>,
 }
 
 impl AppState {
@@ -114,6 +117,7 @@ impl AppState {
             identity: None,
             oidc: None,
             realtime: None,
+            passwords: None,
         }
     }
 
@@ -135,6 +139,16 @@ impl AppState {
     pub(crate) fn with_realtime_tickets(mut self, key: Arc<figcraft_cloud_storage::realtime_tickets::TicketKey>) -> Self {
         self.realtime = Some(key);
         self
+    }
+
+    /// Enable built-in password accounts.
+    pub(crate) fn with_passwords(mut self, service: passwords::PasswordService) -> Self {
+        self.passwords = Some(service);
+        self
+    }
+
+    pub(crate) fn passwords(&self) -> Option<&passwords::PasswordService> {
+        self.passwords.as_ref()
     }
 
     pub(crate) fn realtime_key(&self) -> Option<&figcraft_cloud_storage::realtime_tickets::TicketKey> {
