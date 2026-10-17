@@ -225,6 +225,29 @@ pub async fn unmap_external_resource(
     Ok(result.rows_affected() == 1)
 }
 
+/// The boundary check an embed exchange makes (S6-004): `document_id` is an active document of
+/// `workspace_id` in this tenant, and `principal_id` is an active member of the tenant.
+pub async fn embed_boundary_holds(
+    transaction: &mut TenantTransaction<'_>,
+    workspace_id: Uuid,
+    document_id: Uuid,
+    principal_id: Uuid,
+) -> Result<bool, HostMappingError> {
+    let found: Option<(i32,)> = sqlx::query_as(
+        "SELECT 1 FROM documents d \
+         WHERE d.tenant_id = $1::uuid AND d.id = $2::uuid AND d.workspace_id = $3::uuid AND d.state = 'active' \
+         AND EXISTS (SELECT 1 FROM tenant_members m WHERE m.tenant_id = d.tenant_id AND m.principal_id = $4::uuid AND m.state = 'active')",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(document_id.to_string())
+    .bind(workspace_id.to_string())
+    .bind(principal_id.to_string())
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    Ok(found.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{MAX_EXTERNAL_ID_BYTES, valid_external_id};

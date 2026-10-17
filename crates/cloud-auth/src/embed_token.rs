@@ -16,9 +16,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use figcraft_cloud_domain::TenantId;
+use figcraft_cloud_domain::{TenantId, Uuid};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::embed_tokens::{EmbedTokenStoreError, consume_embed_jti, valid_jti};
+use figcraft_cloud_storage::host_mappings::{HostMappingError, MappingKind, embed_boundary_holds, resolve_external_resource};
 use figcraft_cloud_storage::host_systems::{HostKey, HostRole, HostSystem, KeyAlgorithm, find_host_by_issuer, get_host_system, list_host_keys};
 use ring::signature;
 use serde_json::Value;
@@ -214,6 +215,10 @@ pub fn verify_embed_token(token: &str, host: &HostSystem, keys: &[HostKey], now:
         return refused(Refusal::Claims);
     }
     let role = HostRole::parse(&text_claim(&claims, "role")?).ok_or(EmbedError::Refused(Refusal::Claims))?;
+    // S6-004: a token can never grant more than the host's registered maximum, whatever it claims.
+    if role > host.max_role {
+        return refused(Refusal::Role);
+    }
     Ok(EmbedClaims {
         issuer,
         audiences,
@@ -234,7 +239,41 @@ pub fn verify_embed_token(token: &str, host: &HostSystem, keys: &[HostKey], now:
 pub struct VerifiedEmbed {
     pub tenant_id: TenantId,
     pub system_id: String,
+    /// The FigCraft resources the host's external ids map to, all inside `tenant_id`.
+    pub workspace_id: Uuid,
+    pub document_id: Uuid,
+    pub principal_id: Uuid,
+    /// The granted role: the token's role, never above the host's registered maximum.
+    pub role: HostRole,
     pub claims: EmbedClaims,
+}
+
+/// S6-004: resolve the token's external tenant, workspace, document and subject through this
+/// host's registered mappings and require them to lie inside the host's tenant. Any unmapped or
+/// out-of-boundary resource is the same refusal.
+async fn resolve_boundary(
+    transaction: &mut figcraft_cloud_storage::TenantTransaction<'_>,
+    host: &HostSystem,
+    claims: &EmbedClaims,
+) -> Result<(Uuid, Uuid, Uuid), EmbedError> {
+    let lookup = |result: Result<Option<Uuid>, HostMappingError>| match result {
+        Ok(Some(id)) => Ok(id),
+        Ok(None) => refused(Refusal::Boundary),
+        Err(_) => Err(EmbedError::Unavailable),
+    };
+    let system = host.system_id.as_str();
+    let tenant = lookup(resolve_external_resource(transaction, system, MappingKind::Tenant, &claims.external_tenant).await)?;
+    if tenant != host.tenant_id.as_uuid() {
+        return refused(Refusal::Boundary);
+    }
+    let workspace = lookup(resolve_external_resource(transaction, system, MappingKind::Workspace, &claims.external_workspace).await)?;
+    let document = lookup(resolve_external_resource(transaction, system, MappingKind::Document, &claims.external_document).await)?;
+    let principal = lookup(resolve_external_resource(transaction, system, MappingKind::Principal, &claims.subject).await)?;
+    match embed_boundary_holds(transaction, workspace, document, principal).await {
+        Ok(true) => Ok((workspace, document, principal)),
+        Ok(false) => refused(Refusal::Boundary),
+        Err(_) => Err(EmbedError::Unavailable),
+    }
 }
 
 /// Validate `token` and consume its `jti`, in one tenant transaction (S6-003). The host is found
@@ -252,6 +291,7 @@ pub async fn exchange_embed_token(pool: &PgPool, token: &str, now: i64) -> Resul
         .ok_or(EmbedError::Refused(Refusal::UnknownIssuer))?;
     let keys = list_host_keys(&mut transaction, &located.system_id).await.map_err(|_| EmbedError::Unavailable)?;
     let claims = verify_embed_token(token, &host, &keys, now)?;
+    let (workspace_id, document_id, principal_id) = resolve_boundary(&mut transaction, &host, &claims).await?;
     // The row outlives the token's last possible validity (expiry plus skew).
     let keep_until = claims.expires_at.saturating_add(CLOCK_SKEW_SECS);
     match consume_embed_jti(&mut transaction, &located.system_id, &claims.jti, keep_until).await {
@@ -261,7 +301,15 @@ pub async fn exchange_embed_token(pool: &PgPool, token: &str, now: i64) -> Resul
         Err(_) => return Err(EmbedError::Unavailable),
     }
     transaction.commit().await.map_err(|_| EmbedError::Unavailable)?;
-    Ok(VerifiedEmbed { tenant_id: located.tenant_id, system_id: located.system_id, claims })
+    Ok(VerifiedEmbed {
+        tenant_id: located.tenant_id,
+        system_id: located.system_id,
+        workspace_id,
+        document_id,
+        principal_id,
+        role: claims.role,
+        claims,
+    })
 }
 
 #[cfg(test)]
@@ -472,6 +520,23 @@ mod tests {
             reason(verify_embed_token(&sign_ed(&signer, &json!({"alg": "EdDSA", "kid": "ed", "typ": "evil"}), &claims()), &host, &keys, NOW)),
             Refusal::Malformed
         );
+    }
+
+    #[test]
+    fn role_never_exceeds_the_hosts_maximum() {
+        let signer = signer();
+        let (mut host, keys) = registered(&signer);
+        let token_for = |role: &str| {
+            let mut c = claims();
+            c["role"] = json!(role);
+            sign_ed(&signer, &ed_header(), &c)
+        };
+        host.max_role = HostRole::Commenter;
+        assert_eq!(reason(verify_embed_token(&token_for("editor"), &host, &keys, NOW)), Refusal::Role);
+        assert_eq!(verify_embed_token(&token_for("commenter"), &host, &keys, NOW).map(|c| c.role), Ok(HostRole::Commenter));
+        assert_eq!(verify_embed_token(&token_for("viewer"), &host, &keys, NOW).map(|c| c.role), Ok(HostRole::Viewer));
+        host.max_role = HostRole::Viewer;
+        assert_eq!(reason(verify_embed_token(&token_for("commenter"), &host, &keys, NOW)), Refusal::Role);
     }
 
     #[test]
