@@ -1,5 +1,23 @@
 :8080 {
-	root * /srv
-	try_files {path} /index.html
-	file_server
+	encode zstd gzip
+
+	# The FigCraft editor (wasm32). `/edit/#join=<invite link>` joins a cloud document; the
+	# fragment never reaches the server. No SPA fallback here: a missing asset is a 404, never
+	# index.html served as `.wasm`.
+	redir /edit /edit/ 308
+	handle /edit/* {
+		root * /srv
+		@shell path /edit/ /edit/index.html
+		header @shell Cache-Control "no-cache"
+		@hashed path_regexp \.(wasm|js)$
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+		header X-Content-Type-Options nosniff
+		file_server
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
 }

@@ -8,3 +8,7 @@ filehash = true
 [serve]
 addresses = ["127.0.0.1"]
 port = 8767
+
+# Pinned tool release trunk downloads (the wasm-bindgen CLI follows Cargo.lock by itself).
+[tools]
+wasm_opt = "version_123"

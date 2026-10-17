@@ -1891,6 +1891,7 @@ dependencies = [
  "figcraft-ui-egui",
  "js-sys",
  "log",
+ "serde_json",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
