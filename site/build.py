@@ -228,6 +228,7 @@ def render_progress(rows, roadmap, current_tasks, current_id, updated) -> str:
         f'<a href="{REPO_BLOB}docs/saas/tracker.md">docs/saas/tracker.md</a>, '
         f'updated <time datetime="{esc(updated)}">{esc(updated)}</time>.</p>'
     )
+    out.append(CAVEAT)
     out.append("</div>")
     out.append('<ol class="milestones">')
     for i, r in enumerate(rows):
@@ -282,6 +283,13 @@ def render_progress(rows, roadmap, current_tasks, current_id, updated) -> str:
     return "\n".join(out)
 
 
+CAVEAT = (
+    '<p class="caveat">Tasks done is not production readiness. The open work (multi-replica relay, '
+    "failover and recovery, quotas, observability, security review and restore drills) carries "
+    "most of the risk, so FigCraft Cloud stays an early alpha until those gates pass.</p>"
+)
+
+
 def render_strip(rows, updated) -> str:
     done = sum(r["done"] for r in rows)
     total = sum(r["total"] for r in rows)
@@ -304,7 +312,9 @@ def render_strip(rows, updated) -> str:
             f'<span class="visually-hidden">{esc(r["title"])}: {r["done"]} of {r["total"]} tasks, {esc(r["status"])}</span>'
             "</li>"
         )
-    out.append("</ol></div>")
+    out.append("</ol>")
+    out.append(CAVEAT)
+    out.append("</div>")
     return "\n".join(out)
 
 
@@ -434,6 +444,8 @@ def write_discovery_files(out_dir: Path, metas: dict[str, tuple[str, str]], upda
         f"Progress as of {updated} (generated from the project tracker):\n\n{progress}\n\n"
         f"## Site\n\n{pages}\n\n"
         f"## Documentation\n\n{docs}\n- [Progress tracker]({REPO_BLOB}docs/saas/tracker.md)\n\n"
+        f"## Try it\n\n- [Browser editor]({BASE_URL}edit/): the FigCraft editor in WebAssembly, "
+        "single-player, no sign-up\n\n"
         f"## Source\n\n- [Repository](https://github.com/schnsrw/figcraft)\n"
         f"- [Upstream FigCraft](https://github.com/storytold/figcraft)\n\n"
         "## Optional\n\n"
@@ -515,6 +527,7 @@ def build(out_dir: Path) -> None:
 
     images: set[str] = {SOCIAL_IMAGE, "figcraft-256.png", "figcraft-512.png", "figcraft-64.png"}
     metas: dict[str, tuple[str, str]] = {}
+    pages_html: list[str] = []
     for page in PAGES:
         text = read_text(SITE / page)
         title, desc = page_meta(page, text)
@@ -543,9 +556,18 @@ def build(out_dir: Path) -> None:
         check_repo_links(page, text)
         images.update(re.findall(r'(?:src|href)="img/([^"]+)"', text))
         (out_dir / page).write_text(text, encoding="utf-8")
+        pages_html.append(text)
 
     shutil.copyfile(SITE / "style.css", out_dir / "style.css")
     write_discovery_files(out_dir, metas, updated, rows)
+    # Example documents the pages link to (examples/*.figcraft, the project's own synthetic files).
+    examples = sorted(set(re.findall(r'href="examples/([A-Za-z0-9._-]+\.figcraft)"', "".join(pages_html))))
+    for name in examples:
+        src = ROOT / "examples" / name
+        if not src.is_file():
+            raise BuildError(f"link to missing example examples/{name}")
+        (out_dir / "examples").mkdir(exist_ok=True)
+        shutil.copyfile(src, out_dir / "examples" / name)
     (out_dir / "404.html").write_text(not_found_page(mark_active(header, ""), footer), encoding="utf-8")
     for name in sorted(images):
         shutil.copyfile(find_image(name), out_dir / "img" / name)

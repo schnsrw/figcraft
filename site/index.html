@@ -21,11 +21,14 @@
       <h1>The design cloud you <span class="grad">actually own</span>.</h1>
       <p class="lede">Real-time collaborative interface design in the browser, running on your servers, with every confirmed edit stored in your own database.</p>
       <div class="actions">
-        <a class="btn btn-primary" href="#self-host">Self-host in minutes
+        <a class="btn btn-primary" href="edit/">Try the editor
+          <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M5 3.5v9l7.5-4.5z" fill="currentColor"/></svg></span></a>
+        <a class="btn btn-ghost" href="#self-host">Self-host in minutes
           <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
         <a class="btn btn-ghost" href="https://github.com/schnsrw/figcraft">Star on GitHub
           <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.8 9.8 5.5l4 .6-2.9 2.8.7 4L8 11l-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span></a>
       </div>
+      <p class="hero-note">The editor runs right here in your browser, no sign-up. Live co-editing needs a self-hosted stack.</p>
     </div>
 
     <div class="wrap stage">
@@ -78,6 +81,80 @@
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 6v12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6M5 12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>PostgreSQL + S3</li>
         <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.5" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12.5 12h8M17.5 12v3M20.5 12v2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>OIDC + SAML sign-in</li>
       </ul>
+    </div>
+  </section>
+
+  <!-- Everyday design workflow: CSS-only stepper (radio inputs; works with keyboard arrows) -->
+  <section class="section" id="workflow" aria-labelledby="flow-h">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 id="flow-h">From first frame to hand-off.</h2>
+        <p>The workflow designers already know, in a tool your team runs itself. Pick a step.</p>
+      </div>
+      <div class="flow reveal">
+        <input class="flow-radio" type="radio" name="flow" id="flow-1" checked>
+        <input class="flow-radio" type="radio" name="flow" id="flow-2">
+        <input class="flow-radio" type="radio" name="flow" id="flow-3">
+        <input class="flow-radio" type="radio" name="flow" id="flow-4">
+        <input class="flow-radio" type="radio" name="flow" id="flow-5">
+        <div class="flow-tabs" role="group" aria-label="Workflow steps">
+          <label for="flow-1" class="flow-tab"><span class="flow-num">1</span>Lay out</label>
+          <label for="flow-2" class="flow-tab"><span class="flow-num">2</span>Componentise</label>
+          <label for="flow-3" class="flow-tab"><span class="flow-num">3</span>Prototype</label>
+          <label for="flow-4" class="flow-tab"><span class="flow-num">4</span>Review</label>
+          <label for="flow-5" class="flow-tab"><span class="flow-num">5</span>Hand off</label>
+        </div>
+        <div class="flow-panels">
+          <article class="flow-panel" id="flow-panel-1">
+            <div class="flow-copy">
+              <p class="flow-step">Step 1 of 5</p>
+              <h3>Lay out screens</h3>
+              <p>Draw frames for each screen, then let auto layout do the spacing. Cards hug their content, lists fill their parent, and colours come from variables so light and dark modes stay in sync.</p>
+              <ul class="ticks"><li>Frames, auto layout, constraints and grids</li><li>Colour, number and text variables with modes</li><li>Text, images, effects and background blur</li></ul>
+            </div>
+            <div class="bezel"><div class="bezel-core"><img src="img/shot-1-hero.png" width="1440" height="900" loading="lazy" alt="The FigCraft editor with three phone frames for a hiking app, a featured trail card selected and the right panel showing auto layout, dimensions, corner radius and a surface fill variable."></div></div>
+          </article>
+          <article class="flow-panel" id="flow-panel-2">
+            <div class="flow-copy">
+              <p class="flow-step">Step 2 of 5</p>
+              <h3>Build the design system</h3>
+              <p>Turn repeated pieces into components, combine them into variant sets, and share them from the Assets panel. Change the main component and every instance follows.</p>
+              <ul class="ticks"><li>Components, instances and overrides</li><li>Variants with properties such as Style and State</li><li>Libraries shared across documents</li></ul>
+            </div>
+            <div class="bezel"><div class="bezel-core"><img src="img/shot-2-components.png" width="1440" height="900" loading="lazy" alt="The Ridgeline UI design system open with the Assets panel showing Button, Difficulty, Search field, Toggle and icon components, and a Button component set of nine variants selected with its Style and State variant properties."></div></div>
+          </article>
+          <article class="flow-panel" id="flow-panel-3">
+            <div class="flow-copy">
+              <p class="flow-step">Step 3 of 5</p>
+              <h3>Make it clickable</h3>
+              <p>Connect screens with interactions, pick the transition, and present the flow to check it feels right before anyone writes code.</p>
+              <ul class="ticks"><li>On click, hover and drag interactions</li><li>Navigate, overlay and scroll-to actions</li><li>Present mode for walkthroughs</li></ul>
+            </div>
+            <div class="bezel"><div class="bezel-core"><img src="img/shot-3-prototype.png" width="1440" height="900" loading="lazy" alt="A four-screen onboarding prototype (Welcome, Interests, Location, All set) connected by blue interaction arrows, with an On click, Navigate to Interests interaction in the Prototype panel."></div></div>
+          </article>
+          <article class="flow-panel" id="flow-panel-4">
+            <div class="flow-copy">
+              <p class="flow-step">Step 4 of 5</p>
+              <h3>Review together</h3>
+              <p>Share a link. Everyone sees each other's named cursors and edits live, can follow a presenter, and leaves comments right on the canvas.</p>
+              <ul class="ticks"><li>Live cursors, selections and edits</li><li>Spotlight and follow a presenter</li><li>Comments pinned to the design</li></ul>
+            </div>
+            <div class="bezel"><div class="bezel-core"><img src="img/shot-7-collab.png" width="1440" height="900" loading="lazy" alt="A live session on the Ridgeline app: three collaborators' avatars, a spotlighting banner with a Follow button, a named cursor on a trail card and a comment asking whether the Start hike button should stay pinned."></div></div>
+          </article>
+          <article class="flow-panel" id="flow-panel-5">
+            <div class="flow-copy">
+              <p class="flow-step">Step 5 of 5</p>
+              <h3>Hand off to developers</h3>
+              <p>Dev Mode shows measurements, annotations and generated code, with component properties turned into props, and exports assets in the formats developers need.</p>
+              <ul class="ticks"><li>Inspect spacing, sizes and styles</li><li>Generated React and CSS for components</li><li>Export PNG, SVG and PDF</li></ul>
+            </div>
+            <div class="bezel"><div class="bezel-core"><img src="img/shot-4-devmode.png" width="1440" height="900" loading="lazy" alt="Dev Mode on a trail list row: a development annotation on the canvas and generated React and CSS code for a TrailRow component in the right panel."></div></div>
+          </article>
+        </div>
+      </div>
+      <p class="flow-cta reveal"><a class="btn btn-primary" href="edit/">Open the editor in your browser
+          <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M5 3.5v9l7.5-4.5z" fill="currentColor"/></svg></span></a>
+        <span class="muted">Single-player and stored in your browser. Download an example to open: <a href="examples/ridgeline-app.figcraft" download>Ridgeline app</a>, <a href="examples/ridgeline-design-system.figcraft" download>design system</a>, <a href="examples/ridgeline-onboarding.figcraft" download>onboarding prototype</a>.</span></p>
     </div>
   </section>
 
@@ -304,8 +381,10 @@
         </article>
         <article class="cell b-tall cell-ink reveal">
           <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="8.5" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12.5 12h8M17.5 12v3M20.5 12v2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div>
-          <h3>Enterprise-ready identity</h3>
+          <p class="maturity m-tested">Implemented and tested</p>
+          <h3>Identity built for organisations</h3>
           <p>OIDC login with PKCE and back-channel logout, SAML through a broker such as Keycloak, service accounts with scoped credentials, and revocation that ends live sessions.</p>
+          <p class="cell-note">Passes its integration and permission suites. Not yet security-reviewed or proven in production.</p>
           <svg class="ill ident" viewBox="0 0 360 250" role="img" aria-labelledby="ident-t">
             <title id="ident-t">Sign-in flows from your identity provider through OIDC to a FigCraft session, which resolves to a role</title>
             <path d="M40 60 H320" stroke="rgba(255,255,255,.18)" stroke-width="1.6"/>
@@ -348,6 +427,30 @@
           <h3>Works with what's already there</h3>
           <p>The desktop app, the CLI and upstream's self-hosted <code>figcraft-server</code> still work. The cloud relay speaks the same protocol.</p>
         </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Maturity: what is tested vs production-hardened -->
+  <section class="section" id="maturity" aria-labelledby="mat-h">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 id="mat-h">What works today, and how far it's been pushed.</h2>
+        <p>Working and tested is not the same as production-hardened. Here is where each part stands.</p>
+      </div>
+      <div class="maturity-table reveal" role="region" aria-label="Feature maturity" tabindex="0">
+        <table>
+          <thead><tr><th scope="col">Area</th><th scope="col">Status</th><th scope="col">What that means</th></tr></thead>
+          <tbody>
+            <tr><th scope="row">The design editor</th><td><span class="maturity m-tested">Alpha, core workflows work</span></td><td>Upstream FigCraft's editor: screens, design systems, prototypes and hand-off work end to end on its own files. <a href="https://github.com/schnsrw/figcraft/blob/main/ROADMAP.md">Upstream's own grading.</a></td></tr>
+            <tr><th scope="row">Browser co-editing on one relay</th><td><span class="maturity m-tested">Works, tested</span></td><td>Two browsers co-edit a cloud document end to end; each batch is committed before it is broadcast.</td></tr>
+            <tr><th scope="row">Durable events, snapshots and restore</th><td><span class="maturity m-tested">Works, tested</span></td><td>PostgreSQL and S3 integration suites and failure-injection tests pass. No production restore drills yet.</td></tr>
+            <tr><th scope="row">Sign-in, tenancy and permissions</th><td><span class="maturity m-tested">Works, tested</span></td><td>OIDC, SAML via a broker, sessions, service accounts and row-level security pass their gate. No external security review yet.</td></tr>
+            <tr><th scope="row">Several relay replicas, failover, drain</th><td><span class="maturity m-wip">In progress</span></td><td>Room leases, owner routing and crash tests are being built now (S5).</td></tr>
+            <tr><th scope="row">Desktop and embedded cloud clients, AI</th><td><span class="maturity m-todo">Not started</span></td><td>Planned in S6 and S7.</td></tr>
+            <tr><th scope="row">Quotas, billing, observability, security review</th><td><span class="maturity m-todo">Not started</span></td><td>Planned in S8; required before anyone should rely on it.</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </section>
@@ -530,6 +633,7 @@
           <div class="answer">
             <p>Not yet. FigCraft Cloud is an early alpha. Browser co-editing on the cloud stack works end to end, and identity, tenancy and authorization are complete with their test gates passing.</p>
             <p>Running several relay replicas, embedding in other products, AI features and production operations (quotas, billing, observability, restore drills) are on the roadmap and not finished. Try it, but don't put irreplaceable work in it yet.</p>
+            <p>The roadmap percentage counts tasks, not readiness. The remaining relay, recovery and operations work is the hardest and riskiest part, so read it as "how much is built", not "how close to production". The <a href="#maturity">maturity table</a> shows where each area stands.</p>
           </div>
         </details>
         <details>
@@ -573,7 +677,9 @@
         <h2 id="close-h">Run your own design cloud.</h2>
         <p>Clone it, start it, and open the same document in two tabs. Then tell us what broke: issues and pull requests are welcome.</p>
         <div class="actions">
-          <a class="btn btn-primary" href="#self-host">Self-host in minutes
+          <a class="btn btn-primary" href="edit/">Try the editor
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M5 3.5v9l7.5-4.5z" fill="currentColor"/></svg></span></a>
+          <a class="btn btn-ghost" href="#self-host">Self-host in minutes
             <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
           <a class="btn btn-ghost" href="https://github.com/schnsrw/figcraft">Star on GitHub
             <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.8 9.8 5.5l4 .6-2.9 2.8.7 4L8 11l-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span></a>

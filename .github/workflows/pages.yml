@@ -1,6 +1,8 @@
 # Fork addition: the FigCraft Cloud project site on GitHub Pages. site/build.py assembles the static
 # HTML and CSS in site/, renders live progress from docs/saas/tracker.md (and milestone outcomes from
 # docs/saas/roadmap.md), and copies the project's own app icon and screenshots in at build time.
+# The browser editor (apps/figcraft-web, Rust compiled to wasm32 with trunk) is served at /edit/ so
+# visitors can try it without installing anything; it runs single-player, with no cloud backend.
 name: Pages
 
 on:
@@ -14,6 +16,11 @@ on:
       - "assets/app-icon/**"
       - "docs/images/**"
       - ".github/workflows/pages.yml"
+      - "apps/figcraft-web/**"
+      - "examples/**"
+  # Weekly, so the hosted editor picks up editor changes merged from upstream.
+  schedule:
+    - cron: "17 4 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -28,6 +35,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -35,6 +43,25 @@ jobs:
           python-version: "3.12"
       - name: Assemble the site
         run: python3 site/build.py _site
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: pages-editor
+          cache-on-failure: true
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: trunk@0.21.14
+      - name: Build the browser editor into /edit/
+        working-directory: apps/figcraft-web
+        # No craft-fonts checkout here: the editor falls back to egui's bundled fonts.
+        env:
+          CRAFT_FONTS_DIR: /nonexistent
+        run: |
+          trunk build --release --locked --public-url ./ --dist "$GITHUB_WORKSPACE/_site/edit"
+          test -s "$GITHUB_WORKSPACE/_site/edit/index.html"
+          ls "$GITHUB_WORKSPACE"/_site/edit/*.wasm
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
