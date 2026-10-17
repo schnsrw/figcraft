@@ -292,6 +292,12 @@ impl DurableRoom {
         &self.server
     }
 
+    /// Transfer the recovered server to the live hub without restoring its state again.
+    #[must_use]
+    pub fn into_server(self) -> Server {
+        self.server
+    }
+
     #[must_use]
     pub const fn fencing_token(&self) -> i64 {
         self.fencing_token

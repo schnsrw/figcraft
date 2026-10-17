@@ -2151,9 +2151,9 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   and share-link revocation refuse the next HTTP request, an in-flight mutation either commits
   before the revoke or is refused (guard inside the mutating transaction), live relay connections
   close within one sweep interval, and export jobs are refused at commit (tests/revocation_races*,
-  job_revocation_races, member_revocation, relay_action_matrix). Known limits carried to S5: batch
-  actor attribution in a room is the room opener rather than each sender (S5-014); two holders of
-  one share link share its credential.
+  job_revocation_races, member_revocation, relay_action_matrix). Known limit carried to S5: two
+  holders of one share link share its credential. S5-002 subsequently fixed per-sender batch actor
+  attribution for authenticated clients.
 
 ## S5 — Distributed collaboration relay
 
@@ -2292,6 +2292,10 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   up to about 860 B of WAL), which is 7,172 rows and 1.04 MiB per editor-hour at 2 batches/s;
   outbound traffic is 162 B/s per editor; RSS is about 2.3 MiB per open small document. Both
   multi-replica and production-scale targets are still outstanding.
+  Follow-up (2026-10-17): `CloudBackend::recover` now transfers the already restored server out of
+  `DurableRoom`, eliminating the second serialization and `Server::restore`. The earlier latency
+  measurements remain the baseline; a comparable load run and a declared supported document size
+  are still required before this task can be checked.
 
 ### S5 gate
 
@@ -2592,3 +2596,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S4 round C (rest) and S5 load harness: member-removal revocation hooks, signed cursors on document lists, `--print-bootstrap-token`, realtime tickets with relay admission; full route x caller permission matrix (1,152 cells) and API-level cross-tenant suite (S4-022); relay load and latency harness with measured sizing (S5-024/025 partial). Finding: commits and cold restores run serially on the relay hub thread (a 20k-node restore blocked other rooms for 8 s). S4 at 21/25, S5 at 5/25. |
 | 2026-10-17 | S4 complete (25/25) and its gate passes: team-member search and workspace grant listing with full audit; relay action matrix; resume bound to the issuing credential (a viewer could otherwise take over an editor's client id); every mutating request re-validates access inside its transaction; tenant locks moved to FOR NO KEY UPDATE after a deadlock with audit inserts; OIDC back-channel logout and a recorded groups claim; Keycloak image pinned for validation. |
 | 2026-10-17 | S5-002: bound each accepted relay batch to the principal of its own admitted client, rather than the room opener; a two-editor PostgreSQL/S3 regression verifies per-event actors and commit order. S5 reaches 6/25. |
+| 2026-10-17 | S5-025 follow-up: removed a duplicate server restore from cold room recovery; comparable latency measurement remains open. S5 stays 6/25. |

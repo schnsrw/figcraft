@@ -5,6 +5,11 @@ unrelated load. These are the first measured numbers for the cloud relay and the
 Production sizing still needs a quiet host, multiple replicas and larger runs (see "What is not
 covered yet").
 
+The 2026-10-17 figures below precede the S5-025 recovery change that transfers the already
+restored `Server` from `DurableRoom` into the live hub. The former path serialized that server and
+called `Server::restore` a second time. The change removes one restore pass; its latency effect
+still needs measurement with the same harness before changing the verdicts or sizing figures.
+
 ## Harness
 
 `crates/cloud-relay/examples/relay_load.rs` starts a real `collab_net` hub serving `CloudBackend`
@@ -210,6 +215,8 @@ from the runs above. Assumptions are stated and are deliberately conservative.
 
 ## Revision history
 
+- 2026-10-17: removed the second `Server::restore` during `CloudBackend` recovery. The existing
+  measurements remain the baseline until a comparable run is recorded.
 - 2026-10-17: first harness and measurements (S5-024 and S5-025, partial). Phase selection,
   `--timeout`, relay logs and non-fatal cold-open refusals added after the default 15 s timeout
   refused a 20k-frame cold open.

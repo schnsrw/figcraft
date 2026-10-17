@@ -472,19 +472,10 @@ impl CloudBackend {
             }
         };
         let restored = room.restored_snapshot();
-        let state = room.server().state().map_err(|_| UNAVAILABLE.to_string())?;
-        let mut server = Server::restore(state, "", self.limits).map_err(|_| UNAVAILABLE.to_string())?;
-        server.journaling(true);
-        let _ = server.take_journal();
+        let fencing_token = room.fencing_token();
+        let server = room.into_server();
         let snapshot_seq = restored.and_then(|(_, seq)| u64::try_from(seq).ok());
-        let mut doc = OpenDoc {
-            tenant: admitted.tenant,
-            document,
-            fencing_token: room.fencing_token(),
-            actors: HashMap::new(),
-            pending: Vec::new(),
-            snapshot_seq,
-        };
+        let mut doc = OpenDoc { tenant: admitted.tenant, document, fencing_token, actors: HashMap::new(), pending: Vec::new(), snapshot_seq };
         if snapshot_seq.is_none() && server.seq() == 0 {
             // A new document: its first state becomes durable before anyone edits it.
             self.snapshot(file, &mut doc, &server);
