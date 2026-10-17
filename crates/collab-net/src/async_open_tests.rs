@@ -11,13 +11,13 @@ use figcraft_doc::Document;
 use tungstenite::protocol::WebSocket;
 use tungstenite::{Bytes, Message};
 
-use super::{Admission, Backend, Closing, Hosting, Wake};
+use super::{Admission, Backend, Closing, Hosting, OpenFailure, Wake};
 use crate::net::NetLimits;
 use message::Access;
 
 const SLOW: Duration = Duration::from_millis(1500);
 
-type Done = Arc<Mutex<Vec<(String, Result<Server, String>)>>>;
+type Done = Arc<Mutex<Vec<(String, Result<Server, OpenFailure>)>>>;
 type Log = Arc<Mutex<Vec<String>>>;
 
 /// Files named `slow*` open on a background thread after `SLOW` (`slow-bad` fails); the rest open
@@ -51,7 +51,7 @@ impl Backend for Opens {
         let (done, wake, file) = (self.done.clone(), self.wake.clone(), file.to_string());
         std::thread::spawn(move || {
             std::thread::sleep(SLOW);
-            let result = if file == "slow-bad" { Err("could not restore".to_string()) } else { Ok(session()) };
+            let result = if file == "slow-bad" { Err(OpenFailure::Refused("could not restore".to_string())) } else { Ok(session()) };
             done.lock().unwrap().push((file, result));
             if let Some(w) = wake {
                 w.wake();
@@ -60,7 +60,7 @@ impl Backend for Opens {
         Ok(true)
     }
 
-    fn opened(&mut self) -> Vec<(String, Result<Server, String>)> {
+    fn opened(&mut self) -> Vec<(String, Result<Server, OpenFailure>)> {
         std::mem::take(&mut *self.done.lock().unwrap())
     }
 

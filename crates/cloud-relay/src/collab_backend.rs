@@ -59,12 +59,12 @@ use figcraft_cloud_storage::realtime_tickets::{TicketKey, looks_like_ticket, ver
 use figcraft_cloud_storage::revocation::{
     MAX_CHECKED_MEMBERS, MemberAdmission, RevocationError, admit_member, dead_member_admissions, parse_member_token,
 };
-use figcraft_cloud_storage::room_leases::{AcquireRoom, acquire_room_claim, release_room, renew_room};
+use figcraft_cloud_storage::room_leases::{AcquireRoom, RoomLease, acquire_room_claim, release_room, renew_room};
 use figcraft_cloud_storage::sessions::SessionLimits;
 use figcraft_cloud_storage::share_links::{MAX_CHECKED_LINKS, ShareRole, dead_share_links, resolve_share_link};
 use figcraft_collab::message::{Access, Admin, AdminReply};
 use figcraft_collab::{Accepted, Document, Journal, Limits, Server};
-use figcraft_collab_net::hub::{Admission, Backend, Closing, Handled, OpenFile, Wake};
+use figcraft_collab_net::hub::{Admission, Backend, Closing, Handled, OpenFailure, OpenFile, Wake};
 use figcraft_collab_net::{Endpoint, NetLimits};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -427,7 +427,7 @@ pub struct CloudBackend {
     leases: Arc<Leases>,
 }
 
-type Finished = Arc<Mutex<Vec<(String, Result<(Server, OpenDoc), String>)>>>;
+type Finished = Arc<Mutex<Vec<(String, Result<(Server, OpenDoc), OpenFailure>)>>>;
 
 impl CloudBackend {
     /// Connect to the database (lazily: the first storage call opens connections) and the object
@@ -590,13 +590,25 @@ impl CloudBackend {
     fn recover(&self, file: &str, admitted: Admitted, document: CloudDocumentId) -> Result<(Server, OpenDoc), String> {
         let (pool, store, limits, timeout) = (self.pool.clone(), self.store.clone(), self.limits, self.timeout);
         let lease = self.lease_params();
-        self.runtime.block_on(recover_document(pool, store, limits, timeout, file.to_string(), admitted, document, lease))
+        self.runtime.block_on(recover_document(pool, store, limits, timeout, file.to_string(), admitted, document, lease)).map_err(|failure| {
+            match failure {
+                OpenFailure::Refused(reason) | OpenFailure::Elsewhere { reason, .. } => reason,
+            }
+        })
     }
 }
 
+/// What taking a room's lease came to.
+enum Leased {
+    Claimed(figcraft_cloud_storage::events::SequencerClaim),
+    /// Another owner holds a live lease.
+    Held(RoomLease),
+}
+
 /// Lease `document` for this relay and claim its fence, in one committed transaction. A room owned
-/// by another replica (live lease) is refused as [`OWNED_ELSEWHERE`]; a quarantined, missing or
-/// archived document as [`UNAVAILABLE`] before it is fenced.
+/// by another replica (live lease) comes back as [`OpenFailure::Elsewhere`] with that replica's
+/// endpoint, so the hub can pass the client on; a quarantined, missing or archived document is
+/// [`UNAVAILABLE`] before it is fenced.
 async fn acquire_lease(
     pool: &PgPool,
     timeout: Duration,
@@ -604,7 +616,7 @@ async fn acquire_lease(
     tenant: TenantId,
     document: CloudDocumentId,
     params: &LeaseParams,
-) -> Result<figcraft_cloud_storage::events::SequencerClaim, String> {
+) -> Result<figcraft_cloud_storage::events::SequencerClaim, OpenFailure> {
     let attempt = async {
         let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| "begin")?;
         match quarantine_reason(&mut transaction, document).await {
@@ -617,24 +629,30 @@ async fn acquire_lease(
         match (acquired, claim) {
             (AcquireRoom::Acquired(_), Some(claim)) => {
                 transaction.commit().await.map_err(|_| "commit")?;
-                Ok(Some(claim))
+                Ok(Leased::Claimed(claim))
             }
-            _ => Ok(None),
+            (AcquireRoom::Held(lease), _) | (AcquireRoom::Acquired(lease), None) => Ok(Leased::Held(lease)),
         }
     };
     match tokio::time::timeout(timeout, attempt).await {
-        Ok(Ok(Some(claim))) => Ok(claim),
-        Ok(Ok(None)) => {
-            log::info!("document {file}: its room is owned by another relay replica");
-            Err(OWNED_ELSEWHERE.into())
+        Ok(Ok(Leased::Claimed(claim))) => Ok(claim),
+        // A live lease at this replica's own address belongs to an earlier process of it (this
+        // one holds none for a closed room): passing the client on would loop back here.
+        Ok(Ok(Leased::Held(lease))) if lease.endpoint == params.endpoint => {
+            log::info!("document {file}: its room lease at this relay's own address hasn't expired yet");
+            Err(OpenFailure::Refused(OWNED_ELSEWHERE.into()))
+        }
+        Ok(Ok(Leased::Held(lease))) => {
+            log::info!("document {file}: its room is owned by the relay replica at {}", lease.endpoint);
+            Err(OpenFailure::Elsewhere { endpoint: lease.endpoint, reason: OWNED_ELSEWHERE.into() })
         }
         Ok(Err(stage)) => {
             log::error!("document {file}: its room lease couldn't be taken ({stage})");
-            Err(UNAVAILABLE.into())
+            Err(OpenFailure::Refused(UNAVAILABLE.into()))
         }
         Err(_) => {
             log::error!("document {file}: taking its room lease timed out");
-            Err(UNAVAILABLE.into())
+            Err(OpenFailure::Refused(UNAVAILABLE.into()))
         }
     }
 }
@@ -732,7 +750,7 @@ async fn recover_document(
     admitted: Admitted,
     document: CloudDocumentId,
     lease: Option<LeaseParams>,
-) -> Result<(Server, OpenDoc), String> {
+) -> Result<(Server, OpenDoc), OpenFailure> {
     // With leases the room is leased (and its fence claimed) first, in one transaction: a room
     // another replica owns is never restored here, and the restore runs under that fence.
     let claim = match &lease {
@@ -757,13 +775,13 @@ async fn recover_document(
             if let (Some(params), Some(claim)) = (&lease, claim) {
                 release_lease(&pool, timeout, &file, admitted.tenant, document, params.owner, claim.fencing_token).await;
             }
-            return Err(UNAVAILABLE.into());
+            return Err(UNAVAILABLE.to_string().into());
         }
     };
     let restored = room.restored_snapshot();
     if room.server().document().node_count() > limits.max_nodes {
         log::warn!("document {file}: recovered document exceeds the cloud node limit");
-        return Err(UNAVAILABLE.into());
+        return Err(UNAVAILABLE.to_string().into());
     }
     let fencing_token = room.fencing_token();
     let server = room.into_server();
@@ -930,7 +948,7 @@ impl Backend for CloudBackend {
         Ok(true)
     }
 
-    fn opened(&mut self) -> Vec<(String, Result<Server, String>)> {
+    fn opened(&mut self) -> Vec<(String, Result<Server, OpenFailure>)> {
         let done = self.finished.lock().map(|mut done| std::mem::take(&mut *done)).unwrap_or_default();
         done.into_iter()
             .map(|(file, result)| {

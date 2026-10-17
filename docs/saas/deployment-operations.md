@@ -73,8 +73,8 @@ FIGCRAFT_DEPLOYMENT=single|multi|embedded
 FIGCRAFT_ROLE=all|api|relay|worker
 FIGCRAFT_PUBLIC_URL=https://design.example.com
 FIGCRAFT_SINGLE_TENANT_ID=00000000-0000-0000-0000-000000000001
-# Several relay replicas only: where the gateway and other replicas reach THIS replica (ws:// or
-# wss://, unique per replica). Turns on room leases: one replica serves each room, others refuse it.
+# Several relay replicas only: where the other replicas reach THIS replica (ws:// or wss://, unique
+# per replica). Turns on room leases: one replica serves each room, the others pass clients on to it.
 # Leave unset for a single relay.
 FIGCRAFT_RELAY_ADVERTISE_URL=ws://relay-1.internal:8082/ws/v1/collab
 
@@ -101,10 +101,13 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 
 Room leases (several relay replicas): with `FIGCRAFT_RELAY_ADVERTISE_URL` set, a replica takes a
 PostgreSQL lease on a document's room before restoring it and renews it every 5 s (lifetime 15 s).
-A hello for a room another replica owns is refused with "this document is open on another server:
-try again in a moment" until the gateway routes to the owner (S5-006). A replica that crashes leaves
-its rooms unavailable for at most the lifetime (15 s); its late writes are rejected by the fencing
-token regardless. A room closes and releases its lease when its last client leaves. Without the
+A client that reaches a replica which does not own the room is passed on: that replica connects to
+the owner's advertised address, sends the client's hello there and relays the session both ways, so
+no gateway rule or client change is needed. Every replica must therefore be able to open WebSocket
+connections to every other replica's `FIGCRAFT_RELAY_ADVERTISE_URL` (an internal address is fine;
+`wss://` works). If the owner can't be reached the client is told "this document is open on another
+server: try again in a moment". A replica that crashes leaves its rooms unavailable for at most the
+lifetime (15 s); its late writes are rejected by the fencing token regardless. A room closes and releases its lease when its last client leaves. Without the
 setting a single relay serves rooms without leases.
 
 Single-tenant mode still stores the configured tenant identifier on every row. It may provide an

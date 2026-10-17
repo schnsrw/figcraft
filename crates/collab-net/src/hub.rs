@@ -42,6 +42,7 @@ use tungstenite::protocol::{CloseFrame, Role, WebSocket};
 use tungstenite::{Bytes, Message};
 
 use crate::inbox::Inbox;
+use crate::invite::Endpoint;
 use crate::join::{ENDED, RESTARTING};
 use crate::net::{Bucket, Duplex, Meter, NetLimits, Readers, config, shutdown};
 use crate::throttle::{PRESENCE_INTERVAL, Throttle, earliest};
@@ -136,7 +137,7 @@ pub trait Backend: Send + 'static {
 
     /// The files [`begin_open`](Self::begin_open) finished since the last call, each with its
     /// session or why it couldn't be opened. Called on the hub's thread after a [`Wake`].
-    fn opened(&mut self) -> Vec<(String, Result<Server, String>)> {
+    fn opened(&mut self) -> Vec<(String, Result<Server, OpenFailure>)> {
         Vec::new()
     }
 
@@ -413,6 +414,23 @@ impl InFlight {
 
     fn give(&self, n: usize) {
         self.0.fetch_sub(n, Ordering::Relaxed);
+    }
+}
+
+/// Why a file the backend opened away from the hub's thread couldn't be opened here.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OpenFailure {
+    /// Refused or unavailable, with the reason shown to the people waiting to join.
+    Refused(String),
+    /// Another server owns the file's room: the hub passes the waiting clients on to `endpoint`
+    /// (a `ws://` or `wss://` address of that server), or refuses them with `reason` when it
+    /// can't.
+    Elsewhere { endpoint: String, reason: String },
+}
+
+impl From<String> for OpenFailure {
+    fn from(reason: String) -> Self {
+        Self::Refused(reason)
     }
 }
 
@@ -1108,6 +1126,8 @@ enum Kind {
     Plugins { publisher: bool },
     /// Publishing without the key, or managing the file `owns` with its owner token.
     Hosting { owns: Option<String> },
+    /// Passed on to the server that owns the file's room: what the client sends goes to `to`.
+    Proxied { to: SyncSender<ClientMsg> },
 }
 
 /// A connection whose first message the hub is looking at.
@@ -1207,12 +1227,18 @@ struct Hub<B> {
 struct Parked {
     conn: u64,
     hello: Hello,
+    /// The hello's token, kept to hand the client on to the room's owner (the sessions don't keep
+    /// it).
+    token: String,
     c: Pending,
     admission: Admission,
 }
 
 /// Hellos held while their files open, all files together.
 const MAX_PARKED: usize = 1024;
+
+/// Clients passed on to other servers at once; past it they are refused (and retry).
+const MAX_PROXIED: usize = 512;
 
 impl<B: Backend> Hub<B> {
     fn run(mut self, rx: &Receiver<HubIn>) {
@@ -1375,6 +1401,12 @@ impl<B: Backend> Hub<B> {
                 ClientMsg::Ping => self.answer(conn, &ServerMsg::Pong),
                 _ => self.kick(&[conn], "only plugin directory requests are spoken on this connection"),
             },
+            Some(Kind::Proxied { to }) => {
+                let lost = to.try_send(msg).is_err();
+                if lost {
+                    self.kick(&[conn], "the connection to this document's server was lost: reconnect");
+                }
+            }
             None => {}
         }
     }
@@ -1421,7 +1453,7 @@ impl<B: Backend> Hub<B> {
             return refuse(&c.out, BARRED);
         }
         // The backend checked the secret: the sessions don't keep it.
-        hello.token.clear();
+        let token = std::mem::take(&mut hello.token);
         let file = hello.file.clone();
         if !self.rooms.contains_key(&file) {
             // Someone else's hello already started this file's open: wait with them.
@@ -1435,7 +1467,7 @@ impl<B: Backend> Hub<B> {
                     return refuse(&c.out, "this server is busy opening documents: try again in a moment");
                 }
                 self.parked += 1;
-                self.opening.entry(file).or_default().push(Parked { conn, hello, c, admission });
+                self.opening.entry(file).or_default().push(Parked { conn, hello, token, c, admission });
                 return;
             }
             match self.backend.open(&file) {
@@ -1462,11 +1494,49 @@ impl<B: Backend> Hub<B> {
                     // Nobody got in (all gone or refused): don't keep the room open.
                     self.close_if_empty(&file);
                 }
-                Err(why) => {
+                Err(OpenFailure::Refused(why)) => {
                     for p in waiting {
                         refuse(&p.c.out, &why);
                     }
                 }
+                Err(OpenFailure::Elsewhere { endpoint, reason }) => {
+                    for p in waiting {
+                        self.proxy(p, &endpoint, &reason);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Pass a parked hello on to the server that owns its file's room, or refuse it with `refusal`
+    /// when that can't be done.
+    fn proxy(&mut self, p: Parked, endpoint: &str, refusal: &str) {
+        if self.conns.values().filter(|c| matches!(c.kind, Kind::Proxied { .. })).count() >= MAX_PROXIED {
+            return refuse(&p.c.out, refusal);
+        }
+        let Ok((owner, _)) = Endpoint::parse(endpoint) else {
+            log::warn!("file {}: its owner's address isn't usable ({endpoint}); refusing", p.hello.file);
+            return refuse(&p.c.out, refusal);
+        };
+        let file = p.hello.file.clone();
+        let mut hello = p.hello;
+        hello.token = p.token;
+        let out = p.c.out.clone();
+        let down = move |d: crate::proxy::Down| match d {
+            crate::proxy::Down::Bytes(b) => out.tx.try_send(Out::Bytes(b, None)).is_ok(),
+            crate::proxy::Down::Close(code, why) => {
+                let _ = out.tx.try_send(Out::Close(code, reason(&why)));
+                true
+            }
+        };
+        match crate::proxy::start(&owner, &ClientMsg::Hello(hello), down) {
+            Ok(to) => {
+                log::info!("file {file}: passing a client on to its room's owner {}", owner.display());
+                self.conns.insert(p.conn, Conn { out: p.c.out, sock: p.c.sock, kind: Kind::Proxied { to }, ip: p.c.ip });
+            }
+            Err(why) => {
+                log::warn!("file {file}: couldn't reach its room's owner {}: {why}", owner.display());
+                refuse(&p.c.out, refusal);
             }
         }
     }
@@ -1874,3 +1944,7 @@ mod barred_tests;
 #[cfg(test)]
 #[path = "async_open_tests.rs"]
 mod async_open_tests;
+
+#[cfg(test)]
+#[path = "proxy_tests.rs"]
+mod proxy_tests;

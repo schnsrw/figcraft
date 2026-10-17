@@ -37,6 +37,8 @@ pub mod manage;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod net;
 #[cfg(not(target_arch = "wasm32"))]
+mod proxy;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod tls;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod token;

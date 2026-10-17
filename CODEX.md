@@ -162,9 +162,11 @@ the continuation point, a blocker or a major decision changes.
    close on loss, release on close); a replica refuses a room another owns (`OWNED_ELSEWHERE`).
    Live tests: `crates/cloud-relay/tests/room_leases_relay.rs` (needs FIGCRAFT_TEST_DATABASE_URL_FILE
    and FIGCRAFT_TEST_S3_DIR; older suites also need the `deploy/saas/*-preflight.sql` fixtures).
-   Next: S5-006 owner routing (the refusal should become a redirect to the lease's endpoint through
-   the gateway), S5-008 client reconnect state, S5-011 idle close/snapshot schedule, S5-012 drain,
-   S5-017 quotas, S5-018 large assets, S5-022/023 kill tests, then the gate.
+   S5-006 is done: a replica that does not own a room passes the client on to the owner (proxy over
+   the lease's endpoint; `crates/collab-net/src/proxy.rs`, `OpenFailure::Elsewhere`); no gateway or
+   client change. Next: S5-008 client reconnect state across an owner failure, S5-011 idle close and
+   snapshot schedule, S5-012 drain (a draining relay should release leases and tell clients to
+   reconnect), S5-017 quotas, S5-018 large assets, S5-022/023 kill tests, then the gate.
    S5-015 is complete: the live PostgreSQL/S3 member-revocation and WebSocket race probes passed
    for tenant, team and document removal, session logout, editor downgrade and revoked links.
    S5-016 is complete: presence and signals remain ephemeral, with independent 33 ms and
