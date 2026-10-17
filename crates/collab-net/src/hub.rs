@@ -125,6 +125,12 @@ pub trait Backend: Send + 'static {
     /// The session for a file that isn't open (after [`admit`](Self::admit) let someone in).
     fn open(&mut self, file: &str) -> Result<Server, String>;
 
+    /// A successfully admitted client was assigned `id`. Called before its first message.
+    fn joined(&mut self, _file: &str, _id: u32) {}
+
+    /// A client left. Called after its final changes have been offered for durability.
+    fn left(&mut self, _file: &str, _id: u32) {}
+
     /// The hub handled a message for an open file: keep what changed (its server's journal).
     fn changed(&mut self, _file: &str, _server: &mut Server) {}
 
@@ -1400,6 +1406,7 @@ impl<B: Backend> Hub<B> {
         };
         match room.server.join_as(hello, admission.access) {
             Ok((id, outs)) => {
+                self.backend.joined(&file, id);
                 // A guest back after a drop keeps its id: its old connection, if the hub hasn't
                 // noticed it's gone yet, is closed without the guest leaving.
                 let old = room.ids.insert(id, conn).filter(|old| *old != conn);
@@ -1633,6 +1640,7 @@ impl<B: Backend> Hub<B> {
         let outs = room.server.leave(id);
         self.queue(&file, outs);
         self.close_if_empty(&file);
+        self.backend.left(&file, id);
     }
 
     /// What changed in `file` couldn't be made durable: nobody is told it was confirmed. The file

@@ -1,7 +1,7 @@
 # FigCraft fork handoff
 
 > **Purpose:** durable session context for Codex and other repository agents  
-> **Last updated:** 2026-10-16  
+> **Last updated:** 2026-10-17
 > **Active program:** self-hostable single-tenant, multi-tenant and embedded FigCraft SaaS
 
 This file is the short operational handoff. The detailed and authoritative scope is
@@ -143,10 +143,10 @@ the continuation point, a blocker or a major decision changes.
    `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
    ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
    sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
-   STATE: S4 is complete (25/25) and its gate passes (2026-10-17). S5 is 5/25.
-   RESUME HERE (S5): FIRST fix batch actor attribution (the room records every batch as the
-   room opener's; the hub must pass each client's admission identity to Backend::changed/flush),
-   then move storage work off the hub thread (see below). Orchestration is decided (owner): our own PostgreSQL leases beside the
+   STATE: S4 is complete (25/25) and its gate passes (2026-10-17). S5 is 6/25.
+   S5-002 fixes batch actor attribution: each accepted batch is now stored under its own
+   admitted client's principal, verified with two editors in a live room against PostgreSQL/S3.
+   RESUME HERE (S5): move storage work off the hub thread (see below). Orchestration is decided (owner): our own PostgreSQL leases beside the
    fencing tokens, any relay redirects to the owner, drain on shutdown; not Plane/Rivet. Next:
    S5-003/004 lease rows, S5-006 redirect, S5-012 drain, S5-014 commenter/viewer enforcement at
    message level, S5-016..018 quotas/presence/large assets, S5-020..023 two-replica and kill

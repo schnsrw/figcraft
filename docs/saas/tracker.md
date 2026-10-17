@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (5/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (6/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 5 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 6 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2175,10 +2175,19 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   session, document and access) are minted by `POST /api/v1/documents/{id}/realtime-ticket` and
   admitted by the relay, which re-checks the live session and effective role (S4-019 round C). Open:
   tickets are not yet tied to S5 room ownership routing.
-- [ ] **S5-002** Add relay admission that resolves authenticated principal, tenant and maximum role.
+- [x] **S5-002** Add relay admission that resolves authenticated principal, tenant and maximum role.
   Partial (2026-10-17): relay admission resolves the principal, tenant and maximum role from a
   realtime ticket and re-checks it on admission and in the revocation sweep; share-link admission
   remains for unsigned access.
+  Evidence: `CloudBackend` now carries each successful admission's trusted principal into a
+  client-id-to-principal map for the open room. Its journal drain binds every accepted batch to
+  that client's principal; one transaction appends consecutive batches in actor groups, preserving
+  order and the commit-before-confirm rule. An accepted batch without a trusted admission mapping
+  closes the room unconfirmed. The two-editor `realtime_ticket` integration regression records
+  first editor, second editor and first editor again as three distinct event actors in one live
+  room. It passed against disposable PostgreSQL 18 and SeaweedFS 4.48. The existing admission and
+  relay action matrix covers ticket principal, tenant and maximum document role; share-link
+  sessions remain intentionally anonymous and their event actor is the link creator.
 - [ ] **S5-003** Implement Redis room registry with bounded, namespaced keys.
 - [ ] **S5-004** Implement renewable room leases and ownership identity.
 - [x] **S5-005** Implement monotonically increasing PostgreSQL fencing tokens.
@@ -2582,3 +2591,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S4 round C (part) and S5 round A: revocation races at HTTP, WebSocket and job level (S4-023 partial: one in-flight HTTP order); SAML through a Keycloak broker end to end (S4-025 partial: back-channel logout, groups claim); orchestration decided as our own PostgreSQL leases; filesystem-server and desktop session compatibility proven (S5-019); S5-005/007/009/013 recorded as delivered by S2/S3 work. S5 reaches 5/25. |
 | 2026-10-17 | S4 round C (rest) and S5 load harness: member-removal revocation hooks, signed cursors on document lists, `--print-bootstrap-token`, realtime tickets with relay admission; full route x caller permission matrix (1,152 cells) and API-level cross-tenant suite (S4-022); relay load and latency harness with measured sizing (S5-024/025 partial). Finding: commits and cold restores run serially on the relay hub thread (a 20k-node restore blocked other rooms for 8 s). S4 at 21/25, S5 at 5/25. |
 | 2026-10-17 | S4 complete (25/25) and its gate passes: team-member search and workspace grant listing with full audit; relay action matrix; resume bound to the issuing credential (a viewer could otherwise take over an editor's client id); every mutating request re-validates access inside its transaction; tenant locks moved to FOR NO KEY UPDATE after a deadlock with audit inserts; OIDC back-channel logout and a recorded groups claim; Keycloak image pinned for validation. |
+| 2026-10-17 | S5-002: bound each accepted relay batch to the principal of its own admitted client, rather than the room opener; a two-editor PostgreSQL/S3 regression verifies per-event actors and commit order. S5 reaches 6/25. |

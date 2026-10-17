@@ -161,6 +161,23 @@ impl Fixture {
             rows
         })
     }
+
+    fn attributions(&self) -> Vec<(i64, String)> {
+        self.runtime.block_on(async {
+            let mut transaction = begin_tenant_transaction(&self.pool, self.tenant).await.unwrap();
+            let rows = sqlx::query_as(
+                "SELECT seq, actor_principal_id::text FROM document_events \
+                 WHERE tenant_id = $1::uuid AND document_id = $2::uuid ORDER BY seq",
+            )
+            .bind(self.tenant.to_string())
+            .bind(self.document.to_string())
+            .fetch_all(transaction.connection())
+            .await
+            .unwrap();
+            transaction.rollback().await.unwrap();
+            rows
+        })
+    }
 }
 
 struct Raw(WebSocket<TcpStream>);
@@ -248,6 +265,7 @@ fn tickets_admit_by_their_access_and_share_links_keep_working() -> TestResult {
     };
     let file = fixture.document.to_string();
     let editor = fixture.member(Role::Editor);
+    let second_editor = fixture.member(Role::Editor);
     let viewer = fixture.member(Role::Viewer);
     let removed = fixture.member(Role::Editor);
     let logged_out = fixture.member(Role::Editor);
@@ -263,6 +281,20 @@ fn tickets_admit_by_their_access_and_share_links_keep_working() -> TestResult {
     ada.rename(seq, 1, page, "Ticketed edit");
     assert!(ada.confirmation(ada_id, 1).is_some());
     assert_eq!(fixture.actors(), vec![editor.principal.to_string()], "the ticket's principal is the batch actor");
+
+    // The room stays open while a second editor joins. Each committed event must carry the
+    // principal whose ticket admitted its author, including when the first editor edits again.
+    let mut ellis = Raw::join(addr, &file, &fixture.ticket(&second_editor, fixture.document, true, expires));
+    let (ellis_id, second_seq, second_access, second_page) = ellis.welcome();
+    assert_eq!(second_access, Access::Edit);
+    ellis.rename(second_seq, 1, second_page, "Second editor");
+    let third_seq = ellis.confirmation(ellis_id, 1).ok_or("second editor was not confirmed")?;
+    ada.rename(third_seq, 2, page, "First editor again");
+    assert!(ada.confirmation(ada_id, 2).is_some());
+    assert_eq!(
+        fixture.attributions(),
+        vec![(1, editor.principal.to_string()), (2, second_editor.principal.to_string()), (3, editor.principal.to_string()),],
+    );
 
     // A viewer's ticket joins read-only; a viewer cannot gain edit by holding an edit ticket
     // (forged for the test with the right key: the relay re-checks the role and refuses).

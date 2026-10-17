@@ -317,10 +317,11 @@ struct Admitted {
 struct OpenDoc {
     tenant: TenantId,
     document: CloudDocumentId,
-    actor: PrincipalId,
     fencing_token: i64,
+    /// The trusted principal recorded when each client id joined this room.
+    actors: HashMap<u32, PrincipalId>,
     /// Accepted batches not yet committed.
-    pending: Vec<Accepted>,
+    pending: Vec<(PrincipalId, Accepted)>,
     /// The sequence of the latest snapshot stored (or restored).
     snapshot_seq: Option<u64>,
 }
@@ -400,11 +401,23 @@ impl CloudBackend {
             return true;
         }
         let pending = std::mem::take(&mut doc.pending);
-        let (pool, tenant, document, token, actor) = (&self.pool, doc.tenant, doc.document, doc.fencing_token, doc.actor);
+        let (pool, tenant, document, token) = (&self.pool, doc.tenant, doc.document, doc.fencing_token);
         let committed = self.block(async move {
             let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| "begin")?;
-            for chunk in pending.chunks(MAX_APPEND_BATCHES) {
-                append_events(&mut transaction, document, token, actor, chunk).await.map_err(|_| "append")?;
+            let mut actor = None;
+            let mut chunk = Vec::new();
+            for (batch_actor, batch) in pending {
+                if actor != Some(batch_actor) || chunk.len() == MAX_APPEND_BATCHES {
+                    if let Some(previous) = actor {
+                        append_events(&mut transaction, document, token, previous, &chunk).await.map_err(|_| "append")?;
+                        chunk.clear();
+                    }
+                    actor = Some(batch_actor);
+                }
+                chunk.push(batch);
+            }
+            if let Some(last) = actor {
+                append_events(&mut transaction, document, token, last, &chunk).await.map_err(|_| "append")?;
             }
             transaction.commit().await.map_err(|_| "commit")
         });
@@ -467,8 +480,8 @@ impl CloudBackend {
         let mut doc = OpenDoc {
             tenant: admitted.tenant,
             document,
-            actor: admitted.actor,
             fencing_token: room.fencing_token(),
+            actors: HashMap::new(),
             pending: Vec::new(),
             snapshot_seq,
         };
@@ -593,6 +606,18 @@ impl Backend for CloudBackend {
         Ok(server)
     }
 
+    fn joined(&mut self, file: &str, id: u32) {
+        if let (Some(admitted), Some(doc)) = (self.admitted.get(file), self.open.get_mut(file)) {
+            doc.actors.insert(id, admitted.actor);
+        }
+    }
+
+    fn left(&mut self, file: &str, id: u32) {
+        if let Some(doc) = self.open.get_mut(file) {
+            doc.actors.remove(&id);
+        }
+    }
+
     fn changed(&mut self, file: &str, server: &mut Server) {
         let accepted: Vec<Accepted> = server
             .take_journal()
@@ -605,11 +630,22 @@ impl Backend for CloudBackend {
         if accepted.is_empty() {
             return;
         }
-        match self.open.get_mut(file) {
-            Some(doc) => doc.pending.extend(accepted),
-            // Not ours to keep: it must not be confirmed.
-            None if !self.failed.iter().any(|f| f == file) => self.failed.push(file.to_string()),
-            None => {}
+        let attributed = self.open.get(file).and_then(|doc| {
+            accepted.into_iter().map(|batch| doc.actors.get(&batch.author).copied().map(|actor| (actor, batch))).collect::<Option<Vec<_>>>()
+        });
+        match attributed {
+            Some(batches) => {
+                if let Some(doc) = self.open.get_mut(file) {
+                    doc.pending.extend(batches);
+                }
+            }
+            // An accepted batch without a trusted admission identity cannot be confirmed.
+            None => {
+                self.open.remove(file);
+                if !self.failed.iter().any(|failed| failed == file) {
+                    self.failed.push(file.to_string());
+                }
+            }
         }
     }
 

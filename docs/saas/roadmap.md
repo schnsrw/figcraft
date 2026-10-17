@@ -1,6 +1,6 @@
 # SaaS roadmap
 
-> **Status:** planned · **Last updated:** 2026-10-16 · **Estimates:** one experienced engineer,
+> **Status:** S5 implementation in progress · **Last updated:** 2026-10-17 · **Estimates:** one experienced engineer,
 > implementation and tests included
 
 ## Outcome stages
