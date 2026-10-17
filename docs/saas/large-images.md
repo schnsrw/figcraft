@@ -155,3 +155,26 @@ this section is updated with what each step actually does.
   document; `assets.rs` unit tests for the raised cap and the address parser. The production
   gate's SQL (`find_document_asset`, `read_document_asset`, `tenant_asset_bytes`) is exercised
   only against a live database (not run in this task; see the tracker).
+
+### Step 4: the relay checks references; recovery carries them
+
+* `CloudBackend` gives every room's collaboration `Server` an `AssetDirectory`
+  (`crates/cloud-relay/src/image_assets.rs`): a reference is accepted only if the room's tenant
+  holds that verified asset with exactly that size (`assets::claim_document_asset`: tenant, hash and
+  size, in a tenant transaction, so another tenant's identical bytes are invisible), and the same
+  transaction attaches it to the document, so a reference uploaded for document A and used in
+  document B keeps the asset alive for B too. Storage failure or a timeout refuses the batch with a
+  reason (`wasn't uploaded to this file`); the client's batch is not retried blindly.
+  `CloudBackendConfig::image_refs` (on by default, the policy the app derives from
+  `FIGCRAFT_IMAGE_MAX_BYTES`) and `max_batch_bytes` (15 MiB, a megabyte under the event cap) are
+  set on every room the backend opens, on the synchronous and the asynchronous open path.
+* Inline images from older clients are still accepted, up to 15 MiB of encoded batch; above that
+  the client is told why, once, and its batch leaves the queue (measured loop: gone).
+* Recovery: snapshots and events hold references (`asset: {len}`) and placeholders, and replay
+  does not consult the directory. Measured after (`crates/cloud-storage/tests/large_image_refs.rs`,
+  no database), for an image of 100 KiB up to 100 MiB: the batch is 124 to 127 bytes, the stored
+  event 124 to 127, the stored state about 570, a late joiner's welcome about 460; the figures do
+  not depend on the image. A room restored from its snapshot with the later events replayed (empty
+  directory) tells a joiner exactly which two 30 and 45 MiB images it has to fetch. An older client
+  in the same room is sent the batch without the reference and keeps pasting inline.
+* Not run here: the directory's SQL against a live database (compile-checked only).

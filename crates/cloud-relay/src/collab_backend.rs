@@ -53,7 +53,7 @@ use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
 use figcraft_cloud_storage::attribution::{Via, access_via};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::document_snapshots::store_snapshot;
-use figcraft_cloud_storage::events::{MAX_APPEND_BATCHES, append_events_via};
+use figcraft_cloud_storage::events::{MAX_APPEND_BATCHES, MAX_EVENT_PAYLOAD_BYTES, append_events_via};
 use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
 use figcraft_cloud_storage::quarantine::{QuarantineError, quarantine_reason};
 use figcraft_cloud_storage::realtime_tickets::{TicketKey, looks_like_ticket, verify as verify_ticket};
@@ -64,6 +64,7 @@ use figcraft_cloud_storage::room_clients::{load_and_trim, record_issued};
 use figcraft_cloud_storage::room_leases::{AcquireRoom, RoomLease, acquire_or_reclaim_room, release_room, renew_room};
 use figcraft_cloud_storage::sessions::SessionLimits;
 use figcraft_cloud_storage::share_links::{MAX_CHECKED_LINKS, ShareRole, dead_share_links, resolve_share_link};
+pub use figcraft_collab::AssetPolicy;
 use figcraft_collab::message::{Access, Admin, AdminReply};
 use figcraft_collab::{Accepted, Document, Journal, Limits, Server};
 use figcraft_collab_net::hub::{Admission, Backend, Closing, Handled, OpenFailure, OpenFile, Wake};
@@ -72,6 +73,7 @@ use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
 use crate::DurableRoom;
+use crate::image_assets::CloudAssets;
 
 /// What every refused hello is told (never why: unknown, revoked, expired and wrong-file links
 /// read the same).
@@ -142,7 +144,16 @@ pub struct CloudBackendConfig {
     pub snapshot_after_events: u64,
     /// How often the hub calls the backend's housekeeping (scheduled snapshots, idle closes).
     pub housekeeping_every: Duration,
+    /// Images by reference (TS-009): what clients that announce it are told. `None`: images stay
+    /// inline, within the old limits.
+    pub image_refs: Option<AssetPolicy>,
+    /// The largest batch a client may send (encoded bytes). A larger one is refused with a reason
+    /// instead of being accepted and then failing to be stored. `None`: no limit.
+    pub max_batch_bytes: Option<usize>,
 }
+
+/// The default [`CloudBackendConfig::max_batch_bytes`]: a megabyte under the largest stored event.
+pub const DEFAULT_MAX_BATCH_BYTES: usize = MAX_EVENT_PAYLOAD_BYTES - (1 << 20);
 
 /// Room leases for a relay replica.
 #[derive(Clone, Debug)]
@@ -183,6 +194,8 @@ impl CloudBackendConfig {
             snapshot_every: DEFAULT_SNAPSHOT_EVERY,
             snapshot_after_events: DEFAULT_SNAPSHOT_AFTER_EVENTS,
             housekeeping_every: Duration::from_secs(1),
+            image_refs: Some(AssetPolicy::default()),
+            max_batch_bytes: Some(DEFAULT_MAX_BATCH_BYTES),
         }
     }
 }
@@ -474,6 +487,8 @@ pub struct CloudBackend {
     idle_since: HashMap<String, Instant>,
     /// Scheduled snapshot uploads that finished: (file, sequence, stored).
     snapshots_done: Arc<Mutex<Vec<(String, u64, bool)>>>,
+    image_refs: Option<AssetPolicy>,
+    max_batch_bytes: Option<usize>,
 }
 
 type Finished = Arc<Mutex<Vec<(String, Result<(Server, OpenDoc), OpenFailure>)>>>;
@@ -529,7 +544,19 @@ impl CloudBackend {
             housekeeping_every: config.housekeeping_every.max(Duration::from_millis(10)),
             idle_since: HashMap::new(),
             snapshots_done: Arc::default(),
+            image_refs: config.image_refs,
+            max_batch_bytes: config.max_batch_bytes,
         })
+    }
+
+    /// Give a room's collaboration server its image settings (TS-009): the asset directory of its
+    /// tenant and document, and the batch-size refusal.
+    fn equip(&self, server: &mut Server, doc: &OpenDoc) {
+        if let Some(policy) = self.image_refs {
+            let directory = CloudAssets::new(self.pool.clone(), self.runtime.handle().clone(), doc.tenant, doc.document, self.timeout);
+            server.set_assets(Arc::new(directory), policy);
+        }
+        server.set_max_batch_bytes(self.max_batch_bytes);
     }
 
     /// The links this backend admitted, for a [`RevocationSweeper`] (start it once the hub
@@ -1121,7 +1148,8 @@ impl Backend for CloudBackend {
             log::warn!("document {file} refused: {} documents are open", self.open_or_opening());
             return Err(UNAVAILABLE.into());
         }
-        let (server, doc) = self.recover(file, admitted, document)?;
+        let (mut server, doc) = self.recover(file, admitted, document)?;
+        self.equip(&mut server, &doc);
         log::info!("document {file} opened at seq {} (fencing token {})", server.seq(), doc.fencing_token);
         self.hold(file, &doc);
         self.open.insert(file.to_string(), doc);
@@ -1159,7 +1187,8 @@ impl Backend for CloudBackend {
         done.into_iter()
             .map(|(file, result)| {
                 self.opening.remove(&file);
-                let result = result.map(|(server, doc)| {
+                let result = result.map(|(mut server, doc)| {
+                    self.equip(&mut server, &doc);
                     log::info!("document {file} opened at seq {} (fencing token {})", server.seq(), doc.fencing_token);
                     self.hold(&file, &doc);
                     self.open.insert(file.clone(), doc);

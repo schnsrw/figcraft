@@ -75,6 +75,11 @@ pub(crate) fn start(config: &CloudConfig) -> Result<Relay, &'static str> {
     backend_config.max_open = quotas.max_rooms;
     backend_config.limits.max_peers = quotas.max_peers_per_room;
     backend_config.limits.max_message_bytes = quotas.max_message_bytes;
+    // Large images travel by reference (TS-009): clients are told the size the upload route takes.
+    let images = config.image_settings();
+    let policy = figcraft_cloud_relay::collab_backend::AssetPolicy::default();
+    backend_config.image_refs =
+        Some(figcraft_cloud_relay::collab_backend::AssetPolicy { threshold: policy.threshold.min(images.max_bytes), max_bytes: images.max_bytes });
     backend_config.idle_close_after = config.room_idle();
     backend_config.snapshot_every = config.snapshot_interval();
     backend_config.snapshot_after_events = config.snapshot_after_events();

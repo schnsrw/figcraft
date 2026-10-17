@@ -22,6 +22,7 @@
 
 pub mod admission;
 pub mod collab_backend;
+pub mod image_assets;
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
 use figcraft_cloud_storage::document_snapshots::{SnapshotStoreError, restore_latest_snapshot_with};

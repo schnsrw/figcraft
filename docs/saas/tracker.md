@@ -2499,6 +2499,13 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   credentials, OpenAPI `openapi/images-api-v1.json`, upload exempted from the 1 MiB body cap.
   `apps/figcraft-cloud/src/api/images_api_tests.rs` (12 tests through the real router, in-memory
   gate, no database). The production gate's SQL is compile-checked and not run here.
+  (4/6) relay: every room's `Server` gets a tenant-scoped `AssetDirectory` (verified asset with
+  that hash and size; attached to the document in the same transaction, so GC keeps it) and a
+  15 MiB batch-size refusal; snapshots, events and welcomes carry references. Measured after:
+  batch/event 124 to 127 bytes, state about 570, welcome about 460 for 100 KiB to 100 MiB images;
+  restart with snapshot and replay keeps references; an older client keeps working inline.
+  `crates/cloud-storage/tests/large_image_refs.rs` (3 tests, no database); the directory's SQL
+  is compile-checked only.
 - [x] **S5-019** Preserve compatibility with current filesystem-server and desktop-hosted sessions.
   Evidence: Compatibility with self-hosted sessions is proven by three new test files; all pass. (1)
   apps/figcraft-server/tests/cloud_compat.rs starts figcraft-server in-process on loopback with a
