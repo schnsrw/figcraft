@@ -179,19 +179,13 @@ the continuation point, a blocker or a major decision changes.
    Testing policy (owner): targeted suites per step, quick scan (fmt, clippy on dependents,
    layers, affected tests) before push; full smoke/`cargo xtask ci` only when GitHub CI is red. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.
-   Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
-   plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight
-   reservations; lifecycle enforcement by SeaweedFS is unverified (the sweep is authoritative).
-   More S3 follow-ups: `plugins` needs a partial unique index on (tenant, publisher, name)
-   (an advisory lock covers it today); snapshot/library bytes written before a rolled-back
-   transaction are orphaned until reconciliation reports them, so register pending rows first or
-   have GC sweep orphans; there is no room quarantine flag yet (`recover` falls back to a full
-   replay and refuses on a gap); relay wiring should call `DurableRoom::recover` once S3 config
-   reaches the relay.
-   Open S2 follow-ups: a typed retryable/timeout error variant (timeouts and lost connections all
-   map to `Database` today), expiry/takeover of stale pending idempotency keys, and snapshot
-   restore in `DurableRoom::open` once S3 objects exist.
-   Lifecycle policy, backup/restore and production network isolation remain future S3/S8 work.
+   Closed (2026-10-18, verified against the code): the S2/S3 follow-ups that used to be listed here (quarantine, attributed
+   holds, register-first writes and the orphan sweep, typed retryable errors, stale idempotency
+   takeover, periodic snapshots, link revocation disconnecting live sessions, the cloud binary's
+   logger). Still open: lifecycle enforcement by SeaweedFS is unverified (the sweep is
+   authoritative); production network isolation, backup/restore drills and lifecycle policy are
+   S8 work; in-progress drags sync on drop (a client-side sync change in upstream-owned engine
+   code, see below if taken up).
 3. Update task evidence and milestone counts in the same commit as each completed task.
 
 ## Local environment notes

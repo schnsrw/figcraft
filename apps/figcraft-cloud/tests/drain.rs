@@ -246,4 +246,9 @@ fn a_stopping_process_drains_then_stops_cleanly() {
     let status = relay.0.wait().unwrap();
     assert!(status.success(), "clean exit, got {status:?}");
     assert!(!lease_held(document), "the room's lease was released on the way out");
+    // The relay's own log lines (not just the process's messages) reach stderr, filtered by RUST_LOG.
+    let mut log = String::new();
+    relay.0.stderr.take().unwrap().read_to_string(&mut log).unwrap();
+    assert!(log.contains(&format!("figcraft_cloud_relay::collab_backend: document {file} opened at seq")), "relay log lines are written:\n{log}");
+    assert!(log.contains("stopping the collaboration relay"), "{log}");
 }

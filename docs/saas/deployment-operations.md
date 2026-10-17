@@ -108,6 +108,12 @@ RUST_LOG=info
 OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 ```
 
+Logging: the long-running roles write one line per record to stderr (`<UTC time> <LEVEL> <module>:
+<message>`), filtered by `RUST_LOG`: a default level and/or `module=level` directives, for example
+`RUST_LOG=info,figcraft_cloud_relay=debug,sqlx=warn` (default `info`; levels `off`, `error`, `warn`,
+`info`, `debug`, `trace`). The relay's warnings and errors (a lost room lease, a failed recovery or
+commit, a refused open) are only visible through it. Secrets and tokens are never logged.
+
 Draining and rolling releases: on SIGTERM or SIGINT (what `docker stop` and orchestrators send) the
 process stops being ready (`/readyz` answers 503 `draining`; `/healthz` stays 200 so it is not
 killed), the relay closes every new connection at once with the restarting close code (clients

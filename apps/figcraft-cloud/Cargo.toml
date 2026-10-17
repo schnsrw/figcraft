@@ -15,6 +15,7 @@ figcraft-cloud-relay = { path = "../../crates/cloud-relay" }
 ring = "0.17"
 figcraft-collab-net = { workspace = true }
 sqlx = { workspace = true }
+log = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }

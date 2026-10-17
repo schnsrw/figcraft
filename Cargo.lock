@@ -1822,6 +1822,7 @@ dependencies = [
  "figcraft-cloud-storage",
  "figcraft-collab",
  "figcraft-collab-net",
+ "log",
  "ring",
  "serde",
  "serde_json",

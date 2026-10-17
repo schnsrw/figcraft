@@ -3,6 +3,7 @@
 mod api;
 mod config;
 mod health;
+mod logging;
 mod relay;
 
 use config::{CloudConfig, CloudRole, Secret};
@@ -382,6 +383,8 @@ fn main() -> ExitCode {
         Ok(Arguments::PrintBootstrapToken) => run_print_bootstrap_token(),
         Ok(Arguments::CreateShareLink { document, role }) => run_create_share_link(document, role),
         Ok(Arguments::Role(cli_role)) => {
+            // The long-running roles log to stderr, filtered by RUST_LOG (the CLI commands don't).
+            logging::init();
             let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
             let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
             let Ok(mut config) = CloudConfig::parse(settings) else {
