@@ -38,6 +38,7 @@ pub mod platform;
 pub mod platform_admins;
 pub mod platform_workspaces;
 pub mod plugin_store;
+pub mod profiles;
 pub mod quarantine;
 pub mod realtime_tickets;
 pub mod reconciliation;

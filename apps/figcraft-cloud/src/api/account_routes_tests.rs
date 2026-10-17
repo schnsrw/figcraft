@@ -87,7 +87,8 @@ async fn whoami(caller: Authenticated) -> Json<Value> {
 fn app(state: AppState) -> Router {
     let auth = super::super::auth_routes::routes().merge(super::auth_routes());
     let auth = auth.merge(super::super::accounts_contract::routes());
-    let resources = Router::new().route("/tenants/{tenant}/whoami", get(whoami)).merge(super::resource_routes());
+    let resources =
+        Router::new().route("/tenants/{tenant}/whoami", get(whoami)).merge(super::resource_routes()).merge(super::super::me_routes::routes());
     let api = api_router_with(state, auth, resources);
     crate::health::app(CloudRole::Api, true, Some(api), ContextSettings::new(CloudRole::Api, 64, Duration::from_secs(20), 1 << 20))
 }
@@ -693,5 +694,223 @@ async fn a_weaker_stored_hash_is_upgraded_at_sign_in() -> TestResult {
     assert_eq!(post(&stronger, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
     assert_eq!(post(&old, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
     assert_eq!(post(&stronger, LOGIN, login_body(&w, &login, "still the wrong one 1")).await.status, StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------ S6-036
+
+async fn sign_in(app: &Router, w: &World, login: &str, password: &str) -> Result<String, Error> {
+    post(app, LOGIN, login_body(w, login, password)).await.session().ok_or_else(|| "sign-in failed".into())
+}
+
+fn authed(cookie: &str) -> [(&str, &str); 2] {
+    [("cookie", cookie), ("origin", ORIGIN)]
+}
+
+#[tokio::test]
+async fn profile_shows_a_stable_colour_and_accepts_only_valid_changes() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, principal) = account(&w, &app).await?;
+    let cookie = sign_in(&app, &w, &login, GOOD).await?;
+
+    assert_eq!(call(&app, Method::GET, "/api/v1/me", &[], None).await.status, StatusCode::UNAUTHORIZED);
+    let me = call(&app, Method::GET, "/api/v1/me", &[("cookie", &cookie), ("x-figcraft-tenant", &w.tenant.to_string())], None).await;
+    assert_eq!(me.status, StatusCode::OK, "{:?}", me.body);
+    assert_eq!(
+        (me.body["display_name"].as_str(), me.body["color_chosen"].as_bool(), me.body["login"].as_str()),
+        (Some("Login Person"), Some(false), Some(login.as_str()))
+    );
+    let default_color = me.body["color"].as_str().ok_or("color")?.to_string();
+    let palette: Vec<String> = me.body["palette"].as_array().ok_or("palette")?.iter().filter_map(|c| c.as_str().map(str::to_string)).collect();
+    assert_eq!(palette.len(), 12);
+    assert!(palette.contains(&default_color));
+    // The default is stable.
+    let again = call(&app, Method::GET, "/api/v1/me", &[("cookie", &cookie)], None).await;
+    assert_eq!(again.body["color"], default_color);
+
+    // CSRF and validation.
+    assert_eq!(
+        call(&app, Method::PATCH, "/api/v1/me", &[("cookie", &cookie)], Some(json!({"display_name": "X"}))).await.status,
+        StatusCode::FORBIDDEN
+    );
+    for bad in [
+        json!({}),
+        json!({"color": "#123456"}),
+        json!({"color": "red"}),
+        json!({"display_name": ""}),
+        json!({"display_name": "x".repeat(65)}),
+        json!({"display_name": "tab\there"}),
+        json!({"nope": 1}),
+    ] {
+        let reply = call(&app, Method::PATCH, "/api/v1/me", &authed(&cookie), Some(bad.clone())).await;
+        assert_eq!(reply.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    let chosen = palette.iter().find(|c| **c != default_color).ok_or("another colour")?.clone();
+    let reply = call(&app, Method::PATCH, "/api/v1/me", &authed(&cookie), Some(json!({"display_name": "  Ada L. ", "color": chosen}))).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(
+        (reply.body["display_name"].as_str(), reply.body["color"].as_str(), reply.body["color_chosen"].as_bool()),
+        (Some("Ada L."), Some(chosen.as_str()), Some(true))
+    );
+    let stored: (String, Option<String>) =
+        sqlx::query_as("SELECT display_name, color FROM principals WHERE id = $1::uuid").bind(&principal).fetch_one(&w.admin).await?;
+    assert_eq!(stored, ("Ada L.".to_string(), Some(chosen)));
+    Ok(())
+}
+
+#[tokio::test]
+async fn changing_the_password_needs_the_current_one_and_ends_every_other_session() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, principal) = account(&w, &app).await?;
+    let here = sign_in(&app, &w, &login, GOOD).await?;
+    let elsewhere = sign_in(&app, &w, &login, GOOD).await?;
+    let tenant = w.tenant.to_string();
+    let path = "/api/v1/me/password";
+    let send = |cookie: String, body: Value| {
+        let app = app.clone();
+        let tenant = tenant.clone();
+        async move { call(&app, Method::POST, path, &[("cookie", &cookie), ("origin", ORIGIN), ("x-figcraft-tenant", &tenant)], Some(body)).await }
+    };
+    let new_password = "a brand new passphrase 77";
+
+    // A weak new password is explained and changes nothing; so does a wrong current password.
+    let reply = send(here.clone(), json!({"current_password": GOOD, "new_password": "short"})).await;
+    assert_eq!((reply.status, reply.body["error"]["reason"].as_str()), (StatusCode::BAD_REQUEST, Some("password_policy")));
+    let reply = send(here.clone(), json!({"current_password": "not my password 123", "new_password": new_password})).await;
+    assert_eq!((reply.status, reply.code()), (StatusCode::FORBIDDEN, "forbidden"));
+    let whoami = format!("/api/v1/tenants/{tenant}/whoami");
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &here)], None).await.status, StatusCode::OK);
+    let failed: i32 = sqlx::query_scalar("SELECT failed_attempts FROM local_credentials WHERE principal_id = $1::uuid")
+        .bind(&principal)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(failed, 1, "a wrong current password counts as a failed guess");
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK, "the old password still works");
+    // CSRF.
+    let reply = call(&app, Method::POST, path, &[("cookie", &here)], Some(json!({"current_password": GOOD, "new_password": new_password}))).await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+
+    let reply = send(here.clone(), json!({"current_password": GOOD, "new_password": new_password})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert!(reply.body["revoked_sessions"].as_u64().is_some_and(|n| n >= 2));
+    let fresh = reply.session().ok_or("a fresh cookie")?;
+    // Both earlier sessions are dead, the fresh one lives.
+    for dead in [&here, &elsewhere] {
+        assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", dead)], None).await.status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &fresh)], None).await.status, StatusCode::OK);
+    // The old password is gone, the new works, and the counters are clear.
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, new_password)).await.status, StatusCode::OK);
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE tenant_id = $1::uuid AND action = 'credential.password_change' AND actor_principal_id = $2::uuid",
+    )
+    .bind(&tenant)
+    .bind(&principal)
+    .fetch_one(&w.admin)
+    .await?;
+    assert_eq!(audited, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn guessing_the_current_password_is_throttled_like_signing_in() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, _) = account(&w, &app).await?;
+    let cookie = sign_in(&app, &w, &login, GOOD).await?;
+    let tenant = w.tenant.to_string();
+    let mut last = StatusCode::OK;
+    for _ in 0..7 {
+        last = call(
+            &app,
+            Method::POST,
+            "/api/v1/me/password",
+            &[("cookie", &cookie), ("origin", ORIGIN), ("x-figcraft-tenant", &tenant)],
+            Some(json!({"current_password": "guess guess guess 1", "new_password": "whatever new phrase 5"})),
+        )
+        .await
+        .status;
+    }
+    assert_eq!(last, StatusCode::TOO_MANY_REQUESTS);
+    // Even the right current password waits while backed off.
+    let reply = call(
+        &app,
+        Method::POST,
+        "/api/v1/me/password",
+        &[("cookie", &cookie), ("origin", ORIGIN), ("x-figcraft-tenant", &tenant)],
+        Some(json!({"current_password": GOOD, "new_password": "whatever new phrase 5"})),
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::TOO_MANY_REQUESTS);
+    Ok(())
+}
+
+#[tokio::test]
+async fn people_list_and_revoke_only_their_own_sessions() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, _) = account(&w, &app).await?;
+    let (other_login, _) = account(&w, &app).await?;
+    let (a, b, c) = (sign_in(&app, &w, &login, GOOD).await?, sign_in(&app, &w, &login, GOOD).await?, sign_in(&app, &w, &login, GOOD).await?);
+    let strangers = sign_in(&app, &w, &other_login, GOOD).await?;
+
+    let listed = call(&app, Method::GET, "/api/v1/me/sessions", &[("cookie", &b)], None).await;
+    assert_eq!(listed.status, StatusCode::OK);
+    let items = listed.body["items"].as_array().ok_or("items")?;
+    assert!(items.len() >= 3);
+    assert_eq!(items.iter().filter(|item| item["current"] == true).count(), 1);
+    assert!(items.iter().all(|item| item.get("token").is_none() && item["id"].as_str().is_some()));
+    let a_view = call(&app, Method::GET, "/api/v1/me/sessions", &[("cookie", &a)], None).await;
+    let a_id = a_view.body["items"]
+        .as_array()
+        .ok_or("items")?
+        .iter()
+        .find(|item| item["current"] == true)
+        .and_then(|item| item["id"].as_str())
+        .ok_or("a id")?
+        .to_string();
+    // Another person's session id is a plain 404; so is a malformed one.
+    let theirs = call(&app, Method::GET, "/api/v1/me/sessions", &[("cookie", &strangers)], None).await;
+    let theirs_id = theirs.body["items"][0]["id"].as_str().ok_or("their id")?.to_string();
+    assert_eq!(call(&app, Method::DELETE, &format!("/api/v1/me/sessions/{theirs_id}"), &authed(&b), None).await.status, StatusCode::NOT_FOUND);
+    assert_eq!(call(&app, Method::DELETE, "/api/v1/me/sessions/not-an-id", &authed(&b), None).await.status, StatusCode::NOT_FOUND);
+    let whoami = format!("/api/v1/tenants/{}/whoami", w.tenant);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &strangers)], None).await.status, StatusCode::OK, "their session is untouched");
+    // CSRF.
+    assert_eq!(call(&app, Method::DELETE, &format!("/api/v1/me/sessions/{a_id}"), &[("cookie", &b)], None).await.status, StatusCode::FORBIDDEN);
+    // Revoking one ends exactly that one.
+    let reply = call(&app, Method::DELETE, &format!("/api/v1/me/sessions/{a_id}"), &authed(&b), None).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    let alive = [&a, &b, &c];
+    let mut dead = 0;
+    for cookie in alive {
+        if call(&app, Method::GET, &whoami, &[("cookie", cookie)], None).await.status == StatusCode::UNAUTHORIZED {
+            dead += 1;
+        }
+    }
+    assert_eq!(dead, 1);
+    // Revoke-others keeps only the caller's.
+    let reply = call(&app, Method::POST, "/api/v1/me/sessions/revoke-others", &authed(&b), None).await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &b)], None).await.status, StatusCode::OK);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &c)], None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &strangers)], None).await.status, StatusCode::OK);
+    // Revoking the current one signs this browser out.
+    let listed = call(&app, Method::GET, "/api/v1/me/sessions", &[("cookie", &b)], None).await;
+    let current = listed.body["items"]
+        .as_array()
+        .ok_or("items")?
+        .iter()
+        .find(|item| item["current"] == true)
+        .and_then(|item| item["id"].as_str())
+        .ok_or("current")?
+        .to_string();
+    let reply = call(&app, Method::DELETE, &format!("/api/v1/me/sessions/{current}"), &authed(&b), None).await;
+    assert_eq!(reply.status, StatusCode::NO_CONTENT);
+    assert!(reply.headers.get(header::SET_COOKIE).is_some_and(|value| value.to_str().is_ok_and(|v| v.contains("Max-Age=0"))));
+    assert_eq!(call(&app, Method::GET, "/api/v1/me/sessions", &[("cookie", &b)], None).await.status, StatusCode::UNAUTHORIZED);
     Ok(())
 }

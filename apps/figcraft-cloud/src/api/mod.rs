@@ -33,6 +33,7 @@ pub(crate) mod error;
 pub(crate) mod host_api;
 pub(crate) mod host_events;
 pub(crate) mod login_throttle;
+pub(crate) mod me_routes;
 pub(crate) mod passwords;
 pub(crate) mod rate_limit;
 pub(crate) mod realtime;
@@ -262,8 +263,12 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(account_routes::auth_routes())
         .merge(accounts_contract::routes())
         .merge(host_api::auth_router());
-    let resources: Router<AppState> =
-        Router::new().merge(tenants_api::routes()).merge(account_routes::resource_routes()).merge(documents_api::routes()).merge(host_api::router());
+    let resources: Router<AppState> = Router::new()
+        .merge(tenants_api::routes())
+        .merge(account_routes::resource_routes())
+        .merge(me_routes::routes())
+        .merge(documents_api::routes())
+        .merge(host_api::router());
     // The platform realm (`/platform/v1`) is a separate router with its own authenticator.
     let platform = crate::platform_api::router(state.clone()).layer(DefaultBodyLimit::max(state.config().max_body_bytes));
     api_router_with(state, auth, resources).merge(platform)

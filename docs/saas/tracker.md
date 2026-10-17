@@ -1,6 +1,7 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (18/57) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (19/58) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (19/58) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +25,8 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 18 / 57 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 19 / 58 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 19 / 58 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2553,8 +2555,9 @@ already allow "local accounts or OIDC" (`product-requirements.md`, "Libraries, r
   generic errors, session creation and rotation on the existing session store, per-tenant allowed
   methods.
   Evidence: `POST /api/v1/auth/password/login {tenant?, login, password}` in `api/account_routes.rs` (contract `passwordLogin` in `openapi/accounts-api-v1.json`), `api/login_throttle.rs` (per-replica backoff keyed by a hash of tenant and login, 429 with Retry-After for known and unknown logins alike), database lockout in `credentials.rs`, settings `FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD/BASE_SECONDS/MAX_SECONDS` (bounded, tested). Policy: 5 failures then 30 s doubling to 15 min, attempts while locked not counted. Tests (live PostgreSQL, `account_routes_tests.rs`, 6 new): sign-in with a case-variant login rotates the browser session (old cookie dead, new works, cookie is Secure/HttpOnly/Path=/) and is audited; CSRF refused; unknown login, wrong password, malformed login and unknown tenant give identical status and body and comparable timing; five failures then 429 for known and unknown alike, and a second replica with an empty table still refuses the correct password with the same 401 while locked, counters stay at 5, and the right password after the lock lapses works and clears them; per-address bucket (burst 3) limits any login; disabled credential and suspended member give the generic 401 without counting as guesses; a tenant with passwords off answers 403 and /auth/methods says so; another tenant has no standing; a weaker stored hash is upgraded at sign-in and an older replica still accepts the stronger one. Unit: `login_throttle` (2), config (1). Not done: an OIDC session is not yet refused in a tenant that turned `oidc_enabled` off (sessions do not record their method; the platform workstream's WorkspacePolicy is the intended owner); the second factor hook arrives with S6-038.
-- [ ] **S6-036** Account self-service: change password (re-authentication, other sessions revoked),
+- [x] **S6-036** Account self-service: change password (re-authentication, other sessions revoked),
   profile (display name and colour), list and revoke own sessions.
+  Evidence: migration `20261018000023_profile_color.sql` (schema pin bumped; `principals.color`), `crates/cloud-storage/src/profiles.rs`, `apps/figcraft-cloud/src/api/me_routes.rs` and contract operations `getMe`, `updateMe`, `changePassword`, `listMySessions`, `revokeMySession`, `revokeOtherSessions`. Endpoints for the UI: `GET|PATCH /me`, `POST /me/password`, `GET /me/sessions`, `DELETE /me/sessions/{id}`, `POST /me/sessions/revoke-others`. Tests (live PostgreSQL, 4 new in `account_routes_tests.rs`, plus 2 unit tests): profile shows a stable palette default colour, accepts only valid names and palette colours, refuses CSRF; password change refuses weak new passwords with the policy reason and wrong current passwords (counted as failed guesses) without changing anything, then revokes every other session of the person, signs this browser in again, the old password stops working, audit row `credential.password_change`; repeated wrong current passwords back off with 429 even for the right one; people list only their own live sessions (no tokens), cannot revoke another person's or a malformed id (404), revoking one ends exactly that one, revoke-others keeps the current one and other people's sessions, revoking the current signs out and clears the cookie. Not done: embedded sessions (platform workstream's `embed_*` columns) are not yet excluded from the session list because that migration is not on main yet; no per-device labels (the store keeps no user agent or address).
 - [ ] **S6-037** Administration: invite or create a user, disable and re-enable, single-use
   time-limited password-reset links (no mail server required; mail delivery optional later), revoke a
   user's sessions, all audited.
@@ -2969,3 +2972,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-035: password sign-in with enumeration-resistant failures, per-address, per-login and per-account limits, session rotation, rehash on login and per-tenant allowed methods. S6 reaches 16/57. |
 | 2026-10-18 | S6-045: platform admins sign in at /platform/v1 with Argon2id passwords and a mandatory TOTP second factor in their own cookie, with the one-time CLI bootstrap token, lockout, rate limits and audit; OpenAPI published. S6 reaches 17/57. |
 | 2026-10-18 | S6-046: workspace create (owner principal or invitation link), list, read, suspend, restore, archive, deletion request and cancel, plan and platform audit under /platform/v1, each change audited on both sides in one transaction. S6 reaches 18/57. |
+| 2026-10-18 | S6-036: profile (display name, palette colour), password change that revokes other sessions, own-session list and revoke. S6 reaches 19/58. |

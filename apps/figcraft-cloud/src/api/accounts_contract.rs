@@ -36,6 +36,12 @@ pub(crate) const ACCOUNT_ROUTES: &[AccountRoute] = &[
     route("POST", "/auth/password/signup", "passwordSignUp", "none"),
     route("POST", "/auth/password/bootstrap", "passwordBootstrap", "none"),
     route("POST", "/auth/password/login", "passwordLogin", "none"),
+    route("GET", "/me", "getMe", "session"),
+    route("PATCH", "/me", "updateMe", "session"),
+    route("POST", "/me/password", "changePassword", "session"),
+    route("GET", "/me/sessions", "listMySessions", "session"),
+    route("DELETE", "/me/sessions/{id}", "revokeMySession", "session"),
+    route("POST", "/me/sessions/revoke-others", "revokeOtherSessions", "session"),
     route("GET", "/tenants/{tenant}/account-settings", "getAccountSettings", "tenant.view"),
     route("PUT", "/tenants/{tenant}/account-settings", "putAccountSettings", "tenant.update_policy"),
 ];

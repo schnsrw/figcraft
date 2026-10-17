@@ -118,6 +118,12 @@ hold both).
   a correct password during a lock is refused with the same `401`). A success rotates the session
   (the browser's previous one is revoked), clears the counters and, when the stored hash is weaker
   than the configured parameters, replaces it. A tenant with passwords off answers `403`.
+* **Self-service** (S6-036, `/me`): profile (display name 1 to 64 characters, colour from a fixed
+  12-colour palette, otherwise a stable default derived from the principal id), password change and
+  own-session management. Changing a password needs the current one (wrong guesses count toward the
+  same lockout and per-login backoff as sign-in), stores a new Argon2id hash, revokes **every**
+  session of the person and signs the browser in again with a fresh one; a person lists and revokes
+  only their own sessions (another person's session id is a plain `404`; tokens are never returned).
 * **Never** logged, returned or audited: passwords, hashes, reset or invitation tokens.
 
 ## Authorization controls
