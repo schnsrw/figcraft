@@ -29,6 +29,7 @@ pub mod objects;
 pub mod oidc_logins;
 pub mod plugin_store;
 pub mod quarantine;
+pub mod realtime_tickets;
 pub mod reconciliation;
 pub mod resource_admin;
 pub mod revocation;

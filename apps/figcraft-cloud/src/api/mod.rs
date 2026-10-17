@@ -29,6 +29,7 @@ pub(crate) mod cursor;
 pub(crate) mod documents_api;
 pub(crate) mod error;
 pub(crate) mod rate_limit;
+pub(crate) mod realtime;
 pub(crate) mod teams_api;
 pub(crate) mod tenants_api;
 
@@ -86,13 +87,16 @@ pub(crate) struct AppState {
     identity: Option<Arc<IdentityConfig>>,
     /// The OIDC provider, when `OIDC_ISSUER`, `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URL` are set.
     oidc: Option<Arc<OidcProvider>>,
+    /// The realtime-ticket key (derived from `SESSION_SIGNING_KEY`); `None` leaves
+    /// `POST /documents/{id}/realtime-ticket` answering `503` and collab links on share links.
+    realtime: Option<Arc<figcraft_cloud_storage::realtime_tickets::TicketKey>>,
 }
 
 impl AppState {
     /// State with the deny-all authenticator.
     pub(crate) fn new(pool: PgPool, objects: ObjectStore, config: ApiConfig) -> Self {
         let auth_limiter = Arc::new(RateLimiter::new(config.auth_rate_limit));
-        Self { pool, objects, config: Arc::new(config), authenticator: Arc::new(DenyAll), auth_limiter, identity: None, oidc: None }
+        Self { pool, objects, config: Arc::new(config), authenticator: Arc::new(DenyAll), auth_limiter, identity: None, oidc: None, realtime: None }
     }
 
     /// Install the production identity stack: these settings and the
@@ -107,6 +111,16 @@ impl AppState {
     pub(crate) fn with_oidc(mut self, provider: Arc<OidcProvider>) -> Self {
         self.oidc = Some(provider);
         self
+    }
+
+    /// Enable realtime tickets with `key` (the relay must verify with the same key).
+    pub(crate) fn with_realtime_tickets(mut self, key: Arc<figcraft_cloud_storage::realtime_tickets::TicketKey>) -> Self {
+        self.realtime = Some(key);
+        self
+    }
+
+    pub(crate) fn realtime_key(&self) -> Option<&figcraft_cloud_storage::realtime_tickets::TicketKey> {
+        self.realtime.as_deref()
     }
 
     pub(crate) fn identity(&self) -> Option<&IdentityConfig> {

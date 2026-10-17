@@ -16,9 +16,10 @@ use figcraft_cloud_storage::effective_roles::{ResourceAccess, TenantAccess};
 use tower::ServiceExt as _;
 
 use super::admission::relay_access;
-use super::{CURSORS, CursorCodec as _, Kind, ROUTES, check, collab_urls, subject};
+use super::{Kind, ROUTES, check, collab_urls, cursor_scope, subject};
 use crate::api::auth::{AuthFuture, AuthRejection, AuthRequest, Authenticated, Authenticator, CredentialKind, SessionInfo};
 use crate::api::context::ContextSettings;
+use crate::api::cursor::{CursorScope, PageRequest, Position, encode, process_key};
 use crate::api::{ApiConfig, AppState, api_router};
 use crate::config::CloudRole;
 
@@ -68,6 +69,7 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ("POST", "/documents/{document_id}/share-links", "WE"),
     ("DELETE", "/documents/{document_id}/share-links/{link_id}", "WE"),
     ("GET", "/documents/{document_id}/collab-link", "WECV"),
+    ("POST", "/documents/{document_id}/realtime-ticket", "WECV"),
 ];
 
 fn tenant_access(tenant_role: Option<Role>) -> TenantAccess {
@@ -170,15 +172,41 @@ fn relay_action_matrix_admits_edit_view_or_refuses_by_document_role() {
     assert_eq!(relay_access(Some(&inactive)), RelayAccess::Refused);
 }
 
+fn caller(tenant: &str, principal: &str) -> Authenticated {
+    let principal: PrincipalId = principal.parse().unwrap();
+    let tenant: TenantId = tenant.parse().unwrap();
+    Authenticated {
+        principal,
+        tenant: TenantContext::new(tenant, principal, DeploymentMode::MultiTenant, Role::Editor, []),
+        session: SessionInfo { kind: CredentialKind::BrowserSession, id: "e1000000-0000-4000-8000-0000000000ee".to_string() },
+        grant: crate::api::auth::Grant::Member,
+    }
+}
+
+/// The shared signed cursors (S4-020) bind each list's cursor to the list, tenant, caller and
+/// parent: one minted for any other combination is refused.
 #[test]
-fn cursors_round_trip_and_reject_other_lists_and_junk() {
-    let id = "d3000000-0000-4000-8000-0000000000ff";
-    let cursor = CURSORS.encode("doc", id);
-    assert!(!cursor.contains(id), "cursors are opaque");
-    assert_eq!(CURSORS.decode("doc", &cursor).as_deref(), Some(id));
-    assert_eq!(CURSORS.decode("ws", &cursor), None);
-    for junk in ["", "!!!", "ZG9j", &"a".repeat(200), "ZG9jLg"] {
-        assert_eq!(CURSORS.decode("doc", junk), None, "{junk}");
+fn list_cursors_are_bound_to_the_list_the_tenant_the_caller_and_the_parent() {
+    let editor = caller(TENANT, EDITOR);
+    let parent = "e1000000-0000-4000-8000-0000000000a1";
+    let id: figcraft_cloud_domain::Uuid = "e1000000-0000-4000-8000-0000000000ff".parse().unwrap();
+    let position = Position { sort_key: String::new(), id };
+    let first = PageRequest::new(cursor_scope(&editor, "documents", parent), Some(2), None).unwrap();
+    let cursor = first.cursor_for(&position).unwrap();
+    assert!(!cursor.contains(&id.to_string()), "cursors are opaque");
+    let resumed = PageRequest::new(cursor_scope(&editor, "documents", parent), Some(2), Some(&cursor)).unwrap();
+    assert_eq!(resumed.after.map(|after| after.id), Some(id));
+    let others = [
+        cursor_scope(&editor, "projects", parent),
+        cursor_scope(&editor, "documents", "e1000000-0000-4000-8000-0000000000a2"),
+        cursor_scope(&caller(TENANT, ADMIN), "documents", parent),
+        cursor_scope(&caller(OTHER_TENANT, EDITOR), "documents", parent),
+    ];
+    for scope in others {
+        assert!(PageRequest::new(scope, Some(2), Some(&cursor)).is_err());
+    }
+    for junk in ["", "!!!", "ZG9j", &"a".repeat(4096), "ZG9jLg"] {
+        assert!(PageRequest::new(cursor_scope(&editor, "documents", parent), None, Some(junk)).is_err(), "{junk}");
     }
 }
 
@@ -641,8 +669,135 @@ async fn document_lists_page_with_opaque_cursors() -> TestResult {
     }
     assert_eq!(seen, created);
     // A workspace cursor is not a document cursor.
-    let ws_cursor = CURSORS.encode("ws", WORKSPACE);
-    let (status, _) = send(&app, "GET", &format!("/projects/{project}/documents?cursor={ws_cursor}"), Some(EDITOR), None).await;
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs();
+    let position = Position { sort_key: String::new(), id: WORKSPACE.parse()? };
+    let ws_cursor = encode(process_key(), &CursorScope::new("workspaces", &[TENANT, EDITOR, ""]), &position, now).ok_or("no cursor")?;
+    let (status, body) = send(&app, "GET", &format!("/projects/{project}/documents?cursor={ws_cursor}"), Some(EDITOR), None).await;
+    assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::BAD_REQUEST, Some("invalid_cursor")));
+    // The workspaces list itself accepts it.
+    let (status, page) = send(&app, "GET", &format!("/workspaces?cursor={ws_cursor}"), Some(EDITOR), None).await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    // A document cursor of this project is refused for another caller and another project.
+    let (_, page) = send(&app, "GET", &format!("/projects/{project}/documents?limit=2"), Some(EDITOR), None).await;
+    let doc_cursor = page["next_cursor"].as_str().ok_or("no cursor")?.to_string();
+    let (status, _) = send(&app, "GET", &format!("/projects/{project}/documents?cursor={doc_cursor}"), Some(ADMIN), None).await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, _) = send(&app, "GET", &format!("/projects/{PROJECT}/documents?cursor={doc_cursor}"), Some(EDITOR), None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Realtime tickets (S4-019): POST /documents/{id}/realtime-ticket and the ticket-based collab
+// link for signed-in browsers.
+
+const TICKET_SECRET: &[u8] = b"e1-documents-api-ticket-signing-key";
+
+fn ticket_app(pool: sqlx::PgPool) -> Router {
+    let objects = figcraft_cloud_storage::objects::ObjectStore::new(&figcraft_cloud_storage::objects::ObjectStoreSettings {
+        endpoint: "http://127.0.0.1:9".to_string(),
+        region: "us-east-1".to_string(),
+        bucket: "figcraft-test".to_string(),
+        access_key: "FCtestkey".to_string(),
+        secret_key: "FCtestsecret".to_string(),
+        path_style: true,
+    })
+    .unwrap();
+    let key = crate::api::realtime::ticket_key(Some(TICKET_SECRET)).unwrap();
+    let state = AppState::new(pool, objects, ApiConfig::default()).with_authenticator(Arc::new(BearerPrincipal)).with_realtime_tickets(key);
+    crate::health::app(CloudRole::Api, true, Some(api_router(state)), ContextSettings::new(CloudRole::Api, 64, Duration::from_secs(10), 1 << 20))
+}
+
+async fn send_raw(app: &Router, method: &str, path: &str, bearer: &str) -> (StatusCode, Option<String>, serde_json::Value) {
+    let request = Request::builder()
+        .method(Method::from_bytes(method.as_bytes()).unwrap())
+        .uri(format!("/api/v1{path}"))
+        .header("authorization", format!("Bearer {bearer}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.clone().oneshot(request).await.unwrap();
+    let status = response.status();
+    let cache = response.headers().get("cache-control").and_then(|value| value.to_str().ok()).map(str::to_string);
+    let bytes = to_bytes(response.into_body(), 1 << 20).await.unwrap();
+    (status, cache, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs()
+}
+
+#[tokio::test]
+async fn realtime_tickets_are_refused_without_a_key_or_a_browser_session() {
+    // No SESSION_SIGNING_KEY: 503 before any lookup (the lazy pool is never reached).
+    let app = app(lazy_pool());
+    let path = "/documents/e1000000-0000-4000-8000-0000000000d1/realtime-ticket";
+    let (status, _) = send(&app, "POST", path, Some(EDITOR), None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    // Share-link credentials never get a ticket (403 before any lookup).
+    let app = ticket_app(lazy_pool());
+    let (status, body) = send(&app, "POST", path, Some("link:e1000000-0000-4000-8000-0000000000a1"), None).await;
+    assert_eq!((status, body["error"]["code"].as_str()), (StatusCode::FORBIDDEN, Some("forbidden")));
+    let (status, _) = send(&app, "POST", path, None, None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn realtime_tickets_carry_the_callers_access_for_that_document_only() -> TestResult {
+    let Some(pool) = database().await? else {
+        return Ok(());
+    };
+    let app = ticket_app(pool.clone());
+    let key = figcraft_cloud_storage::realtime_tickets::TicketKey::derive(TICKET_SECRET).map_err(|error| format!("{error:?}"))?;
+    let document = fresh_document(&app).await?;
+    let id: CloudDocumentId = document.parse()?;
+    let other_document: CloudDocumentId = fresh_document(&app).await?.parse()?;
+    let path = format!("/documents/{document}/realtime-ticket");
+    for (caller, edit) in [(VIEWER, false), (EDITOR, true), (ADMIN, true)] {
+        let (status, cache, body) = send_raw(&app, "POST", &path, caller).await;
+        assert_eq!(status, StatusCode::OK, "{caller}: {body}");
+        assert_eq!(cache.as_deref(), Some("no-store"));
+        assert_eq!(body["expires_in"], 60);
+        assert_eq!(body["ws_url"], "ws://127.0.0.1:8080/ws/v1/collab");
+        assert_eq!(body["access"], if edit { "edit" } else { "view" });
+        let ticket = body["ticket"].as_str().ok_or("no ticket")?;
+        let verified = figcraft_cloud_storage::realtime_tickets::verify(&key, ticket, id, now_secs()).map_err(|error| format!("{error:?}"))?;
+        assert_eq!(verified.principal.to_string(), caller);
+        assert_eq!(verified.tenant.to_string(), TENANT);
+        assert_eq!(verified.edit, edit, "{caller}");
+        assert!(verified.expires_at <= now_secs() + 60);
+        // Bound to this document.
+        assert!(figcraft_cloud_storage::realtime_tickets::verify(&key, ticket, other_document, now_secs()).is_err());
+    }
+    // Invisible: 404, and the answer is the same whether or not the document exists.
+    let other = format!("other:{OTHER_ADMIN}");
+    for caller in [OUTSIDER, other.as_str()] {
+        let (status, _, _) = send_raw(&app, "POST", &path, caller).await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{caller}");
+    }
+    let (status, _, _) = send_raw(&app, "POST", "/documents/e1000000-0000-4000-8000-00000000dead/realtime-ticket", EDITOR).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _, _) = send_raw(&app, "POST", "/documents/not-a-uuid/realtime-ticket", EDITOR).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // Signed in: the collab link is a ticket-based invite and mints no share link.
+    let (status, cache, body) = send_raw(&app, "GET", &format!("/documents/{document}/collab-link"), VIEWER).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(cache.as_deref(), Some("no-store"));
+    assert_eq!((body["kind"].as_str(), body["access"].as_str(), body["link_id"].is_null()), (Some("ticket"), Some("view"), true));
+    let invite = body["invite"].as_str().ok_or("no invite")?;
+    let prefix = format!("ws://127.0.0.1:8080/ws/v1/collab?file={document}&token=");
+    let ticket = invite.strip_prefix(&prefix).ok_or("invite shape")?;
+    let verified = figcraft_cloud_storage::realtime_tickets::verify(&key, ticket, id, now_secs()).map_err(|error| format!("{error:?}"))?;
+    assert_eq!((verified.principal.to_string().as_str(), verified.edit), (VIEWER, false));
+    let (status, listed) = send(&app, "GET", &format!("/documents/{document}/share-links"), Some(EDITOR), None).await;
+    assert_eq!((status, listed["items"].as_array().map(Vec::len)), (StatusCode::OK, Some(0)), "{listed}");
+
+    // Archived documents are visible but not joinable.
+    let (status, _) = send(&app, "POST", &format!("/documents/{document}/archive"), Some(ADMIN), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _, _) = send_raw(&app, "POST", &path, EDITOR).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _, _) = send_raw(&app, "GET", &format!("/documents/{document}/collab-link"), EDITOR).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     Ok(())
 }

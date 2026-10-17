@@ -47,7 +47,10 @@ use super::AppState;
 use super::auth::{Authenticated, CredentialKind};
 use super::cursor::{CursorScope, ListQuery, PageBody, PageRequest, Position, SearchTerm, invalid_cursor};
 use super::error::{ApiError, ApiJson, denied};
-use super::tenants_api::{TenantCall, commit, conflict, invalid, open, path_principal, path_uuid, require_tenant, storage_unavailable};
+use super::tenants_api::{
+    TenantCall, commit, conflict, invalid, open, path_principal, path_uuid, require_tenant, revoke_after_commit, storage_unavailable,
+};
+use figcraft_cloud_storage::revocation::AccessRevocation;
 
 pub(crate) fn routes() -> Router<AppState> {
     let tenant = "/tenants/{tenant}";
@@ -242,6 +245,9 @@ async fn update_team(
         record = Some(teams::archive_team(&mut call.transaction, id, call.principal).await.map_err(team_error)?);
     }
     commit(call.transaction).await?;
+    if archive {
+        revoke_after_commit(&state, AccessRevocation::TeamArchived { team: id }).await;
+    }
     let record = record.ok_or_else(invalid)?;
     Ok(axum::Json(TeamBody::from(record)).into_response())
 }
@@ -255,6 +261,7 @@ async fn archive_team(
     let id = authorize_team(&mut call, &team, Action::TeamManage).await?;
     teams::archive_team(&mut call.transaction, id, call.principal).await.map_err(team_error)?;
     commit(call.transaction).await?;
+    revoke_after_commit(&state, AccessRevocation::TeamArchived { team: id }).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -338,6 +345,7 @@ async fn remove_team_member(
         return Err(ApiError::not_found());
     }
     commit(call.transaction).await?;
+    revoke_after_commit(&state, AccessRevocation::TeamMemberRemoved { team: id, principal: target }).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -390,6 +398,7 @@ async fn revoke_workspace(
         return Err(ApiError::not_found());
     }
     commit(call.transaction).await?;
+    revoke_after_commit(&state, AccessRevocation::GrantRevoked).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

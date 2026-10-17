@@ -57,7 +57,11 @@ pub(crate) struct Relay {
 pub(crate) fn start(config: &CloudConfig) -> Result<Relay, &'static str> {
     let database_url = config.database_url().ok_or("the relay requires DATABASE_URL")?;
     let objects = config.object_store_settings().ok_or("the relay requires the S3 settings")?;
-    let backend_config = CloudBackendConfig::new(database_url, objects);
+    let mut backend_config = CloudBackendConfig::new(database_url, objects);
+    // Realtime tickets are verified with the subkey of the same SESSION_SIGNING_KEY the API
+    // mints them with; without it ticket hellos are refused.
+    backend_config.ticket_key =
+        config.session_signing_key().and_then(|secret| figcraft_cloud_storage::realtime_tickets::TicketKey::derive(secret.as_bytes()).ok());
     let backend = CloudBackend::connect(&backend_config).map_err(|_| "the relay's storage couldn't be set up")?;
     let watch = backend.revocation_watch();
     let listener = TcpListener::bind(SocketAddr::from(RELAY_ADDR)).map_err(|_| "the relay's port couldn't be opened")?;
