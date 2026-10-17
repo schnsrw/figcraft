@@ -10,6 +10,9 @@ description = "FigCraft's modular cloud application"
 figcraft-cloud-domain = { path = "../../crates/cloud-domain" }
 figcraft-cloud-storage = { path = "../../crates/cloud-storage" }
 figcraft-cloud-relay = { path = "../../crates/cloud-relay" }
+figcraft-cloud-auth = { path = "../../crates/cloud-auth" }
+# S4 auth wiring: HMAC for share-session cookies (already built for rustls and the OIDC client).
+ring = "0.17"
 figcraft-collab-net = { workspace = true }
 sqlx = { workspace = true }
 base64 = { workspace = true }

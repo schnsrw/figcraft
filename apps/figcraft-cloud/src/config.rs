@@ -41,6 +41,12 @@ pub(super) struct CloudConfig {
     environment: Environment,
     public_url: Option<String>,
     oidc_issuer: Option<String>,
+    /// `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URL` (S4 auth wiring): login is enabled only when
+    /// these and `OIDC_ISSUER` are all set.
+    oidc_client_id: Option<String>,
+    oidc_redirect_url: Option<String>,
+    /// `FIGCRAFT_SINGLE_TENANT_ID` (validated UUID): the tenant of a single-tenant deployment.
+    single_tenant_id: Option<figcraft_cloud_domain::TenantId>,
     s3_endpoint: Option<String>,
     s3_region: Option<String>,
     s3_bucket: Option<String>,
@@ -59,6 +65,9 @@ impl Default for CloudConfig {
             environment: Environment::Development,
             public_url: None,
             oidc_issuer: None,
+            oidc_client_id: None,
+            oidc_redirect_url: None,
+            single_tenant_id: None,
             s3_endpoint: None,
             s3_region: None,
             s3_bucket: None,
@@ -150,6 +159,11 @@ impl CloudConfig {
                 "FIGCRAFT_PUBLIC_URL" => config.public_url = Some(value.to_string()),
                 "FIGCRAFT_TRUSTED_PROXY_CIDRS" => config.trusted_proxies = crate::api::client_ip::parse_cidrs(value)?,
                 "OIDC_ISSUER" => config.oidc_issuer = Some(value.to_string()),
+                "OIDC_CLIENT_ID" => config.oidc_client_id = Some(value.to_string()),
+                "OIDC_REDIRECT_URL" => config.oidc_redirect_url = Some(value.to_string()),
+                "FIGCRAFT_SINGLE_TENANT_ID" => {
+                    config.single_tenant_id = Some(value.parse().map_err(|_| "FIGCRAFT_SINGLE_TENANT_ID must be a UUID")?);
+                }
                 "S3_ENDPOINT" => config.s3_endpoint = Some(value.to_string()),
                 "S3_REGION" => config.s3_region = Some(value.to_string()),
                 "S3_BUCKET" => config.s3_bucket = Some(value.to_string()),
@@ -176,6 +190,32 @@ impl CloudConfig {
 
         config.validate_production()?;
         Ok(config)
+    }
+
+    /// `FIGCRAFT_PUBLIC_URL`, when configured.
+    pub(super) fn public_url(&self) -> Option<&str> {
+        self.public_url.as_deref()
+    }
+
+    /// `FIGCRAFT_SINGLE_TENANT_ID`, when configured.
+    pub(super) const fn single_tenant_id(&self) -> Option<figcraft_cloud_domain::TenantId> {
+        self.single_tenant_id
+    }
+
+    /// `(issuer, client_id, client_secret, redirect_url)` when OIDC login is fully configured.
+    /// The client secret is optional (public clients use PKCE alone).
+    pub(super) fn oidc_settings(&self) -> Option<(&str, &str, Option<&str>, &str)> {
+        Some((
+            self.oidc_issuer.as_deref()?,
+            self.oidc_client_id.as_deref()?,
+            self.secrets.get("OIDC_CLIENT_SECRET").map(Secret::as_str),
+            self.oidc_redirect_url.as_deref()?,
+        ))
+    }
+
+    /// `SESSION_SIGNING_KEY`, when configured (keys the share-session cookie MAC).
+    pub(super) fn session_signing_key(&self) -> Option<&str> {
+        self.secrets.get("SESSION_SIGNING_KEY").map(Secret::as_str)
     }
 
     pub(super) fn database_url(&self) -> Option<&str> {
@@ -279,6 +319,7 @@ fn is_known_setting(key: &str) -> bool {
         "S3_FORCE_PATH_STYLE",
         "OIDC_ISSUER",
         "OIDC_CLIENT_ID",
+        "OIDC_REDIRECT_URL",
         "OIDC_CLIENT_SECRET",
         "OIDC_CLIENT_SECRET_FILE",
         "OIDC_AUDIENCE",
@@ -449,6 +490,24 @@ mod tests {
         })();
         let _ = fs::remove_file(path);
         assert_eq!(result, Ok(()));
+    }
+
+    #[test]
+    fn oidc_login_settings_need_issuer_client_and_redirect() {
+        let full = [
+            ("OIDC_ISSUER", "https://id.example.com"),
+            ("OIDC_CLIENT_ID", "figcraft"),
+            ("OIDC_REDIRECT_URL", "https://d.example.com/api/v1/auth/callback"),
+        ];
+        let config = CloudConfig::parse(full).unwrap();
+        assert_eq!(config.oidc_settings(), Some(("https://id.example.com", "figcraft", None, "https://d.example.com/api/v1/auth/callback")));
+        for missing in 0..3 {
+            let partial: Vec<_> = full.iter().enumerate().filter(|(index, _)| *index != missing).map(|(_, setting)| *setting).collect();
+            assert_eq!(CloudConfig::parse(partial).unwrap().oidc_settings(), None);
+        }
+        assert!(CloudConfig::parse([("FIGCRAFT_SINGLE_TENANT_ID", "tenant-one")]).is_err());
+        let tenant = CloudConfig::parse([("FIGCRAFT_SINGLE_TENANT_ID", "00000000-0000-0000-0000-000000000001")]).unwrap();
+        assert_eq!(tenant.single_tenant_id().map(|id| id.to_string()).as_deref(), Some("00000000-0000-0000-0000-000000000001"));
     }
 
     #[test]

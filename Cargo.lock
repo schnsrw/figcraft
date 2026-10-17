@@ -1812,10 +1812,12 @@ version = "0.6.0"
 dependencies = [
  "axum",
  "base64 0.22.1",
+ "figcraft-cloud-auth",
  "figcraft-cloud-domain",
  "figcraft-cloud-relay",
  "figcraft-cloud-storage",
  "figcraft-collab-net",
+ "ring",
  "serde",
  "serde_json",
  "sqlx",

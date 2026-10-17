@@ -5,8 +5,10 @@
 //! 1. [`context::middleware`]: request ID, `traceparent`, in-flight cap, deadline, declared body
 //!    size, error envelope, structured request log (all routes, health included).
 //! 2. [`axum::extract::DefaultBodyLimit`]: the same body cap for streamed bodies read by extractors.
-//! 3. `/api/v1/auth/*` only: [`rate_limit::auth_middleware`] (S4-006).
-//! 4. Handlers, which take [`auth::Authenticated`] to require a caller and return
+//! 3. [`auth_routes::bootstrap_gate`]: while a single-tenant deployment needs bootstrap, every
+//!    `/api/v1` route but the bootstrap flow answers a fixed `403 bootstrap_required` (S4-003).
+//! 4. `/api/v1/auth/*` only: [`rate_limit::auth_middleware`] (S4-006).
+//! 5. Handlers, which take [`auth::Authenticated`] to require a caller and return
 //!    [`error::ApiError`] on failure, following the disclosure policy in [`error`] (S4-016).
 //!
 //! # Adding routes
@@ -19,6 +21,8 @@
 #![allow(dead_code, reason = "S4 modules (OIDC, sessions, service accounts, tenant APIs) build on this foundation")]
 
 pub(crate) mod auth;
+pub(crate) mod auth_routes;
+pub(crate) mod authenticator;
 pub(crate) mod client_ip;
 pub(crate) mod context;
 pub(crate) mod error;
@@ -33,7 +37,10 @@ use figcraft_cloud_domain::DeploymentMode;
 use figcraft_cloud_storage::objects::ObjectStore;
 use sqlx::PgPool;
 
+use figcraft_cloud_auth::oidc::OidcProvider;
+
 use self::auth::{Authenticator, DenyAll};
+use self::authenticator::{CredentialAuthenticator, IdentityConfig};
 use self::client_ip::Cidr;
 use self::error::ApiError;
 use self::rate_limit::{RateLimitConfig, RateLimiter};
@@ -70,13 +77,45 @@ pub(crate) struct AppState {
     config: Arc<ApiConfig>,
     authenticator: Arc<dyn Authenticator>,
     auth_limiter: Arc<RateLimiter>,
+    /// Identity settings (sessions, CSRF origin, share-session key, bootstrap gate); `None`
+    /// leaves `/api/v1/auth` answering `503`.
+    identity: Option<Arc<IdentityConfig>>,
+    /// The OIDC provider, when `OIDC_ISSUER`, `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URL` are set.
+    oidc: Option<Arc<OidcProvider>>,
 }
 
 impl AppState {
     /// State with the deny-all authenticator.
     pub(crate) fn new(pool: PgPool, objects: ObjectStore, config: ApiConfig) -> Self {
         let auth_limiter = Arc::new(RateLimiter::new(config.auth_rate_limit));
-        Self { pool, objects, config: Arc::new(config), authenticator: Arc::new(DenyAll), auth_limiter }
+        Self { pool, objects, config: Arc::new(config), authenticator: Arc::new(DenyAll), auth_limiter, identity: None, oidc: None }
+    }
+
+    /// Install the production identity stack: these settings and the
+    /// [`CredentialAuthenticator`] (session cookie, service-account bearer, share session).
+    pub(crate) fn with_identity(mut self, identity: Arc<IdentityConfig>) -> Self {
+        self.authenticator = Arc::new(CredentialAuthenticator::new(self.pool.clone(), Arc::clone(&identity)));
+        self.identity = Some(identity);
+        self
+    }
+
+    /// Enable OIDC login.
+    pub(crate) fn with_oidc(mut self, provider: Arc<OidcProvider>) -> Self {
+        self.oidc = Some(provider);
+        self
+    }
+
+    pub(crate) fn identity(&self) -> Option<&IdentityConfig> {
+        self.identity.as_deref()
+    }
+
+    pub(crate) fn oidc(&self) -> Option<&OidcProvider> {
+        self.oidc.as_deref()
+    }
+
+    /// The production authenticator over this state, when identity is configured.
+    pub(crate) fn credential_authenticator(&self) -> Option<CredentialAuthenticator> {
+        self.identity.as_ref().map(|identity| CredentialAuthenticator::new(self.pool.clone(), Arc::clone(identity)))
     }
 
     /// Replace the authenticator (sessions, service accounts, share links).
@@ -109,7 +148,7 @@ impl AppState {
 /// The `/api/v1` router (full paths) with every module's routes.
 pub(crate) fn api_router(state: AppState) -> Router {
     // S4 modules merge their routers here, e.g. `.merge(oidc::routes())`.
-    let auth: Router<AppState> = Router::new();
+    let auth: Router<AppState> = Router::new().merge(auth_routes::routes());
     let resources: Router<AppState> = Router::new();
     api_router_with(state, auth, resources)
 }
@@ -119,7 +158,11 @@ pub(crate) fn api_router(state: AppState) -> Router {
 pub(crate) fn api_router_with(state: AppState, auth: Router<AppState>, resources: Router<AppState>) -> Router {
     let auth = auth.fallback(not_found).layer(from_fn_with_state(state.clone(), rate_limit::auth_middleware));
     let api = resources.nest("/auth", auth).fallback(not_found);
-    Router::new().nest("/api/v1", api).layer(DefaultBodyLimit::max(state.config().max_body_bytes)).with_state(state)
+    Router::new()
+        .nest("/api/v1", api)
+        .layer(from_fn_with_state(state.clone(), auth_routes::bootstrap_gate))
+        .layer(DefaultBodyLimit::max(state.config().max_body_bytes))
+        .with_state(state)
 }
 
 /// `/api/v1` while dependencies are not ready: every route answers `503`.
