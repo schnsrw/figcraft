@@ -17,22 +17,37 @@
 //! - **Snapshots.** When everyone has left a document, and when the hub stops, its state is stored
 //!   as a verified snapshot (best effort: the event log already holds every confirmed batch).
 //!
+//! - **Revocation (S4-017).** Every link a hello was admitted with is watched
+//!   ([`RevocationWatch`]) while its document is open. A [`RevocationSweeper`] re-checks the
+//!   watched links every interval ([`dead_share_links`]: revoked, expired, deleted, or on a
+//!   document or in a tenant that is no longer active) and asks the hub, over a managing connection with a key
+//!   only this process knows, to revoke each dead one: whoever joined with it is disconnected
+//!   (told [`STOPPED`](figcraft_collab_net::hub::STOPPED)) and a new hello with it is refused at
+//!   [`Backend::admit`]. The backend re-checks the link before acting, so the key can't disconnect
+//!   anyone whose link still works. A revoked link, archived document or suspended tenant therefore closes its
+//!   sessions within one interval plus one database round trip.
+//!
 //! The hub calls the backend on its own thread and the backend is synchronous, so the backend owns
 //! a small tokio runtime and blocks on each storage call, every one bounded by a timeout.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::net::SocketAddr;
+use std::sync::mpsc::{RecvTimeoutError, Sender};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::thread::JoinHandle;
 use std::time::Duration;
 
-use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId};
+use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::document_snapshots::store_snapshot;
 use figcraft_cloud_storage::events::{MAX_APPEND_BATCHES, append_events};
 use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
-use figcraft_cloud_storage::share_links::{ShareRole, resolve_share_link};
-use figcraft_collab::message::Access;
+use figcraft_cloud_storage::share_links::{MAX_CHECKED_LINKS, ShareRole, dead_share_links, resolve_share_link};
+use figcraft_collab::message::{Access, Admin, AdminReply};
 use figcraft_collab::{Accepted, Document, Journal, Limits, Server};
-use figcraft_collab_net::hub::{Admission, Backend, Closing};
+use figcraft_collab_net::hub::{Admission, Backend, Closing, Handled, OpenFile};
+use figcraft_collab_net::{Endpoint, NetLimits};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 
@@ -49,6 +64,17 @@ pub const PRODUCER: &str = concat!("figcraft-cloud-relay ", env!("CARGO_PKG_VERS
 pub const BASE_NAME: &str = "Untitled";
 /// Admissions remembered for documents that aren't open yet.
 const MAX_ADMITTED: usize = 4096;
+/// Links watched for revocation in one document; a hello with one more is refused as
+/// [`UNAVAILABLE`] rather than admitted unwatched.
+pub const MAX_WATCHED_LINKS_PER_FILE: usize = 256;
+/// How often a [`RevocationSweeper`] re-checks the watched links by default.
+pub const REVOCATION_INTERVAL: Duration = Duration::from_secs(5);
+/// The shortest sweep interval accepted.
+const MIN_REVOCATION_INTERVAL: Duration = Duration::from_millis(50);
+/// Revocations sent to the hub on one managing connection.
+const REVOKES_PER_REQUEST: usize = 64;
+/// What a managing connection without this process's sweep key is told.
+const NOT_MANAGED: &str = "this relay is managed by FigCraft Cloud: there is nothing to manage here";
 
 /// Settings for a [`CloudBackend`].
 #[derive(Clone, Debug)]
@@ -102,6 +128,99 @@ pub fn base_document() -> Document {
     Document::new(BASE_NAME)
 }
 
+/// Each watched file's tenant and the links admitted to it.
+type WatchedFiles = HashMap<String, (TenantId, HashSet<Uuid>)>;
+
+/// The links admitted to each open document, shared between a [`CloudBackend`] and its
+/// [`RevocationSweeper`], and the key the sweeper manages the hub with (never printed).
+#[derive(Clone)]
+pub struct RevocationWatch {
+    key: Arc<String>,
+    files: Arc<Mutex<WatchedFiles>>,
+}
+
+impl std::fmt::Debug for RevocationWatch {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("RevocationWatch").field("key", &"[REDACTED]").field("links", &self.len()).finish()
+    }
+}
+
+impl RevocationWatch {
+    fn new() -> Self {
+        // Two v4 UUIDs: 244 bits from the operating system's generator.
+        let key = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        Self { key: Arc::new(key), files: Arc::new(Mutex::new(HashMap::new())) }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, WatchedFiles> {
+        self.files.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Links watched now.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.lock().values().map(|(_, links)| links.len()).sum()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Watch `link` for `file`; false when the file already has
+    /// [`MAX_WATCHED_LINKS_PER_FILE`] other links watched.
+    fn watch(&self, file: &str, tenant: TenantId, link: Uuid) -> bool {
+        let mut files = self.lock();
+        let (owner, links) = files.entry(file.to_string()).or_insert_with(|| (tenant, HashSet::new()));
+        if *owner != tenant {
+            // A file id names one document in one tenant; start over rather than mix tenants.
+            *owner = tenant;
+            links.clear();
+        }
+        if links.contains(&link) {
+            return true;
+        }
+        if links.len() >= MAX_WATCHED_LINKS_PER_FILE {
+            return false;
+        }
+        links.insert(link);
+        true
+    }
+
+    fn forget(&self, file: &str) {
+        self.lock().remove(file);
+    }
+
+    fn unwatch(&self, file: &str, link: Uuid) {
+        let mut files = self.lock();
+        if let Some((_, links)) = files.get_mut(file) {
+            links.remove(&link);
+            if links.is_empty() {
+                files.remove(file);
+            }
+        }
+    }
+
+    fn retain(&self, keep: impl Fn(&str) -> bool) {
+        self.lock().retain(|file, _| keep(file));
+    }
+
+    fn tenant(&self, file: &str) -> Option<TenantId> {
+        self.lock().get(file).map(|(tenant, _)| *tenant)
+    }
+
+    /// Every watched `(file, tenant, link)`.
+    fn links(&self) -> Vec<(String, TenantId, Uuid)> {
+        self.lock().iter().flat_map(|(file, (tenant, links))| links.iter().map(|link| (file.clone(), *tenant, *link))).collect()
+    }
+
+    /// Whether `key` is the sweep key (compared in constant time).
+    fn opens(&self, key: &str) -> bool {
+        let (a, b) = (self.key.as_bytes(), key.as_bytes());
+        a.len() == b.len() && a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+    }
+}
+
 /// Who may open a document, from the link a hello was admitted with.
 #[derive(Clone, Copy, Debug)]
 struct Admitted {
@@ -134,6 +253,7 @@ pub struct CloudBackend {
     open: HashMap<String, OpenDoc>,
     /// Files whose changes couldn't be kept outside a flush; reported by the next flush.
     failed: Vec<String>,
+    watch: RevocationWatch,
 }
 
 impl CloudBackend {
@@ -165,7 +285,15 @@ impl CloudBackend {
             admitted: HashMap::new(),
             open: HashMap::new(),
             failed: Vec::new(),
+            watch: RevocationWatch::new(),
         })
+    }
+
+    /// The links this backend admitted, for a [`RevocationSweeper`] (start it once the hub
+    /// serves this backend).
+    #[must_use]
+    pub fn revocation_watch(&self) -> RevocationWatch {
+        self.watch.clone()
     }
 
     /// Documents open now.
@@ -286,6 +414,11 @@ impl Backend for CloudBackend {
         if self.admitted.len() >= MAX_ADMITTED && !self.admitted.contains_key(file) {
             let open = &self.open;
             self.admitted.retain(|file, _| open.contains_key(file));
+            self.watch.retain(|file| open.contains_key(file));
+        }
+        if !self.watch.watch(file, link.tenant_id, link.id) {
+            log::warn!("document {file}: too many share links in use to watch another; hello refused");
+            return Err(UNAVAILABLE.into());
         }
         self.admitted.insert(file.to_string(), Admitted { tenant: link.tenant_id, actor: link.created_by });
         let access = match link.role {
@@ -354,6 +487,7 @@ impl Backend for CloudBackend {
         }
         self.failed.retain(|f| f != file);
         self.admitted.remove(file);
+        self.watch.forget(file);
         true
     }
 
@@ -367,9 +501,131 @@ impl Backend for CloudBackend {
             }
         }
         self.failed.clear();
+        self.watch.retain(|_| false);
+    }
+
+    fn manage(&mut self, key: &str) -> Result<(), String> {
+        if self.watch.opens(key) { Ok(()) } else { Err(NOT_MANAGED.into()) }
+    }
+
+    /// Only revocations, and only of links that really no longer work (checked again here).
+    fn admin(&mut self, req: Admin, _open: &dyn Fn(&str) -> Option<OpenFile>) -> Handled {
+        let failed = |reason: &str| Handled::from(AdminReply::Failed { reason: reason.into() });
+        let Admin::Revoke { file, link } = req else {
+            return failed("nothing to manage here");
+        };
+        let (Ok(id), Some(tenant)) = (link.parse::<Uuid>(), self.watch.tenant(&file)) else {
+            return failed("no such link in use");
+        };
+        let pool = &self.pool;
+        match self.block(dead_share_links(pool, &[(tenant, id)])) {
+            Some(Ok(dead)) if !dead.is_empty() => {
+                self.watch.unwatch(&file, id);
+                log::info!("document {file}: share link {id} no longer works; disconnecting whoever joined with it");
+                Handled { reply: AdminReply::Done, revoked: Some((file, link)), removed: None, blocked: None }
+            }
+            Some(Ok(_)) => failed("that link still works"),
+            Some(Err(_)) | None => failed("the link couldn't be checked"),
+        }
     }
 
     fn closing(&self) -> Closing {
         Closing::Restarting
+    }
+}
+
+/// Re-checks a backend's watched links every interval and has the hub disconnect whoever joined
+/// with one that no longer works (see the module docs). Stops when dropped.
+pub struct RevocationSweeper {
+    stop: Option<Sender<()>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl std::fmt::Debug for RevocationSweeper {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.debug_struct("RevocationSweeper").field("running", &self.thread.is_some()).finish()
+    }
+}
+
+impl RevocationSweeper {
+    /// Sweep `watch` (from [`CloudBackend::revocation_watch`]) every `interval` (at least 50 ms),
+    /// with a database connection of its own, revoking through the hub listening at `hub` (an
+    /// unspecified address means this host's loopback).
+    pub fn start(config: &CloudBackendConfig, watch: RevocationWatch, hub: SocketAddr, interval: Duration) -> Result<Self, CloudBackendError> {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().map_err(|_| CloudBackendError::Runtime)?;
+        let timeout = config.timeout;
+        let pool = {
+            let _entered = runtime.enter();
+            PgPoolOptions::new()
+                .max_connections(1)
+                .acquire_timeout(timeout)
+                .connect_lazy(&config.database_url)
+                .map_err(|_| CloudBackendError::Database)?
+        };
+        let mut hub = hub;
+        if hub.ip().is_unspecified() {
+            hub.set_ip(if hub.is_ipv4() { std::net::Ipv4Addr::LOCALHOST.into() } else { std::net::Ipv6Addr::LOCALHOST.into() });
+        }
+        let endpoint = Endpoint { host: hub.to_string(), path: "/".into(), secure: false };
+        let interval = interval.max(MIN_REVOCATION_INTERVAL);
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::Builder::new()
+            .name("cloud-relay-revocation".into())
+            .spawn(move || {
+                // Stops on a message or when the sweeper (the sender) is dropped.
+                while let Err(RecvTimeoutError::Timeout) = stopped.recv_timeout(interval) {
+                    sweep(&runtime, &pool, &watch, &endpoint, timeout);
+                }
+            })
+            .map_err(|_| CloudBackendError::Runtime)?;
+        Ok(Self { stop: Some(stop), thread: Some(thread) })
+    }
+}
+
+impl Drop for RevocationSweeper {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// One sweep: find the watched links that no longer work and revoke them through the hub.
+fn sweep(runtime: &tokio::runtime::Runtime, pool: &PgPool, watch: &RevocationWatch, hub: &Endpoint, timeout: Duration) {
+    let watched = watch.links();
+    let mut revokes = Vec::new();
+    for chunk in watched.chunks(MAX_CHECKED_LINKS) {
+        let pairs: Vec<(TenantId, Uuid)> = chunk.iter().map(|(_, tenant, link)| (*tenant, *link)).collect();
+        let dead = match runtime.block_on(async { tokio::time::timeout(timeout, dead_share_links(pool, &pairs)).await }) {
+            Ok(Ok(dead)) => dead,
+            Ok(Err(error)) => {
+                log::warn!("revocation sweep: share links couldn't be checked ({error}); retrying next sweep");
+                return;
+            }
+            Err(_) => {
+                log::warn!("revocation sweep: checking share links timed out; retrying next sweep");
+                return;
+            }
+        };
+        let dead: HashSet<(TenantId, Uuid)> = dead.into_iter().collect();
+        revokes.extend(
+            chunk
+                .iter()
+                .filter(|(_, tenant, link)| dead.contains(&(*tenant, *link)))
+                .map(|(file, _, link)| Admin::Revoke { file: file.clone(), link: link.to_string() }),
+        );
+    }
+    let limits = NetLimits::default();
+    for requests in revokes.chunks(REVOKES_PER_REQUEST) {
+        match figcraft_collab_net::manage::request(hub, &watch.key, requests.to_vec(), &limits, timeout) {
+            Ok(replies) => {
+                let done = replies.iter().filter(|reply| matches!(reply, AdminReply::Done)).count();
+                log::info!("revocation sweep: {done} of {} dead share links disconnected", requests.len());
+            }
+            Err(_) => log::warn!("revocation sweep: the hub couldn't be reached; retrying next sweep"),
+        }
     }
 }
