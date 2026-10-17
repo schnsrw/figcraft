@@ -65,6 +65,10 @@ pub(crate) fn start(config: &CloudConfig) -> Result<Relay, &'static str> {
     // Room leases (one replica serves each room, others refuse it) are on when this replica says
     // where it can be reached; a single relay needs none.
     backend_config.leases = config.relay_advertise_url().map(figcraft_cloud_relay::collab_backend::LeaseConfig::new);
+    // Empty rooms stay warm for a while, and busy rooms snapshot on a schedule (S5-011).
+    backend_config.idle_close_after = config.room_idle();
+    backend_config.snapshot_every = config.snapshot_interval();
+    backend_config.snapshot_after_events = config.snapshot_after_events();
     let backend = CloudBackend::connect(&backend_config).map_err(|_| "the relay's storage couldn't be set up")?;
     let watch = backend.revocation_watch();
     let listener = TcpListener::bind(SocketAddr::from(RELAY_ADDR)).map_err(|_| "the relay's port couldn't be opened")?;

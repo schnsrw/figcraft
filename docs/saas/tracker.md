@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (18/25) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (19/25) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 18 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 19 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2252,7 +2252,22 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   connection closes within the bound, and the old relay's cleanup leaves the new owner's lease row
   alone (`a_room_whose_lease_was_taken_away_closes_and_confirms_nothing_more`). Between the loss
   and its detection the fence is what rejects writes.
-- [ ] **S5-011** Implement idle room close and snapshot scheduling.
+- [x] **S5-011** Implement idle room close and snapshot scheduling.
+  Evidence (2026-10-18): the hub gained a housekeeping tick (`Backend::tick_every`/`tick`, run
+  right after a flush so each server holds exactly what was committed). `CloudBackend` uses it
+  for two policies. Idle close: an emptied room stays open and leased for
+  `FIGCRAFT_ROOM_IDLE_SECONDS` (default 30, 0 closes at once) so a client that reconnects finds it
+  warm instead of paying a restore (4.2 s at 20,000 frames) and a new fence; after the period the
+  room commits, snapshots, releases its lease and closes. Snapshot schedule: a room with changes
+  is snapshotted after `FIGCRAFT_SNAPSHOT_AFTER_EVENTS` accepted batches (default 1000) or
+  `FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS` (default 300), whichever comes first, so a crash replays a
+  bounded number of events; the state is captured on the hub thread (9 to 26 ms at 20,000
+  frames) and uploaded on the runtime, never with uncommitted batches. Previously snapshots were
+  stored only when a room closed. Tests (`room_housekeeping`, live PostgreSQL/S3): a returning
+  client finds the warm room with the same fence and its committed edit, the room then closes
+  with a stored snapshot and a released lease, and the next client is fenced higher; a busy room
+  is snapshotted by batch count twice while its client stays connected; a room with one change
+  is snapshotted by time and not again; hub tick tests; config bounds.
 - [x] **S5-012** Implement graceful drain and client reconnect signal for rolling releases.
   Evidence (2026-10-18): the cloud process previously had no signal handling (`docker stop` killed
   it, skipping the hub's graceful stop). It now handles SIGTERM and SIGINT: `/readyz` turns 503
@@ -2680,3 +2695,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S5-003, 004, 010, 020, 021: the relay takes, renews, loses and releases PostgreSQL room leases (opt-in with `FIGCRAFT_RELAY_ADVERTISE_URL`); two live replicas on one database each own their rooms and refuse the other's, a simultaneous hello race leaves one owner, and a taken-over room closes without confirming more. Owner routing (S5-006) and drain (S5-012) remain. S5 reaches 16/25. |
 | 2026-10-18 | S5-006: a replica passes a client on to the room's owner (relay-to-relay proxy over the lease's endpoint) instead of refusing it; no client, protocol or gateway change. Revocation, two-replica and race tests pass live. S5 reaches 17/25. |
 | 2026-10-18 | S5-012: SIGTERM/SIGINT drain for rolling releases (not ready, new relay connections turned away with the restarting code, grace period, then commit, snapshot, lease release and a restarting close for connected clients); verified against the real process. S5 reaches 18/25. |
+| 2026-10-18 | S5-011: emptied rooms stay warm for a configurable period before closing (saved, lease released); busy rooms snapshot by batch count or time instead of only on close. Hub housekeeping tick added (patch FP-008). S5 reaches 19/25. |

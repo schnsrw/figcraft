@@ -165,8 +165,9 @@ the continuation point, a blocker or a major decision changes.
    S5-006 is done: a replica that does not own a room passes the client on to the owner (proxy over
    the lease's endpoint; `crates/collab-net/src/proxy.rs`, `OpenFailure::Elsewhere`); no gateway or
    client change. S5-012 is done: SIGTERM/SIGINT drain (`FIGCRAFT_DRAIN_SECONDS`, `Hosting::drain`,
-   `apps/figcraft-cloud/tests/drain.rs` runs the real binary). Next: S5-008 client reconnect state
-   across an owner failure, S5-011 idle close and snapshot schedule, S5-017 quotas, S5-018 large
+   `apps/figcraft-cloud/tests/drain.rs` runs the real binary). S5-011 is done (hub tick; warm idle
+   rooms and scheduled snapshots; `room_housekeeping` tests). Next: S5-008 client reconnect state
+   across an owner failure, S5-017 quotas, S5-018 large
    assets, S5-022/023 kill tests (the drain test is the template for starting the real binary),
    S5-001 audit (realtime tickets), then the gate. S6 host registration (S6-001..005) was started
    in parallel by a second agent in its own worktree: avoid its files (new migrations and modules

@@ -141,6 +141,20 @@ pub trait Backend: Send + 'static {
         Vec::new()
     }
 
+    /// How often the hub calls [`tick`](Self::tick): `None`, the default, never.
+    fn tick_every(&self) -> Option<Duration> {
+        None
+    }
+
+    /// Housekeeping every [`tick_every`](Self::tick_every), once everything handled so far is
+    /// durable (a flush just ran, so each server holds exactly what was committed): every open
+    /// file's server and how many clients are in it (scheduled snapshots, closing idle files).
+    /// The files to close: those still empty are offered to [`idle`](Self::idle) as if their last
+    /// client had just left.
+    fn tick(&mut self, _open: Vec<(&str, &mut Server, usize)>) -> Vec<String> {
+        Vec::new()
+    }
+
     /// Called once, before the hub runs: `wake` makes the hub call [`opened`](Self::opened).
     /// Cheap, any thread, never blocks.
     fn attach(&mut self, _wake: Wake) {}
@@ -1272,8 +1286,13 @@ const MAX_PROXIED: usize = 512;
 
 impl<B: Backend> Hub<B> {
     fn run(mut self, rx: &Receiver<HubIn>) {
+        let mut last_tick = Instant::now();
         'run: loop {
-            let due = earliest(self.rooms.values().flat_map(|r| r.throttles.values().map(Throttle::due)));
+            let mut due = earliest(self.rooms.values().flat_map(|r| r.throttles.values().map(Throttle::due)));
+            if let Some(every) = self.backend.tick_every() {
+                let tick = last_tick + every;
+                due = Some(due.map_or(tick, |d| d.min(tick)));
+            }
             let first = match due {
                 Some(d) => match rx.recv_timeout(d.saturating_duration_since(Instant::now())) {
                     Ok(m) => Some(m),
@@ -1297,6 +1316,10 @@ impl<B: Backend> Hub<B> {
             }
             self.flush_due(Instant::now());
             self.send_out();
+            if self.backend.tick_every().is_some_and(|every| last_tick.elapsed() >= every) {
+                last_tick = Instant::now();
+                self.tick();
+            }
         }
         self.send_out();
         self.backend.stop(self.rooms.iter_mut().map(|(f, r)| (f.as_str(), &mut r.server)).collect());
@@ -1862,6 +1885,15 @@ impl<B: Backend> Hub<B> {
         }
     }
 
+    /// The backend's housekeeping (see [`Backend::tick`]), then the files it wants closed.
+    fn tick(&mut self) {
+        let open: Vec<(&str, &mut Server, usize)> =
+            self.rooms.iter_mut().map(|(file, room)| (file.as_str(), &mut room.server, room.ids.len())).collect();
+        for file in self.backend.tick(open) {
+            self.close_if_empty(&file);
+        }
+    }
+
     /// Nobody is in `file`: the backend saves it and may close it.
     fn close_if_empty(&mut self, file: &str) {
         let Some(room) = self.rooms.get_mut(file).filter(|r| r.empty()) else { return };
@@ -1989,3 +2021,7 @@ mod proxy_tests;
 #[cfg(test)]
 #[path = "drain_tests.rs"]
 mod drain_tests;
+
+#[cfg(test)]
+#[path = "tick_tests.rs"]
+mod tick_tests;

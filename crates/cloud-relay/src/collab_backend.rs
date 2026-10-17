@@ -76,6 +76,10 @@ use crate::DurableRoom;
 pub const REFUSED: &str = "this link isn't valid (it may have been revoked or have expired)";
 /// What a hello is told when the document can't be served right now.
 pub const UNAVAILABLE: &str = "this document can't be opened right now: try again in a moment";
+/// Default time between snapshots of a room that keeps changing.
+pub const DEFAULT_SNAPSHOT_EVERY: Duration = Duration::from_secs(300);
+/// Default number of accepted batches after which a room is snapshotted.
+pub const DEFAULT_SNAPSHOT_AFTER_EVENTS: u64 = 1000;
 /// What a hello is told when another relay replica owns the document's room right now.
 pub const OWNED_ELSEWHERE: &str = "this document is open on another server: try again in a moment";
 /// Default lifetime of a room lease. A relay that dies leaves its rooms unavailable for at most
@@ -125,6 +129,17 @@ pub struct CloudBackendConfig {
     pub ticket_key: Option<TicketKey>,
     /// Room leases (S5-003/004): `None` serves every room without one, as a single relay does.
     pub leases: Option<LeaseConfig>,
+    /// How long a room stays open (leased, in memory) after its last client left before it is
+    /// saved and closed: a client that comes back in that time finds it warm instead of
+    /// restoring it. Zero closes it at once.
+    pub idle_close_after: Duration,
+    /// A room with changes since its last snapshot is snapshotted at least this often.
+    pub snapshot_every: Duration,
+    /// ... and after this many accepted batches since it, whichever comes first, so a crash
+    /// replays a bounded number of events.
+    pub snapshot_after_events: u64,
+    /// How often the hub calls the backend's housekeeping (scheduled snapshots, idle closes).
+    pub housekeeping_every: Duration,
 }
 
 /// Room leases for a relay replica.
@@ -162,6 +177,10 @@ impl CloudBackendConfig {
             max_open: 1024,
             ticket_key: None,
             leases: None,
+            idle_close_after: Duration::ZERO,
+            snapshot_every: DEFAULT_SNAPSHOT_EVERY,
+            snapshot_after_events: DEFAULT_SNAPSHOT_AFTER_EVENTS,
+            housekeeping_every: Duration::from_secs(1),
         }
     }
 }
@@ -364,6 +383,10 @@ struct OpenDoc {
     snapshot_seq: Option<u64>,
     /// Whether this relay holds the room's lease (under `fencing_token`).
     leased: bool,
+    /// A scheduled snapshot is being uploaded.
+    snapshotting: bool,
+    /// When the last snapshot was started (or the room opened), for the schedule.
+    last_snapshot: Instant,
 }
 
 /// What the lease renewer keeps for a held lease.
@@ -425,6 +448,14 @@ pub struct CloudBackend {
     owner: Uuid,
     lease: Option<LeaseConfig>,
     leases: Arc<Leases>,
+    idle_close_after: Duration,
+    snapshot_every: Duration,
+    snapshot_after_events: u64,
+    housekeeping_every: Duration,
+    /// When each file's last client left, while it is kept warm.
+    idle_since: HashMap<String, Instant>,
+    /// Scheduled snapshot uploads that finished: (file, sequence, stored).
+    snapshots_done: Arc<Mutex<Vec<(String, u64, bool)>>>,
 }
 
 type Finished = Arc<Mutex<Vec<(String, Result<(Server, OpenDoc), OpenFailure>)>>>;
@@ -473,6 +504,12 @@ impl CloudBackend {
             owner,
             lease: config.leases.clone(),
             leases,
+            idle_close_after: config.idle_close_after,
+            snapshot_every: config.snapshot_every,
+            snapshot_after_events: config.snapshot_after_events.max(1),
+            housekeeping_every: config.housekeeping_every.max(Duration::from_millis(10)),
+            idle_since: HashMap::new(),
+            snapshots_done: Arc::default(),
         })
     }
 
@@ -794,6 +831,8 @@ async fn recover_document(
         pending: Vec::new(),
         snapshot_seq,
         leased: lease.is_some(),
+        snapshotting: false,
+        last_snapshot: Instant::now(),
     };
     if snapshot_seq.is_none() && server.seq() == 0 {
         // A new document: its first state becomes durable before anyone edits it.
@@ -969,6 +1008,7 @@ impl Backend for CloudBackend {
     }
 
     fn joined(&mut self, file: &str, id: u32) {
+        self.idle_since.remove(file);
         if let (Some(admitted), Some(doc)) = (self.admitted.get(file), self.open.get_mut(file)) {
             doc.actors.insert(id, admitted.actor);
         }
@@ -1038,11 +1078,27 @@ impl Backend for CloudBackend {
                 failed.push(file);
             }
         }
+        for file in &failed {
+            self.idle_since.remove(file);
+        }
         failed
     }
 
     fn idle(&mut self, file: &str, server: &mut Server) -> bool {
         self.changed(file, server);
+        // Kept warm for `idle_close_after` after the last client left: this call is the leave
+        // (note the time, stay open); a later one from the housekeeping tick finds it over.
+        if !self.idle_close_after.is_zero() {
+            match self.idle_since.get(file) {
+                Some(since) if since.elapsed() >= self.idle_close_after => {}
+                Some(_) => return false,
+                None => {
+                    self.idle_since.insert(file.to_string(), Instant::now());
+                    return false;
+                }
+            }
+        }
+        self.idle_since.remove(file);
         if let Some(mut doc) = self.open.remove(file) {
             // Batches of this burst not flushed yet: everyone has left, so nobody was told of
             // them; keep them if possible, and snapshot only state that is committed.
@@ -1055,6 +1111,61 @@ impl Backend for CloudBackend {
         self.admitted.remove(file);
         self.watch.forget(file);
         true
+    }
+
+    fn tick_every(&self) -> Option<Duration> {
+        Some(self.housekeeping_every)
+    }
+
+    /// Scheduled snapshots of rooms that keep changing, and the close of rooms that were empty
+    /// for `idle_close_after`. Runs right after a flush, so each server holds exactly what was
+    /// committed: its state can be snapshotted without a batch that might still fail.
+    fn tick(&mut self, open: Vec<(&str, &mut Server, usize)>) -> Vec<String> {
+        let finished = std::mem::take(&mut *self.snapshots_done.lock().unwrap_or_else(PoisonError::into_inner));
+        for (file, seq, stored) in finished {
+            if let Some(doc) = self.open.get_mut(&file) {
+                doc.snapshotting = false;
+                if stored {
+                    doc.snapshot_seq = Some(doc.snapshot_seq.map_or(seq, |held| held.max(seq)));
+                }
+            }
+        }
+        let mut close = Vec::new();
+        for (file, server, clients) in open {
+            if clients == 0 {
+                if self.idle_since.get(file).is_some_and(|since| since.elapsed() >= self.idle_close_after) {
+                    close.push(file.to_string());
+                }
+                continue;
+            }
+            let Some(doc) = self.open.get_mut(file) else { continue };
+            if doc.snapshotting || !doc.pending.is_empty() || self.failed.iter().any(|failed| failed == file) {
+                continue;
+            }
+            let held = doc.snapshot_seq.unwrap_or(0);
+            let behind = server.seq().saturating_sub(held);
+            if behind == 0 || (behind < self.snapshot_after_events && doc.last_snapshot.elapsed() < self.snapshot_every) {
+                continue;
+            }
+            let Ok(state) = server.state() else {
+                log::error!("document {file}: its state couldn't be captured for a scheduled snapshot");
+                continue;
+            };
+            doc.snapshotting = true;
+            doc.last_snapshot = Instant::now();
+            let (pool, store, timeout, tenant, document) = (self.pool.clone(), self.store.clone(), self.timeout, doc.tenant, doc.document);
+            let (done, name, seq) = (self.snapshots_done.clone(), file.to_string(), server.seq());
+            self.runtime.spawn(async move {
+                let stored = matches!(tokio::time::timeout(timeout, put_snapshot(&pool, &store, tenant, document, &state)).await, Ok(Ok(())));
+                if !stored {
+                    log::warn!("document {name}: the scheduled snapshot at seq {seq} couldn't be stored (its events still hold it)");
+                }
+                if let Ok(mut finished) = done.lock() {
+                    finished.push((name, seq, stored));
+                }
+            });
+        }
+        close
     }
 
     fn stop(&mut self, open: Vec<(&str, &mut Server)>) {

@@ -44,6 +44,9 @@ pub(super) struct CloudConfig {
     relay_advertise_url: Option<String>,
     /// `FIGCRAFT_DRAIN_SECONDS`: how long a stopping process stays up, not ready, before it stops.
     drain_seconds: u64,
+    room_idle_seconds: u64,
+    snapshot_interval_seconds: u64,
+    snapshot_after_events: u64,
     oidc_issuer: Option<String>,
     /// `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URL` (S4 auth wiring): login is enabled only when
     /// these and `OIDC_ISSUER` are all set.
@@ -70,6 +73,9 @@ impl Default for CloudConfig {
             public_url: None,
             relay_advertise_url: None,
             drain_seconds: DEFAULT_DRAIN_SECONDS,
+            room_idle_seconds: DEFAULT_ROOM_IDLE_SECONDS,
+            snapshot_interval_seconds: DEFAULT_SNAPSHOT_INTERVAL_SECONDS,
+            snapshot_after_events: DEFAULT_SNAPSHOT_AFTER_EVENTS,
             oidc_issuer: None,
             oidc_client_id: None,
             oidc_redirect_url: None,
@@ -163,6 +169,17 @@ impl CloudConfig {
                     };
                 }
                 "FIGCRAFT_PUBLIC_URL" => config.public_url = Some(value.to_string()),
+                "FIGCRAFT_ROOM_IDLE_SECONDS" => {
+                    config.room_idle_seconds = bounded(value, 0, 3600, "FIGCRAFT_ROOM_IDLE_SECONDS must be a whole number of seconds from 0 to 3600")?
+                }
+                "FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS" => {
+                    config.snapshot_interval_seconds =
+                        bounded(value, 10, 86_400, "FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS must be a whole number of seconds from 10 to 86400")?;
+                }
+                "FIGCRAFT_SNAPSHOT_AFTER_EVENTS" => {
+                    config.snapshot_after_events =
+                        bounded(value, 1, 1_000_000, "FIGCRAFT_SNAPSHOT_AFTER_EVENTS must be a whole number from 1 to 1000000")?;
+                }
                 "FIGCRAFT_DRAIN_SECONDS" => {
                     config.drain_seconds = match value.parse::<u64>() {
                         Ok(seconds) if seconds <= MAX_DRAIN_SECONDS => seconds,
@@ -213,6 +230,21 @@ impl CloudConfig {
     /// `FIGCRAFT_PUBLIC_URL`, when configured.
     pub(super) fn public_url(&self) -> Option<&str> {
         self.public_url.as_deref()
+    }
+
+    /// How long an emptied room stays open before it is saved and closed.
+    pub(super) fn room_idle(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.room_idle_seconds)
+    }
+
+    /// The most a changing room goes without a snapshot.
+    pub(super) fn snapshot_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.snapshot_interval_seconds)
+    }
+
+    /// Accepted batches after which a room is snapshotted.
+    pub(super) fn snapshot_after_events(&self) -> u64 {
+        self.snapshot_after_events
     }
 
     /// How long a stopping process drains: not ready, turning new connections away, before it stops.
@@ -323,6 +355,18 @@ fn secret_setting(key: &str) -> Option<(&'static str, bool)> {
 /// operator's to set; this is enough for a gateway that checks every second or two.
 const DEFAULT_DRAIN_SECONDS: u64 = 5;
 const MAX_DRAIN_SECONDS: u64 = 120;
+/// An emptied room stays open this long, so a reconnecting client finds it warm.
+const DEFAULT_ROOM_IDLE_SECONDS: u64 = 30;
+const DEFAULT_SNAPSHOT_INTERVAL_SECONDS: u64 = 300;
+const DEFAULT_SNAPSHOT_AFTER_EVENTS: u64 = 1000;
+
+/// `value` as a whole number within `min..=max`, or `error`.
+fn bounded(value: &str, min: u64, max: u64, error: &'static str) -> Result<u64, &'static str> {
+    match value.parse::<u64>() {
+        Ok(n) if (min..=max).contains(&n) => Ok(n),
+        _ => Err(error),
+    }
+}
 
 /// A room lease's endpoint: a `ws://` or `wss://` URL with a host, no credentials, query or fragment.
 fn is_relay_advertise_url(value: &str) -> bool {
@@ -345,6 +389,9 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_PUBLIC_URL",
         "FIGCRAFT_RELAY_ADVERTISE_URL",
         "FIGCRAFT_DRAIN_SECONDS",
+        "FIGCRAFT_ROOM_IDLE_SECONDS",
+        "FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS",
+        "FIGCRAFT_SNAPSHOT_AFTER_EVENTS",
         "FIGCRAFT_SINGLE_TENANT_ID",
         "FIGCRAFT_TRUSTED_PROXY_CIDRS",
         "DATABASE_URL",
@@ -404,6 +451,27 @@ mod tests {
             "ws://re lay/x",
         ] {
             assert!(ok(bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn room_idle_and_snapshot_schedule_have_defaults_and_bounds() {
+        use std::time::Duration;
+        let c = CloudConfig::default();
+        assert_eq!((c.room_idle(), c.snapshot_interval(), c.snapshot_after_events()), (Duration::from_secs(30), Duration::from_secs(300), 1000));
+        let parse = |k: &str, v: &str| CloudConfig::parse([(k, v)]);
+        assert_eq!(parse("FIGCRAFT_ROOM_IDLE_SECONDS", "0").map(|c| c.room_idle()), Ok(Duration::ZERO));
+        assert_eq!(parse("FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS", "60").map(|c| c.snapshot_interval()), Ok(Duration::from_secs(60)));
+        assert_eq!(parse("FIGCRAFT_SNAPSHOT_AFTER_EVENTS", "50").map(|c| c.snapshot_after_events()), Ok(50));
+        for (key, bad) in [
+            ("FIGCRAFT_ROOM_IDLE_SECONDS", "3601"),
+            ("FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS", "9"),
+            ("FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS", "86401"),
+            ("FIGCRAFT_SNAPSHOT_AFTER_EVENTS", "0"),
+            ("FIGCRAFT_SNAPSHOT_AFTER_EVENTS", "1000001"),
+            ("FIGCRAFT_SNAPSHOT_AFTER_EVENTS", "lots"),
+        ] {
+            assert!(parse(key, bad).is_err(), "{key}={bad} must be refused");
         }
     }
 

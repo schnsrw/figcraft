@@ -79,6 +79,13 @@ FIGCRAFT_SINGLE_TENANT_ID=00000000-0000-0000-0000-000000000001
 FIGCRAFT_RELAY_ADVERTISE_URL=ws://relay-1.internal:8082/ws/v1/collab
 # Seconds a stopping process stays up, not ready, before it stops (0 to 120, default 5).
 FIGCRAFT_DRAIN_SECONDS=5
+# Seconds an emptied room stays open (leased, in memory) before it is saved and closed, so a client
+# that reconnects finds it warm (0 to 3600, default 30; 0 closes at once).
+FIGCRAFT_ROOM_IDLE_SECONDS=30
+# A room with changes is snapshotted every N seconds (10 to 86400, default 300) or after N accepted
+# batches (1 to 1000000, default 1000), whichever comes first: a crash replays at most that much.
+FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS=300
+FIGCRAFT_SNAPSHOT_AFTER_EVENTS=1000
 
 DATABASE_URL_FILE=/run/secrets/database_url
 REDIS_URL_FILE=/run/secrets/redis_url
