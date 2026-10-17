@@ -365,6 +365,7 @@ define_error_codes! {
     RateLimited => ("rate_limited", "Too many requests."),
     TemporarilyUnavailable => ("temporarily_unavailable", "The service is temporarily unavailable."),
     Internal => ("internal", "The request could not be completed."),
+    InvalidCursor => ("invalid_cursor", "The pagination cursor is invalid or has expired."),
 }
 
 impl fmt::Display for ErrorCode {
@@ -541,6 +542,7 @@ mod tests {
             ErrorCode::RateLimited,
             ErrorCode::TemporarilyUnavailable,
             ErrorCode::Internal,
+            ErrorCode::InvalidCursor,
         ] {
             assert_eq!(code.as_str().parse::<ErrorCode>(), Ok(code));
             assert!(!code.public_message().is_empty());

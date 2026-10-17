@@ -91,7 +91,7 @@ impl ApiError {
 /// The default HTTP status for each public code.
 pub(crate) const fn default_status(code: ErrorCode) -> StatusCode {
     match code {
-        ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+        ErrorCode::InvalidRequest | ErrorCode::InvalidCursor => StatusCode::BAD_REQUEST,
         ErrorCode::Unauthenticated => StatusCode::UNAUTHORIZED,
         ErrorCode::Forbidden => StatusCode::FORBIDDEN,
         ErrorCode::NotFound => StatusCode::NOT_FOUND,
@@ -190,6 +190,7 @@ mod tests {
             ErrorCode::RateLimited,
             ErrorCode::TemporarilyUnavailable,
             ErrorCode::Internal,
+            ErrorCode::InvalidCursor,
         ] {
             let status = default_status(code);
             assert!(status.is_client_error() || status.is_server_error(), "{code}");
