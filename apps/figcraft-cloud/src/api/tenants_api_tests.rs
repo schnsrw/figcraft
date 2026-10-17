@@ -541,3 +541,150 @@ async fn invitations_are_created_once_listed_revoked_and_accepted() -> Fallible<
     assert_eq!(call(&app, Some(invitee), Method::GET, &team, None).await.0, StatusCode::OK);
     Ok(())
 }
+
+// ---------------------------------------------------------------------------------------------
+// S4-019 / S4-017: member removal and suspension through the API close the member's sessions
+// (fixture prefix e1; real sessions through the production CredentialAuthenticator).
+
+mod revocation {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, StatusCode};
+    use figcraft_cloud_domain::{DeploymentMode, PrincipalId, Role, TenantId, Uuid};
+    use figcraft_cloud_storage::begin_tenant_transaction;
+    use figcraft_cloud_storage::memberships::add_tenant_member;
+    use figcraft_cloud_storage::sessions::{SessionLimits, create_session, resolve_session};
+    use figcraft_cloud_storage::tenants::{NewTenant, create_tenant_with_owner};
+    use sqlx::PgPool;
+    use tower::ServiceExt as _;
+
+    use super::{Fallible, pool};
+    use crate::api::authenticator::{IdentityConfig, TENANT_HEADER};
+    use crate::api::context::ContextSettings;
+    use crate::api::{ApiConfig, AppState, api_router};
+    use crate::config::CloudRole;
+
+    const ORIGIN: &str = "https://figcraft.e1.test";
+
+    fn e1() -> Uuid {
+        let mut bytes = *Uuid::new_v4().as_bytes();
+        bytes[0] = 0xe1;
+        Uuid::from_bytes(bytes)
+    }
+
+    fn app(pool: &PgPool) -> Router {
+        let objects = figcraft_cloud_storage::objects::ObjectStore::new(&figcraft_cloud_storage::objects::ObjectStoreSettings {
+            endpoint: "http://127.0.0.1:9".to_string(),
+            region: "us-east-1".to_string(),
+            bucket: "figcraft-test".to_string(),
+            access_key: "FCtestkey".to_string(),
+            secret_key: "FCtestsecret".to_string(),
+            path_style: true,
+        })
+        .unwrap();
+        let identity =
+            Arc::new(IdentityConfig::new(DeploymentMode::MultiTenant, None, Some(ORIGIN), Some(b"e1-tenant-revocation-signing-key")).unwrap());
+        let config = ApiConfig { deployment: DeploymentMode::MultiTenant, ..ApiConfig::default() };
+        let state = AppState::new(pool.clone(), objects, config).with_identity(identity);
+        crate::health::app(CloudRole::Api, true, Some(api_router(state)), ContextSettings::new(CloudRole::Api, 64, Duration::from_secs(10), 1 << 20))
+    }
+
+    async fn send(app: &Router, token: &str, tenant: TenantId, method: Method, path: &str, body: Option<serde_json::Value>) -> StatusCode {
+        let request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("cookie", format!("__Host-figcraft_session={token}"))
+            .header(TENANT_HEADER, tenant.to_string())
+            .header("origin", ORIGIN);
+        let request = match body {
+            Some(body) => request.header("content-type", "application/json").body(Body::from(body.to_string())).unwrap(),
+            None => request.body(Body::empty()).unwrap(),
+        };
+        let response = app.clone().oneshot(request).await.unwrap();
+        let status = response.status();
+        let _ = to_bytes(response.into_body(), 1 << 20).await;
+        status
+    }
+
+    async fn principal(pool: &PgPool) -> Fallible<PrincipalId> {
+        let id = e1();
+        sqlx::query("INSERT INTO principals (id, kind, display_name) VALUES ($1::uuid, 'user', 'e1 member')")
+            .bind(id.to_string())
+            .execute(pool)
+            .await?;
+        Ok(PrincipalId::try_from(id).map_err(|_| "nil")?)
+    }
+
+    async fn tenant(pool: &PgPool, owner: PrincipalId, members: &[PrincipalId]) -> Fallible<TenantId> {
+        let tenant = TenantId::try_from(e1()).map_err(|_| "nil")?;
+        let slug = format!("e1-{}", &e1().simple().to_string()[2..14]);
+        let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|error| format!("{error:?}"))?;
+        create_tenant_with_owner(&mut transaction, NewTenant { slug: &slug, name: "e1 tenant", plan_id: "team", home_region: "local" }, owner)
+            .await?;
+        for member in members {
+            add_tenant_member(&mut transaction, *member, Role::Editor).await.map_err(|error| format!("{error:?}"))?;
+        }
+        transaction.commit().await?;
+        Ok(tenant)
+    }
+
+    async fn live(pool: &PgPool, token: &str) -> bool {
+        resolve_session(pool, token, SessionLimits::default()).await.is_ok()
+    }
+
+    #[tokio::test]
+    async fn removed_and_suspended_members_are_refused_and_signed_out() -> Fallible<()> {
+        let Some(pool) = pool().await? else { return Ok(()) };
+        let app = app(&pool);
+        let owner = principal(&pool).await?;
+        let removed = principal(&pool).await?;
+        let suspended = principal(&pool).await?;
+        let elsewhere = principal(&pool).await?;
+        let home = tenant(&pool, owner, &[removed, suspended, elsewhere]).await?;
+        // `elsewhere` is also a member of a second active tenant.
+        let other_owner = principal(&pool).await?;
+        let second = tenant(&pool, other_owner, &[elsewhere]).await?;
+        let session = |principal| {
+            let pool = pool.clone();
+            async move { create_session(&pool, principal, SessionLimits::default()).await.unwrap().token }
+        };
+        let owner_token = session(owner).await;
+        let removed_tokens = [session(removed).await, session(removed).await];
+        let suspended_token = session(suspended).await;
+        let elsewhere_token = session(elsewhere).await;
+        let tenant_path = format!("/api/v1/tenants/{home}");
+        for token in removed_tokens.iter().chain([&suspended_token, &elsewhere_token]) {
+            assert_eq!(send(&app, token, home, Method::GET, &tenant_path, None).await, StatusCode::OK);
+        }
+
+        // Removed: the next request is refused and every session of theirs is closed.
+        let status = send(&app, &owner_token, home, Method::DELETE, &format!("{tenant_path}/members/{removed}"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        for token in &removed_tokens {
+            assert_eq!(send(&app, token, home, Method::GET, &tenant_path, None).await, StatusCode::UNAUTHORIZED, "session closed");
+            assert!(!live(&pool, token).await, "the removed member's sessions are revoked");
+        }
+
+        // Suspended: the same.
+        let body = serde_json::json!({"state": "suspended"});
+        let status = send(&app, &owner_token, home, Method::PATCH, &format!("{tenant_path}/members/{suspended}"), Some(body)).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(send(&app, &suspended_token, home, Method::GET, &tenant_path, None).await, StatusCode::UNAUTHORIZED);
+        assert!(!live(&pool, &suspended_token).await);
+
+        // Removed here but still trusted by another active tenant: refused here, signed in there.
+        let status = send(&app, &owner_token, home, Method::DELETE, &format!("{tenant_path}/members/{elsewhere}"), None).await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        assert_eq!(send(&app, &elsewhere_token, home, Method::GET, &tenant_path, None).await, StatusCode::FORBIDDEN);
+        assert!(live(&pool, &elsewhere_token).await, "a member of another tenant keeps their sessions");
+        assert_eq!(send(&app, &elsewhere_token, second, Method::GET, &format!("/api/v1/tenants/{second}"), None).await, StatusCode::OK);
+
+        // The owner who made the changes is untouched.
+        assert!(live(&pool, &owner_token).await);
+        assert_eq!(send(&app, &owner_token, home, Method::GET, &tenant_path, None).await, StatusCode::OK);
+        Ok(())
+    }
+}

@@ -22,6 +22,7 @@ enum Arguments {
     Migrate,
     InitObjectStore,
     ProvisionDatabaseRoles,
+    PrintBootstrapToken,
     CreateShareLink { document: Option<CloudDocumentId>, role: ShareRole },
     Role(Option<CloudRole>),
 }
@@ -61,6 +62,13 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
                 Ok(Arguments::ProvisionDatabaseRoles)
             } else {
                 Err("--provision-db-roles cannot be combined with other arguments")
+            };
+        }
+        if argument == "--print-bootstrap-token" {
+            return if role.is_none() && args.next().is_none() {
+                Ok(Arguments::PrintBootstrapToken)
+            } else {
+                Err("--print-bootstrap-token cannot be combined with other arguments")
             };
         }
         if argument == "--create-share-link" {
@@ -118,9 +126,84 @@ fn run_create_share_link(document: Option<CloudDocumentId>, role: ShareRole) -> 
     }
 }
 
+/// `--print-bootstrap-token` (S4-003): in single-tenant mode, issue a one-time bootstrap token for
+/// `FIGCRAFT_SINGLE_TENANT_ID` (creating the tenant row on a fresh database) and print exactly one
+/// line, the token, on stdout. Each run replaces the previous token. Refused once bootstrap is
+/// completed (or the tenant already has an active owner) and in multi-tenant mode. The token is
+/// written nowhere else: errors go to stderr without it.
+fn run_print_bootstrap_token() -> ExitCode {
+    let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
+    let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
+    let Ok(config) = CloudConfig::parse(settings) else {
+        eprintln!("figcraft-cloud: invalid cloud configuration");
+        return ExitCode::from(2);
+    };
+    if config.deployment != figcraft_cloud_domain::DeploymentMode::SingleTenant {
+        eprintln!("figcraft-cloud: --print-bootstrap-token is for single-tenant deployments only");
+        return ExitCode::from(2);
+    }
+    // The same default the API's bootstrap gate and the relay use when it is unset.
+    let Some(tenant) = config.single_tenant_id().or_else(|| "00000000-0000-0000-0000-000000000001".parse().ok()) else {
+        eprintln!("figcraft-cloud: FIGCRAFT_SINGLE_TENANT_ID is required for --print-bootstrap-token");
+        return ExitCode::from(2);
+    };
+    let Some(database_url) = config.database_url() else {
+        eprintln!("figcraft-cloud: DATABASE_URL or DATABASE_URL_FILE is required for --print-bootstrap-token");
+        return ExitCode::from(2);
+    };
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread().enable_all().build() else {
+        eprintln!("figcraft-cloud: unable to initialize the bootstrap runtime");
+        return ExitCode::FAILURE;
+    };
+    let outcome = runtime.block_on(async {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_secs(10))
+            .connect(database_url)
+            .await
+            .map_err(|_| "database connection failed")?;
+        tokio::time::timeout(std::time::Duration::from_secs(30), issue_bootstrap_token(&pool, tenant)).await.map_err(|_| "the database timed out")?
+    });
+    match outcome {
+        Ok(token) => {
+            println!("{token}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("figcraft-cloud: no bootstrap token issued: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Make sure `tenant` exists, then issue its bootstrap token ([`figcraft_cloud_storage::bootstrap::ensure_bootstrap`],
+/// default lifetime). Refused when bootstrap is already completed.
+async fn issue_bootstrap_token(pool: &sqlx::PgPool, tenant: figcraft_cloud_domain::TenantId) -> Result<String, &'static str> {
+    use figcraft_cloud_storage::bootstrap::{BootstrapStatus, DEFAULT_BOOTSTRAP_LIFETIME_SECS, ensure_bootstrap};
+    const DATABASE: &str = "the database refused the bootstrap";
+    let mut transaction = figcraft_cloud_storage::begin_tenant_transaction(pool, tenant).await.map_err(|_| DATABASE)?;
+    let slug = format!("tenant-{}", &tenant.as_uuid().simple().to_string()[..12]);
+    sqlx::query(
+        "INSERT INTO tenants (id, slug, name, plan_id, home_region) VALUES ($1::uuid, $2, 'FigCraft', 'self-hosted', 'local') \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(tenant.to_string())
+    .bind(slug)
+    .execute(transaction.connection())
+    .await
+    .map_err(|_| DATABASE)?;
+    let status = ensure_bootstrap(&mut transaction, DEFAULT_BOOTSTRAP_LIFETIME_SECS).await.map_err(|_| DATABASE)?;
+    let BootstrapStatus::Issued { token, .. } = status else {
+        let _ = transaction.rollback().await;
+        return Err("bootstrap is already completed (the tenant has an owner)");
+    };
+    transaction.commit().await.map_err(|_| DATABASE)?;
+    Ok(token)
+}
+
 fn usage() {
     println!(
-        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n       figcraft-cloud --create-share-link [--document <uuid>] [--role editor|viewer]\n\nDefaults to --role all."
+        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n       figcraft-cloud --print-bootstrap-token\n       figcraft-cloud --create-share-link [--document <uuid>] [--role editor|viewer]\n\nDefaults to --role all."
     );
 }
 
@@ -296,6 +379,7 @@ fn main() -> ExitCode {
         Ok(Arguments::Migrate) => run_migrations(),
         Ok(Arguments::InitObjectStore) => run_object_store_init(),
         Ok(Arguments::ProvisionDatabaseRoles) => run_role_provisioning(),
+        Ok(Arguments::PrintBootstrapToken) => run_print_bootstrap_token(),
         Ok(Arguments::CreateShareLink { document, role }) => run_create_share_link(document, role),
         Ok(Arguments::Role(cli_role)) => {
             let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
@@ -423,6 +507,49 @@ mod tests {
         assert!(arguments(&["--create-share-link", "--role", "viewer", "--role", "editor"]).is_err());
         assert!(arguments(&["--role", "api", "--create-share-link"]).is_err());
         assert!(arguments(&["--create-share-link", "--migrate"]).is_err());
+    }
+
+    #[test]
+    fn bootstrap_token_command_is_standalone() {
+        assert_eq!(arguments(&["--print-bootstrap-token"]), Ok(Arguments::PrintBootstrapToken));
+        assert!(arguments(&["--print-bootstrap-token", "--role", "api"]).is_err());
+        assert!(arguments(&["--role", "api", "--print-bootstrap-token"]).is_err());
+        assert!(arguments(&["--print-bootstrap-token", "--migrate"]).is_err());
+    }
+
+    /// Against the dev PostgreSQL (fixture prefix e1; skipped without
+    /// FIGCRAFT_TEST_DATABASE_URL_FILE): a fresh tenant is created and gets a token, a second run
+    /// supersedes the first, and once bootstrap completes the command refuses.
+    #[tokio::test]
+    async fn bootstrap_tokens_are_issued_until_bootstrap_completes() -> Result<(), Box<dyn std::error::Error>> {
+        let Ok(file) = std::env::var("FIGCRAFT_TEST_DATABASE_URL_FILE") else {
+            eprintln!("FIGCRAFT_TEST_DATABASE_URL_FILE is unset; bootstrap token probe skipped");
+            return Ok(());
+        };
+        let url = std::fs::read_to_string(file)?;
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2).connect(url.trim_end()).await?;
+        let mut bytes = *figcraft_cloud_domain::Uuid::new_v4().as_bytes();
+        bytes[0] = 0xe1;
+        let tenant = figcraft_cloud_domain::TenantId::try_from(figcraft_cloud_domain::Uuid::from_bytes(bytes)).map_err(|_| "nil")?;
+        let first = super::issue_bootstrap_token(&pool, tenant).await?;
+        assert_eq!(first.len(), 43);
+        let second = super::issue_bootstrap_token(&pool, tenant).await?;
+        assert_ne!(first, second);
+        bytes[1] ^= 0xff;
+        let owner = figcraft_cloud_domain::PrincipalId::try_from(figcraft_cloud_domain::Uuid::from_bytes(bytes)).map_err(|_| "nil")?;
+        sqlx::query("INSERT INTO principals (id, kind, display_name) VALUES ($1::uuid, 'user', 'e1 bootstrap owner')")
+            .bind(owner.to_string())
+            .execute(&pool)
+            .await?;
+        let mut transaction = figcraft_cloud_storage::begin_tenant_transaction(&pool, tenant).await.map_err(|error| format!("{error:?}"))?;
+        // The superseded token no longer completes bootstrap; the latest one does.
+        assert!(figcraft_cloud_storage::bootstrap::complete_bootstrap(&mut transaction, &first, owner).await.is_err());
+        transaction.rollback().await?;
+        let mut transaction = figcraft_cloud_storage::begin_tenant_transaction(&pool, tenant).await.map_err(|error| format!("{error:?}"))?;
+        figcraft_cloud_storage::bootstrap::complete_bootstrap(&mut transaction, &second, owner).await?;
+        transaction.commit().await?;
+        assert!(super::issue_bootstrap_token(&pool, tenant).await.is_err(), "refused once bootstrap is completed");
+        Ok(())
     }
 
     #[test]

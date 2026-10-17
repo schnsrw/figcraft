@@ -6,7 +6,11 @@
 //!   editor link joins with [`Access::Edit`], a viewer link with [`Access::View`]. A signed-in
 //!   member joins with a `member.<tenant>.<session token>` token
 //!   ([`figcraft_cloud_storage::revocation::admit_member`]): the session must be live and the
-//!   member's effective role on the document at least `viewer` (`editor` to edit). Every refusal
+//!   member's effective role on the document at least `viewer` (`editor` to edit). A browser
+//!   joins with a short-lived realtime ticket instead
+//!   ([`figcraft_cloud_storage::realtime_tickets`], minted by the API, verified with
+//!   [`CloudBackendConfig::ticket_key`]): MAC, expiry and document must check out and the session
+//!   and role it names must still hold; the ticket's access decides edit or view. Every refusal
 //!   reads the same.
 //! - **Opening.** A document that isn't open is recovered like [`DurableRoom::recover`]: the
 //!   sequencer is claimed (fencing every earlier owner), the latest verified snapshot is restored
@@ -50,6 +54,7 @@ use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::document_snapshots::store_snapshot;
 use figcraft_cloud_storage::events::{MAX_APPEND_BATCHES, append_events};
 use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
+use figcraft_cloud_storage::realtime_tickets::{TicketKey, looks_like_ticket, verify as verify_ticket};
 use figcraft_cloud_storage::revocation::{
     MAX_CHECKED_MEMBERS, MemberAdmission, RevocationError, admit_member, dead_member_admissions, parse_member_token,
 };
@@ -103,6 +108,9 @@ pub struct CloudBackendConfig {
     pub max_connections: u32,
     /// Documents open at once; past it new documents are refused.
     pub max_open: usize,
+    /// The key realtime tickets are verified with (derived from `SESSION_SIGNING_KEY`, the same
+    /// one the API mints with). `None`: ticket hellos are refused like an unknown link.
+    pub ticket_key: Option<TicketKey>,
 }
 
 impl CloudBackendConfig {
@@ -115,6 +123,7 @@ impl CloudBackendConfig {
             timeout: Duration::from_secs(15),
             max_connections: 8,
             max_open: 1024,
+            ticket_key: None,
         }
     }
 }
@@ -329,6 +338,7 @@ pub struct CloudBackend {
     /// Files whose changes couldn't be kept outside a flush; reported by the next flush.
     failed: Vec<String>,
     watch: RevocationWatch,
+    ticket_key: Option<TicketKey>,
 }
 
 impl CloudBackend {
@@ -361,6 +371,7 @@ impl CloudBackend {
             open: HashMap::new(),
             failed: Vec::new(),
             watch: RevocationWatch::new(),
+            ticket_key: config.ticket_key.clone(),
         })
     }
 
@@ -501,6 +512,37 @@ impl CloudBackend {
     }
 }
 
+impl CloudBackend {
+    /// Admit a realtime ticket (`figcraft_cloud_storage::realtime_tickets`): the MAC, expiry and
+    /// document must check out, and the session and effective role it names must still hold
+    /// (`dead_member_admissions`), so a ticket never outlives a revocation. The member is then
+    /// watched like any signed-in member and recorded as the batch actor.
+    fn admit_ticket(&mut self, file: &str, token: &str, document: CloudDocumentId) -> Result<Admission, String> {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs());
+        let Some(ticket) = self.ticket_key.as_ref().and_then(|key| verify_ticket(key, token, document, now).ok()) else {
+            return Err(REFUSED.into());
+        };
+        let admission = MemberAdmission { tenant: ticket.tenant, document, principal: ticket.principal, session: ticket.session, edit: ticket.edit };
+        let pool = &self.pool;
+        match self.block(dead_member_admissions(pool, &[admission])) {
+            Some(Ok(dead)) if dead.is_empty() => {}
+            Some(Ok(_)) => return Err(REFUSED.into()),
+            Some(Err(_)) | None => {
+                log::error!("document {file}: a realtime ticket couldn't be checked (storage unavailable)");
+                return Err(UNAVAILABLE.into());
+            }
+        }
+        self.make_room(file);
+        if !self.watch.watch_member(file, admission) {
+            log::warn!("document {file}: too many links and members in use to watch another; hello refused");
+            return Err(UNAVAILABLE.into());
+        }
+        self.admitted.insert(file.to_string(), Admitted { tenant: admission.tenant, actor: admission.principal });
+        let access = if admission.edit { Access::Edit } else { Access::View };
+        Ok(Admission { access, link: Some(member_link(admission.session)) })
+    }
+}
+
 impl Backend for CloudBackend {
     fn admit(&mut self, file: &str, token: &str) -> Result<Admission, String> {
         let Ok(document) = file.parse::<CloudDocumentId>() else {
@@ -508,6 +550,9 @@ impl Backend for CloudBackend {
         };
         if let Some((tenant, session)) = parse_member_token(token) {
             return self.admit_member(file, tenant, session, document);
+        }
+        if looks_like_ticket(token) {
+            return self.admit_ticket(file, token, document);
         }
         let pool = &self.pool;
         let link = match self.block(resolve_share_link(pool, token)) {

@@ -41,6 +41,7 @@ use figcraft_cloud_storage::audit::record_audit_event;
 use figcraft_cloud_storage::effective_roles::{TenantAccess, resolve_tenant_access};
 use figcraft_cloud_storage::memberships::{self, MemberPermission, MemberState, MembershipError, parse_role, role_str, valid_tenant_role};
 use figcraft_cloud_storage::metadata::{PageSize, TenantRecord};
+use figcraft_cloud_storage::revocation::{AccessRevocation, apply_revocation};
 use figcraft_cloud_storage::tenants::{self, NewTenant, TenantError};
 use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
 use serde::{Deserialize, Serialize};
@@ -159,6 +160,18 @@ pub(crate) async fn audit(
 
 pub(crate) async fn commit(transaction: TenantTransaction<'_>) -> Result<(), ApiError> {
     transaction.commit().await.map_err(storage_unavailable)
+}
+
+/// Close what a committed access change leaves open (S4-017 policy,
+/// `revocation::apply_revocation`): a principal left with no active membership in any active
+/// tenant loses every browser session. Called only after the change commits. A failure here does
+/// not undo the change or fail the request: every later API request re-resolves tenant access
+/// (`authorize_session_in_tenant`) and the relay sweep re-checks live members, so access is
+/// already refused; the sessions are only left to expire, and the failure is reported (ids only).
+pub(crate) async fn revoke_after_commit(state: &AppState, revocation: AccessRevocation) {
+    if apply_revocation(state.pool(), revocation).await.is_err() {
+        eprintln!("figcraft-cloud: revocation follow-up failed ({revocation:?}); access is still refused per request");
+    }
 }
 
 pub(crate) fn invalid() -> ApiError {
@@ -332,6 +345,9 @@ async fn update_tenant(
     }
     let record = tenant_record(&mut call.transaction).await?;
     commit(call.transaction).await?;
+    if target == Some(ResourceState::Suspended) {
+        revoke_after_commit(&state, AccessRevocation::TenantSuspended).await;
+    }
     let role = call.subject.tenant_role.map(|role| role_str(role).to_owned());
     Ok(axum::Json(TenantBody::new(record, role)).into_response())
 }
@@ -512,6 +528,9 @@ async fn update_member(
     });
     audit(&mut call.transaction, call.principal, "member.update", "tenant_member", Some(target.as_uuid()), &context, &metadata).await?;
     commit(call.transaction).await?;
+    if target_state == Some(MemberState::Suspended) {
+        revoke_after_commit(&state, AccessRevocation::TenantMemberSuspended { principal: target }).await;
+    }
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -535,6 +554,7 @@ async fn remove_member(
     let metadata = serde_json::json!({ "principal_id": target.to_string(), "role": role_str(current.role) });
     audit(&mut call.transaction, call.principal, "member.remove", "tenant_member", Some(target.as_uuid()), &context, &metadata).await?;
     commit(call.transaction).await?;
+    revoke_after_commit(&state, AccessRevocation::TenantMemberRemoved { principal: target }).await;
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 

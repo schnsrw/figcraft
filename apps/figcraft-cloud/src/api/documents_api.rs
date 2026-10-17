@@ -26,8 +26,6 @@ use axum::extract::{Path, Query, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
-use base64::Engine as _;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use figcraft_cloud_auth::authz::{Action, Resource, SensitivePermission, Subject, decide};
 use figcraft_cloud_domain::{CloudDocumentId, ErrorCode, PrincipalId, ProjectId, ResourceState, Role, Uuid, WorkspaceId};
 use figcraft_cloud_storage::effective_roles::{
@@ -52,12 +50,11 @@ use serde_json::{Value, json};
 
 use super::AppState;
 use super::auth::{Authenticated, CredentialKind};
+use super::cursor::{CursorScope, ListQuery, PageRequest, Position, invalid_cursor};
 use super::error::{ApiError, ApiJson, authorize_resource};
 
 /// Default and largest page sizes for list endpoints.
 pub(crate) const DEFAULT_PAGE: u32 = 50;
-/// Longest a cursor string may be.
-pub(crate) const MAX_CURSOR_CHARS: usize = 96;
 /// Longest a resource name may be (the schema's limit).
 pub(crate) const MAX_NAME_CHARS: usize = 255;
 /// Lifetime of the share secret a collaboration link carries. The relay disconnects a session
@@ -116,6 +113,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("POST", "/documents/{document_id}/share-links", Action::DocumentShare),
     route("DELETE", "/documents/{document_id}/share-links/{link_id}", Action::DocumentShare),
     route("GET", "/documents/{document_id}/collab-link", Action::DocumentJoinRealtime),
+    route("POST", "/documents/{document_id}/realtime-ticket", Action::DocumentJoinRealtime),
 ];
 
 /// The router for [`ROUTES`] (mounted under `/api/v1`, in the `resources` router).
@@ -142,66 +140,48 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/documents/{document_id}/share-links", get(list_share_links_handler).post(create_share_link_handler))
         .route("/documents/{document_id}/share-links/{link_id}", axum::routing::delete(revoke_share_link_handler))
         .route("/documents/{document_id}/collab-link", get(collab_link_handler))
+        .route("/documents/{document_id}/realtime-ticket", post(super::realtime::realtime_ticket_handler))
 }
 
 // ---------------------------------------------------------------------------------------------
 // Cursors
 
-/// Opaque list cursors. The wire string is a codec's business; handlers only hand it the kind of
-/// list and the last row's identifier. The integrator can switch every list endpoint to the
-/// shared cursor implementation (S4-020) by replacing [`CURSORS`].
-pub(crate) trait CursorCodec: Send + Sync {
-    /// The cursor that resumes `kind` after `last`.
-    fn encode(&self, kind: &'static str, last: &str) -> String;
-    /// The identifier `cursor` resumes after, `None` when it is malformed or for another list.
-    fn decode(&self, kind: &'static str, cursor: &str) -> Option<String>;
+/// Paging for a list endpoint through the shared, HMAC-signed cursors ([`super::cursor`],
+/// S4-020). `limit` must be a valid page size (else `400 invalid_request`); a cursor must be one
+/// this list issued for the same tenant, caller and parent within its lifetime (else
+/// `400 invalid_cursor`). The cursor's row id is all a page resumes from: the query is re-scoped
+/// by the tenant transaction and every row re-authorized.
+pub(crate) struct Paging {
+    request: PageRequest,
+    size: PageSize,
 }
 
-/// Minimal local codec: unpadded base64url of `<kind>.<id>`. Not a security boundary (the
-/// identifier is re-scoped by the tenant transaction and re-authorized), only opaque.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct LocalCursor;
-
-impl CursorCodec for LocalCursor {
-    fn encode(&self, kind: &'static str, last: &str) -> String {
-        URL_SAFE_NO_PAD.encode(format!("{kind}.{last}"))
+impl Paging {
+    /// `kind` names the list (e.g. `"documents"`), `parent` the path resource it lists under
+    /// (empty for top-level lists).
+    pub(crate) fn new(caller: &Authenticated, kind: &'static str, parent: &str, query: &ListQuery) -> Result<Self, ApiError> {
+        let limit = query.limit.unwrap_or(DEFAULT_PAGE);
+        let size = PageSize::new(limit).map_err(|_| invalid())?;
+        Ok(Self { request: PageRequest::new(cursor_scope(caller, kind, parent), Some(limit), query.cursor.as_deref())?, size })
     }
 
-    fn decode(&self, kind: &'static str, cursor: &str) -> Option<String> {
-        if cursor.is_empty() || cursor.len() > MAX_CURSOR_CHARS {
-            return None;
-        }
-        let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
-        let text = String::from_utf8(bytes).ok()?;
-        let (found, last) = text.split_once('.')?;
-        (found == kind && !last.is_empty()).then(|| last.to_string())
-    }
-}
-
-/// The codec every list endpoint uses.
-pub(crate) const CURSORS: LocalCursor = LocalCursor;
-
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct ListQuery {
-    limit: Option<u32>,
-    cursor: Option<String>,
-}
-
-impl ListQuery {
-    fn size(&self) -> Result<PageSize, ApiError> {
-        PageSize::new(self.limit.unwrap_or(DEFAULT_PAGE)).map_err(|_| invalid())
+    /// The row the page resumes after, as the list's id type.
+    fn after<T: std::str::FromStr>(&self) -> Result<Option<T>, ApiError> {
+        self.request.after.as_ref().map(|position| position.id.to_string().parse().map_err(|_| invalid_cursor())).transpose()
     }
 
-    fn after<T: std::str::FromStr>(&self, kind: &'static str) -> Result<Option<T>, ApiError> {
-        match &self.cursor {
-            None => Ok(None),
-            Some(cursor) => CURSORS.decode(kind, cursor).and_then(|last| last.parse().ok()).map(Some).ok_or_else(invalid),
-        }
+    /// `next_cursor` for a page whose last row is `last` (`null` on the last page).
+    fn next(&self, last: Option<Uuid>) -> Value {
+        last.and_then(|id| self.request.cursor_for(&Position { sort_key: String::new(), id })).map_or(Value::Null, Value::String)
     }
 }
 
-fn next(kind: &'static str, last: Option<String>) -> Value {
-    last.map_or(Value::Null, |last| Value::String(CURSORS.encode(kind, &last)))
+/// The scope a list's cursors are bound to: the list, the caller's tenant and principal, and the
+/// parent resource.
+pub(crate) fn cursor_scope(caller: &Authenticated, kind: &'static str, parent: &str) -> CursorScope {
+    let tenant = caller.tenant.tenant_id().to_string();
+    let principal = caller.principal.to_string();
+    CursorScope::new(kind, &[&tenant, &principal, parent])
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -427,8 +407,8 @@ async fn list_workspaces_handler(
     caller: Authenticated,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let size = query.size()?;
-    let after: Option<WorkspaceId> = query.after("ws")?;
+    let paging = Paging::new(&caller, "workspaces", "", &query)?;
+    let (size, after): (PageSize, Option<WorkspaceId>) = (paging.size, paging.after()?);
     let mut transaction = begin(&state, &caller).await?;
     let tenant = tenant_access(&mut transaction, &caller, Action::TenantView).await?;
     let every = matches!(tenant.tenant_role, Some(Role::TenantOwner | Role::TenantAdmin));
@@ -443,7 +423,7 @@ async fn list_workspaces_handler(
             items.push(workspace_view(record));
         }
     }
-    Ok(Json(json!({"items": items, "next_cursor": next("ws", page.next_cursor.map(|id| id.to_string()))})))
+    Ok(Json(json!({"items": items, "next_cursor": paging.next(page.next_cursor.map(WorkspaceId::as_uuid))})))
 }
 
 async fn create_workspace_handler(
@@ -507,10 +487,12 @@ async fn restore_workspace_handler(State(state): State<AppState>, caller: Authen
     workspace_transition(&state, &caller, &id, Action::WorkspaceRestore, Transition::Restore).await
 }
 
-fn grants_view<Id: ToString>(kind: &'static str, key: &'static str, grants: &[figcraft_cloud_storage::resource_admin::Grant<Id>]) -> Value {
+fn grants_view<Id: ToString>(paging: &Paging, key: &'static str, grants: &[figcraft_cloud_storage::resource_admin::Grant<Id>]) -> Value {
     let items: Vec<Value> = grants.iter().map(|grant| json!({key: grant.id.to_string(), "role": role_str(grant.role)})).collect();
-    let last = (i64::try_from(grants.len()).unwrap_or(i64::MAX) >= MAX_LISTED).then(|| grants.last().map(|grant| grant.id.to_string())).flatten();
-    json!({"items": items, "next_cursor": next(kind, last)})
+    let last = (i64::try_from(grants.len()).unwrap_or(i64::MAX) >= MAX_LISTED)
+        .then(|| grants.last().and_then(|grant| Uuid::parse_str(&grant.id.to_string()).ok()))
+        .flatten();
+    json!({"items": items, "next_cursor": paging.next(last)})
 }
 
 async fn list_workspace_members_handler(
@@ -519,11 +501,12 @@ async fn list_workspace_members_handler(
     Path(id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let after: Option<PrincipalId> = query.after("wm")?;
+    let paging = Paging::new(&caller, "workspace_members", &id, &query)?;
+    let after: Option<PrincipalId> = paging.after()?;
     let mut transaction = begin(&state, &caller).await?;
     let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceView).await?;
     let members = list_workspace_members(&mut transaction, id, after).await.map_err(repository_error)?;
-    Ok(Json(grants_view("wm", "principal_id", &members)))
+    Ok(Json(grants_view(&paging, "principal_id", &members)))
 }
 
 async fn set_workspace_member_handler(
@@ -565,13 +548,13 @@ async fn list_projects_handler(
     Path(id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let size = query.size()?;
-    let after: Option<ProjectId> = query.after("pr")?;
+    let paging = Paging::new(&caller, "projects", &id, &query)?;
+    let (size, after): (PageSize, Option<ProjectId>) = (paging.size, paging.after()?);
     let mut transaction = begin(&state, &caller).await?;
     let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceView).await?;
     let page = list_projects(&mut transaction, id, after, size).await.map_err(repository_error)?;
     let items: Vec<Value> = page.items.iter().filter(|record| record.state != ResourceState::Deleted).map(project_view).collect();
-    Ok(Json(json!({"items": items, "next_cursor": next("pr", page.next_cursor.map(|id| id.to_string()))})))
+    Ok(Json(json!({"items": items, "next_cursor": paging.next(page.next_cursor.map(ProjectId::as_uuid))})))
 }
 
 async fn create_project_handler(
@@ -644,13 +627,13 @@ async fn list_documents_handler(
     Path(id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let size = query.size()?;
-    let after: Option<CloudDocumentId> = query.after("doc")?;
+    let paging = Paging::new(&caller, "documents", &id, &query)?;
+    let (size, after): (PageSize, Option<CloudDocumentId>) = (paging.size, paging.after()?);
     let mut transaction = begin(&state, &caller).await?;
     let id = project_access(&mut transaction, &caller, &id, Action::ProjectView).await?;
     let page = list_documents(&mut transaction, id, after, size).await.map_err(repository_error)?;
     let items: Vec<Value> = page.items.iter().map(document_view).collect();
-    Ok(Json(json!({"items": items, "next_cursor": next("doc", page.next_cursor.map(|id| id.to_string()))})))
+    Ok(Json(json!({"items": items, "next_cursor": paging.next(page.next_cursor.map(CloudDocumentId::as_uuid))})))
 }
 
 async fn create_document_handler(
@@ -739,11 +722,12 @@ async fn list_document_members_handler(
     Path(id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let after: Option<PrincipalId> = query.after("dm")?;
+    let paging = Paging::new(&caller, "document_members", &id, &query)?;
+    let after: Option<PrincipalId> = paging.after()?;
     let mut transaction = begin(&state, &caller).await?;
     let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentView).await?;
     let members = list_document_members(&mut transaction, id, after).await.map_err(repository_error)?;
-    Ok(Json(grants_view("dm", "principal_id", &members)))
+    Ok(Json(grants_view(&paging, "principal_id", &members)))
 }
 
 async fn set_document_member_handler(
@@ -782,11 +766,12 @@ async fn list_document_team_grants_handler(
     Path(id): Path<String>,
     Query(query): Query<ListQuery>,
 ) -> Result<Json<Value>, ApiError> {
-    let after: Option<Uuid> = query.after("dt")?;
+    let paging = Paging::new(&caller, "document_team_grants", &id, &query)?;
+    let after: Option<Uuid> = paging.after()?;
     let mut transaction = begin(&state, &caller).await?;
     let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentView).await?;
     let grants = list_document_team_grants(&mut transaction, id, after).await.map_err(repository_error)?;
-    Ok(Json(grants_view("dt", "team_id", &grants)))
+    Ok(Json(grants_view(&paging, "team_id", &grants)))
 }
 
 async fn set_document_team_grant_handler(
@@ -881,7 +866,7 @@ async fn revoke_share_link_handler(
 }
 
 /// `FIGCRAFT_PUBLIC_URL` (read once; the relay bootstrap reads the same variable).
-fn public_url() -> &'static str {
+pub(crate) fn public_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
         std::env::var("FIGCRAFT_PUBLIC_URL").ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| DEFAULT_PUBLIC_URL.to_string())
@@ -904,7 +889,38 @@ pub(crate) fn collab_urls(public_url: &str, document: CloudDocumentId, secret: &
     Ok((invite, editor))
 }
 
+/// Authorize joining `id`'s realtime room: the document must be visible (else `404`) and
+/// `document.join_realtime` allowed (else `403`). Returns the document and whether the caller
+/// may edit it.
+pub(crate) async fn authorize_realtime(state: &AppState, caller: &Authenticated, id: &str) -> Result<(CloudDocumentId, bool), ApiError> {
+    let mut transaction = begin(state, caller).await?;
+    let (id, access) = document_access(&mut transaction, caller, id, Action::DocumentJoinRealtime).await?;
+    let _ = transaction.rollback().await;
+    Ok((id, allows(&access, Kind::Document, Action::DocumentEdit)))
+}
+
+/// The collaboration invite for the caller. A signed-in browser gets a ticket-based invite (a
+/// realtime ticket as the hello token, valid [`super::realtime::TICKET_SECS`] seconds: the editor
+/// fetches a fresh one to reconnect); other callers, or a deployment without
+/// `SESSION_SIGNING_KEY`, get an 8-hour collaboration share link as before.
 async fn collab_link_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Response, ApiError> {
+    if caller.session.kind == CredentialKind::BrowserSession && state.realtime_key().is_some() {
+        let (id, edit) = authorize_realtime(&state, &caller, &id).await?;
+        let minted = super::realtime::mint_for(&state, &caller, id, edit)?;
+        let (invite, editor_url) = collab_urls(public_url(), id, &minted.ticket)?;
+        return Ok(no_store(
+            Json(json!({
+                "document_id": id.to_string(),
+                "access": if edit { "edit" } else { "view" },
+                "kind": "ticket",
+                "link_id": Value::Null,
+                "expires_in_secs": super::realtime::TICKET_SECS,
+                "invite": invite,
+                "editor_url": editor_url,
+            }))
+            .into_response(),
+        ));
+    }
     let mut transaction = begin(&state, &caller).await?;
     let (id, access) = document_access(&mut transaction, &caller, &id, Action::DocumentJoinRealtime).await?;
     let edit = allows(&access, Kind::Document, Action::DocumentEdit);
@@ -918,6 +934,7 @@ async fn collab_link_handler(State(state): State<AppState>, caller: Authenticate
         Json(json!({
             "document_id": id.to_string(),
             "access": if edit { "edit" } else { "view" },
+            "kind": "share_link",
             "link_id": link.id.to_string(),
             "expires_in_secs": COLLAB_LINK_SECS,
             "invite": invite,

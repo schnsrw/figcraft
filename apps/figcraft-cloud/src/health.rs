@@ -98,6 +98,16 @@ async fn api_state(config: &CloudConfig, api_config: ApiConfig) -> Option<AppSta
         }
     };
     let mut state = AppState::new(pool, objects, api_config).with_identity(identity);
+    if let Some(secret) = config.session_signing_key() {
+        // Cursors and realtime tickets are keyed by subkeys of the same secret, so every replica
+        // (and the relay, for tickets) accepts what another issued.
+        api::cursor::install_signing_secret(secret.as_bytes());
+        if let Some(key) = api::realtime::ticket_key(Some(secret.as_bytes())) {
+            state = state.with_realtime_tickets(key);
+        }
+    } else {
+        eprintln!("figcraft-cloud: SESSION_SIGNING_KEY is not set; realtime tickets are off and collab links use share links");
+    }
     if let Some((issuer, client_id, client_secret, redirect_url)) = config.oidc_settings() {
         let oidc = figcraft_cloud_auth::oidc::OidcConfig::new(issuer, client_id, client_secret, redirect_url);
         match tokio::time::timeout(Duration::from_secs(30), figcraft_cloud_auth::oidc::OidcProvider::discover(oidc)).await {
