@@ -412,6 +412,70 @@ async fn unreachable_and_forbidden_destinations_are_failures_not_requests() -> T
 }
 
 #[tokio::test]
+async fn published_events_reach_only_subscribed_endpoints_with_a_minimal_signed_body() -> TestResult {
+    use figcraft_cloud_storage::webhook_events::{EventError, publish_event};
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let receiver = Receiver::start(&[]).await?;
+    let setup = setup(&pool, &receiver.url()).await?; // subscribed to everything
+    let key = key()?;
+    // A second endpoint that only wants exports, and a third that is disabled.
+    let mut tx = begin_tenant_transaction(&pool, setup.tenant).await.map_err(|e| format!("{e:?}"))?;
+    let (only_exports, _) = create_webhook_endpoint(&mut tx, &key, DEV, "host-a", &receiver.url(), &["export.completed".to_owned()])
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+    let (disabled, _) = create_webhook_endpoint(&mut tx, &key, DEV, "host-a", &receiver.url(), &[]).await.map_err(|e| format!("{e:?}"))?;
+    update_webhook_endpoint(&mut tx, DEV, "host-a", disabled.id, None, None, Some(false)).await.map_err(|e| format!("{e:?}"))?;
+    let data = [("document_id", "doc-uuid"), ("external_document_id", "host doc 7"), ("workspace_id", "ws-uuid")];
+    assert_eq!(publish_event(&mut tx, "host-a", "document.created", &data).await.map_err(|e| format!("{e:?}"))?, 1);
+    assert_eq!(
+        publish_event(&mut tx, "host-a", "export.completed", &[("export_id", "e-1"), ("format", "png")]).await.map_err(|e| format!("{e:?}"))?,
+        2
+    );
+    // Another host's endpoints and unknown hosts get nothing; bad events are refused up front.
+    assert_eq!(publish_event(&mut tx, "no-such-host", "document.created", &data).await.map_err(|e| format!("{e:?}"))?, 0);
+    assert_eq!(publish_event(&mut tx, "host-a", "document.created", &[("document_name", "Secret plans")]).await, Err(EventError::InvalidInput));
+    assert_eq!(publish_event(&mut tx, "host-a", "document.exploded", &data).await, Err(EventError::InvalidInput));
+    tx.commit().await?;
+
+    // The everything endpoint got both events; the export endpoint only the export; the disabled
+    // one none.
+    let mut tx = begin_tenant_transaction(&pool, setup.tenant).await.map_err(|e| format!("{e:?}"))?;
+    let everything = list_deliveries(&mut tx, "host-a", setup.endpoint, None).await.map_err(|e| format!("{e:?}"))?;
+    let exports = list_deliveries(&mut tx, "host-a", only_exports.id, None).await.map_err(|e| format!("{e:?}"))?;
+    let none = list_deliveries(&mut tx, "host-a", disabled.id, None).await.map_err(|e| format!("{e:?}"))?;
+    tx.rollback().await?;
+    assert_eq!(everything.len(), 2);
+    assert_eq!((exports.len(), exports[0].event_type.as_str()), (1, "export.completed"));
+    assert!(none.is_empty());
+    // One event id is shared by every endpoint that got it.
+    let shared = everything.iter().find(|d| d.event_type == "export.completed").ok_or("export delivery")?;
+    assert_eq!(shared.event_id, exports[0].event_id);
+
+    // Deliver the document event: the receiver sees the minimal body, correctly signed.
+    let created = everything.iter().find(|d| d.event_type == "document.created").ok_or("created delivery")?;
+    assert_eq!(attempt(&pool, &setup, created.id).await?, Outcome::Delivered { status: 200 });
+    let request = &receiver.requests()[0];
+    let body: serde_json::Value = serde_json::from_slice(&request.body)?;
+    assert_eq!(body["type"], "document.created");
+    assert_eq!(body["id"].as_str(), Some(created.event_id.to_string().as_str()));
+    assert_eq!(body["tenant_id"].as_str(), Some(setup.tenant.to_string().as_str()));
+    let mut keys: Vec<&str> = body["data"].as_object().ok_or("data")?.keys().map(String::as_str).collect();
+    keys.sort_unstable();
+    assert_eq!(keys, ["document_id", "external_document_id", "workspace_id"]);
+    assert!(!String::from_utf8_lossy(&request.body).contains("Secret plans"));
+    let timestamp: i64 = request.header("x-figcraft-timestamp").ok_or("timestamp")?.parse()?;
+    assert!(verify_signature(
+        setup.secret.as_bytes(),
+        request.header("x-figcraft-signature").ok_or("signature")?,
+        timestamp,
+        &request.body,
+        now(),
+        SIGNATURE_TOLERANCE_SECS
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn rotation_signs_with_both_secrets_during_the_overlap() -> TestResult {
     let Some(pool) = pool().await? else { return Ok(()) };
     let receiver = Receiver::start(&[]).await?;

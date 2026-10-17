@@ -733,6 +733,128 @@ async fn webhook_deliveries_can_be_listed_inspected_and_replayed_through_the_api
 }
 
 #[tokio::test]
+async fn document_changes_publish_minimal_events_to_subscribed_endpoints_only() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let a = world(&pool).await?;
+    let b = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let base = "/host/systems/host-a/webhooks";
+    let hook = |events: Value| json!({"url": "https://hooks.example.com/x", "event_types": events});
+    let all = send(&app, "POST", base, Some(&a.all), &[], Some(&hook(json!([])))).await?.body["id"].as_str().ok_or("id")?.to_owned();
+    let all_too = send(&app, "POST", base, Some(&a.all), &[], Some(&hook(json!([])))).await?.body["id"].as_str().ok_or("id")?.to_owned();
+    let archived_only =
+        send(&app, "POST", base, Some(&a.all), &[], Some(&hook(json!(["document.archived"])))).await?.body["id"].as_str().ok_or("id")?.to_owned();
+    let updated_only =
+        send(&app, "POST", base, Some(&a.all), &[], Some(&hook(json!(["document.updated"])))).await?.body["id"].as_str().ok_or("id")?.to_owned();
+    let off = send(&app, "POST", base, Some(&a.all), &[], Some(&hook(json!([])))).await?.body["id"].as_str().ok_or("id")?.to_owned();
+    assert_eq!(send(&app, "PATCH", &format!("{base}/{off}"), Some(&a.all), &[], Some(&json!({"enabled": false}))).await?.status, 200);
+    // Tenant B has an endpoint for the same system id; it must see none of A's events.
+    let theirs = send(&app, "POST", base, Some(&b.all), &[], Some(&hook(json!([])))).await?.body["id"].as_str().ok_or("id")?.to_owned();
+
+    let count = |endpoint: String, tenant: TenantId, filter: &'static str| {
+        let pool = pool.clone();
+        async move {
+            let mut t = begin_tenant_transaction(&pool, tenant).await.map_err(err)?;
+            let n: i64 = sqlx::query_scalar("SELECT count(*) FROM webhook_deliveries WHERE endpoint_id = $1::uuid AND ($2 = '' OR event_type = $2)")
+                .bind(&endpoint)
+                .bind(filter)
+                .fetch_one(t.connection())
+                .await?;
+            t.rollback().await?;
+            Ok::<i64, Box<dyn std::error::Error>>(n)
+        }
+    };
+
+    // Create through the host API: only document.created, to the everything endpoints.
+    let create = json!({"external_id": "doc-1", "external_project_id": "p1", "name": "Quarterly secret plans"});
+    let made = send(&app, "POST", "/host/systems/host-a/documents", Some(&a.all), &extra(&key("event-create-01")), Some(&create)).await?;
+    assert_eq!(made.status, 201);
+    let document = made.body["id"].as_str().ok_or("id")?.to_owned();
+    assert_eq!((count(all.clone(), a.tenant, "document.created").await?, count(all_too.clone(), a.tenant, "").await?), (1, 1));
+    assert_eq!(
+        (
+            count(archived_only.clone(), a.tenant, "").await?,
+            count(updated_only.clone(), a.tenant, "").await?,
+            count(off.clone(), a.tenant, "").await?
+        ),
+        (0, 0, 0)
+    );
+    // A refused create (duplicate) publishes nothing: the event rolled back with the change.
+    let duplicate = send(&app, "POST", "/host/systems/host-a/documents", Some(&a.all), &extra(&key("event-create-02")), Some(&create)).await?;
+    assert_eq!(duplicate.status, 409);
+    assert_eq!(count(all.clone(), a.tenant, "").await?, 1);
+    // Replaying the create (same idempotency key) does not publish again either.
+    let replay = send(&app, "POST", "/host/systems/host-a/documents", Some(&a.all), &extra(&key("event-create-01")), Some(&create)).await?;
+    assert_eq!(replay.status, 201);
+    assert_eq!(count(all.clone(), a.tenant, "").await?, 1);
+
+    // Archive: the everything endpoints and the archive-only endpoint. Repeating it is a no-op.
+    for _ in 0..2 {
+        assert_eq!(send(&app, "POST", "/host/systems/host-a/documents/doc-1/archive", Some(&a.all), &[], None).await?.status, 200);
+    }
+    assert_eq!((count(all.clone(), a.tenant, "document.archived").await?, count(archived_only.clone(), a.tenant, "").await?), (1, 1));
+
+    // A person restores and renames it in the browser API: the host hears about it too.
+    let session = figcraft_cloud_storage::sessions::create_session(&pool, a.owner, figcraft_cloud_storage::sessions::SessionLimits::default())
+        .await
+        .map_err(err)?
+        .token;
+    let cookie = format!("__Host-figcraft_session={session}");
+    let tenant_header = a.tenant.to_string();
+    let browser = [("cookie", cookie.as_str()), ("x-figcraft-tenant", tenant_header.as_str()), ("origin", ORIGIN)];
+    let restored = send(&app, "POST", &format!("/documents/{document}/restore"), None, &browser, None).await?;
+    assert_eq!(restored.status, 200, "{}", restored.body);
+    let renamed = send(&app, "PATCH", &format!("/documents/{document}"), None, &browser, Some(&json!({"name": "Renamed behind your back"}))).await?;
+    assert_eq!(renamed.status, 200, "{}", renamed.body);
+    assert_eq!((count(all.clone(), a.tenant, "document.restored").await?, count(all.clone(), a.tenant, "document.updated").await?), (1, 1));
+    assert_eq!(count(updated_only.clone(), a.tenant, "").await?, 1);
+    assert_eq!(count(archived_only.clone(), a.tenant, "").await?, 1, "no new events for the archive-only endpoint");
+    assert_eq!(count(off.clone(), a.tenant, "").await?, 0, "a disabled endpoint receives nothing");
+    assert_eq!(count(all.clone(), a.tenant, "").await?, 4);
+
+    // Every body carries ids only: no document name, no matter how the change was made.
+    let mut t = begin_tenant_transaction(&pool, a.tenant).await.map_err(err)?;
+    let bodies: Vec<(String, String)> =
+        sqlx::query_as("SELECT event_type, convert_from(body, 'UTF8') FROM webhook_deliveries WHERE endpoint_id = $1::uuid ORDER BY created_at")
+            .bind(&all)
+            .fetch_all(t.connection())
+            .await?;
+    let shared: Vec<(String, String)> =
+        sqlx::query_as("SELECT event_id::text, endpoint_id::text FROM webhook_deliveries WHERE event_type = 'document.created' ORDER BY endpoint_id")
+            .fetch_all(t.connection())
+            .await?;
+    t.rollback().await?;
+    assert_eq!(
+        bodies.iter().map(|(event, _)| event.as_str()).collect::<Vec<_>>(),
+        vec!["document.created", "document.archived", "document.restored", "document.updated"]
+    );
+    for (event, body) in &bodies {
+        let parsed: Value = serde_json::from_str(body)?;
+        let mut top: Vec<&str> = parsed.as_object().ok_or("object")?.keys().map(String::as_str).collect();
+        top.sort_unstable();
+        assert_eq!(top, ["created_at", "data", "id", "tenant_id", "type"], "{event}");
+        let mut data: Vec<&str> = parsed["data"].as_object().ok_or("data")?.keys().map(String::as_str).collect();
+        data.sort_unstable();
+        assert_eq!(data, ["document_id", "external_document_id", "project_id", "workspace_id"], "{event}");
+        assert_eq!(parsed["data"]["document_id"].as_str(), Some(document.as_str()));
+        assert_eq!(parsed["data"]["external_document_id"], "doc-1");
+        assert!(!body.contains("secret plans") && !body.contains("Renamed"), "no document name in {body}");
+    }
+    // The same event goes to its endpoints under one event id.
+    assert_eq!(shared.len(), 2);
+    assert_eq!(shared[0].0, shared[1].0);
+
+    // Tenant B saw nothing; a host that is disabled stops publishing altogether.
+    assert_eq!(count(theirs.clone(), b.tenant, "").await?, 0);
+    let mut t = begin_tenant_transaction(&pool, a.tenant).await.map_err(err)?;
+    set_host_enabled(&mut t, "host-a", false).await.map_err(err)?;
+    t.commit().await?;
+    assert_eq!(send(&app, "POST", &format!("/documents/{document}/archive"), None, &browser, None).await?.status, 200);
+    assert_eq!(count(all.clone(), a.tenant, "").await?, 4, "a disabled host gets no events");
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_embed_exchange_is_rate_limited_per_issuer() -> Fallible<()> {
     let Some(pool) = pool().await? else { return Ok(()) };
     let world = world(&pool).await?;

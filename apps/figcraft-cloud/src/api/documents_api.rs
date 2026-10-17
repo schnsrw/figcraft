@@ -771,6 +771,7 @@ async fn rename_document_handler(
     let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentRename).await?;
     let record = rename_document(&mut transaction, id, name).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
     audit(&mut transaction, &caller, "document.rename", "document", id.as_uuid(), json!({})).await?;
+    super::host_events::publish_document_event(&mut transaction, "document.updated", &record).await?;
     commit(transaction).await?;
     Ok(Json(document_view(&record)))
 }
@@ -798,6 +799,12 @@ async fn document_transition(state: &AppState, caller: &Authenticated, id: &str,
     .map_err(repository_error)?
     .ok_or(ApiError::not_found())?;
     audit(&mut transaction, caller, audited, "document", id.as_uuid(), json!({})).await?;
+    let event = match transition {
+        DocumentTransition::Archive => "document.archived",
+        DocumentTransition::Restore => "document.restored",
+        DocumentTransition::Delete => "document.deleted",
+    };
+    super::host_events::publish_document_event(&mut transaction, event, &record).await?;
     commit(transaction).await?;
     Ok(Json(document_view(&record)))
 }

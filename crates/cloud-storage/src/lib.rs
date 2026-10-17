@@ -50,6 +50,7 @@ pub mod tenants;
 pub mod uploads;
 pub mod validation;
 pub mod webhook_delivery;
+pub mod webhook_events;
 pub mod webhooks;
 
 /// A SQLx transaction bound to one trusted tenant identifier.

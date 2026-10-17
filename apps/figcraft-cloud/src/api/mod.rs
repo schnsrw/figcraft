@@ -29,6 +29,7 @@ pub(crate) mod cursor;
 pub(crate) mod documents_api;
 pub(crate) mod error;
 pub(crate) mod host_api;
+pub(crate) mod host_events;
 pub(crate) mod rate_limit;
 pub(crate) mod realtime;
 pub(crate) mod teams_api;

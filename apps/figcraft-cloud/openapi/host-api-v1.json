@@ -1405,6 +1405,97 @@
             }
           }
         }
+      },
+      "WebhookEvent": {
+        "type": "object",
+        "description": "The body of every webhook delivery. It carries identifiers only: never a document or project name, content, comment text or personal data. Call the host API with the ids for anything more. Delivery is at least once; deduplicate on id. Signed with X-FigCraft-Signature.",
+        "required": [
+          "id",
+          "type",
+          "created_at",
+          "tenant_id",
+          "data"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Constant across retries and manual replays."
+          },
+          "type": {
+            "enum": [
+              "document.created",
+              "document.updated",
+              "document.archived",
+              "document.restored",
+              "document.deleted",
+              "export.completed",
+              "export.failed"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "description": "Unix seconds."
+          },
+          "tenant_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "data": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "document_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "external_document_id": {
+                "type": "string",
+                "description": "The host's own id for the document."
+              },
+              "workspace_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "project_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "export_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "format": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {
+    "event": {
+      "post": {
+        "operationId": "receiveWebhookEvent",
+        "summary": "What an endpoint receives.",
+        "description": "Headers: X-FigCraft-Event-Id, X-FigCraft-Event-Type, X-FigCraft-Delivery-Id, X-FigCraft-Timestamp (Unix seconds) and X-FigCraft-Signature (v1=hex HMAC-SHA256 over timestamp + '.' + raw body, one item per live secret; reject timestamps more than 300 seconds from your clock). Any 2xx acknowledges; anything else is retried after 10 s, 30 s, 2 min, 10 min, 30 min, 2 h, 6 h, then the delivery fails until replayed.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WebhookEvent"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Acknowledged."
+          }
+        }
       }
     }
   }

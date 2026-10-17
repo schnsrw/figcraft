@@ -53,6 +53,7 @@ use super::auth::{Authenticated, CredentialKind};
 use super::authenticator::hold_caller_access;
 use super::documents_api::{repository_error, valid_name};
 use super::error::{ApiError, ApiJson};
+use super::host_events::publish_document_event;
 use super::rate_limit::{Decision, RateLimitConfig};
 
 /// The OpenAPI document served and checked by the tests.
@@ -351,6 +352,7 @@ async fn create_document_handler(
         .await
         .map_err(mapping_error)?;
     audit_host(&mut transaction, &caller, "host.document.create", "document", record.id.as_uuid(), &system_id).await?;
+    publish_document_event(&mut transaction, "document.created", &record).await?;
     let view = document_json(&record, &body.external_id);
     complete(transaction, &caller, &idempotent, StatusCode::CREATED, &view).await
 }
@@ -383,6 +385,7 @@ async fn transition(state: &AppState, caller: &Authenticated, system_id: &str, e
         }
         let action = if archive { "host.document.archive" } else { "host.document.restore" };
         audit_host(&mut transaction, caller, action, "document", changed.id.as_uuid(), system_id).await?;
+        publish_document_event(&mut transaction, if archive { "document.archived" } else { "document.restored" }, &changed).await?;
         changed
     };
     let view = document_json(&record, external_id);
