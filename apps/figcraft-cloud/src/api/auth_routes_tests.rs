@@ -326,6 +326,88 @@ async fn auth_routes_without_identity_or_oidc_are_unavailable() {
     assert_eq!(reply.status, StatusCode::NOT_FOUND);
 }
 
+fn logout_token(issuer: &str, audience: &str, subject: &str, jti: &str) -> String {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let header = json!({"alg": "ES256", "kid": "ec-1", "typ": "logout+jwt"});
+    let claims = json!({
+        "iss": issuer, "aud": audience, "sub": subject, "sid": "d1-provider-session", "iat": now, "exp": now + 120, "jti": jti,
+        "events": {"http://schemas.openid.net/event/backchannel-logout": {}},
+    });
+    let input = format!("{}.{}", B64.encode(header.to_string()), B64.encode(claims.to_string()));
+    let signature = ec_key().sign(&ring::rand::SystemRandom::new(), input.as_bytes()).unwrap();
+    format!("{input}.{}", B64.encode(signature.as_ref()))
+}
+
+/// `POST /api/v1/auth/backchannel-logout` with a form body (no Origin, no cookies: the
+/// provider calls it server to server).
+async fn post_logout_token(app: &Router, content_type: &str, body: String) -> StatusCode {
+    let peer: SocketAddr = "192.0.2.51:4000".parse().unwrap();
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/api/v1/auth/backchannel-logout")
+        .extension(ConnectInfo(peer))
+        .header(header::CONTENT_TYPE, content_type)
+        .body(Body::from(body))
+        .unwrap();
+    app.clone().oneshot(request).await.unwrap().status()
+}
+
+#[tokio::test]
+async fn backchannel_logout_ends_every_session_of_the_identity_and_reveals_nothing() -> TestResult {
+    // Without a provider the route is unavailable, before the body is read.
+    let no_oidc = app(state(unreachable_pool(), identity(DeploymentMode::MultiTenant, None)));
+    assert_eq!(post_logout_token(&no_oidc, "application/x-www-form-urlencoded", "logout_token=x".into()).await, StatusCode::SERVICE_UNAVAILABLE);
+    let Some(pool) = pool().await else {
+        return Ok(());
+    };
+    let mock = start_mock().await;
+    let config =
+        OidcConfig { allow_insecure_loopback: true, ..OidcConfig::new(&mock.issuer, CLIENT_ID, None, "https://figcraft.test/api/v1/auth/callback") };
+    let provider = OidcProvider::discover(config).await?;
+    let issuer = provider.issuer().to_string();
+    let app = app(state(pool.clone(), identity(DeploymentMode::MultiTenant, None)).with_oidc(Arc::new(provider)));
+
+    let subject = format!("d1-bcl-{}", Uuid::new_v4());
+    let resolved = figcraft_cloud_storage::oidc_logins::resolve_identity(&pool, &issuer, &subject, "D1 Back-channel", &json!({})).await?;
+    let (first, second) = (session_for(&pool, resolved.principal_id).await, session_for(&pool, resolved.principal_id).await);
+    let bystander = session_for(&pool, user(&pool).await).await;
+    let alive = |token: String| {
+        let app = app.clone();
+        async move { call(&app, Method::GET, "/api/v1/auth/session", &[("cookie", &session_cookie(&token))], None).await.status == StatusCode::OK }
+    };
+    assert!(alive(first.clone()).await && alive(second.clone()).await);
+    let form = |token: &str| format!("logout_token={token}");
+
+    // Refused: not a form, no token, wrong audience, wrong issuer, unsigned.
+    let good = logout_token(&issuer, CLIENT_ID, &subject, &format!("jti-{}", Uuid::new_v4()));
+    assert_eq!(post_logout_token(&app, "application/json", form(&good)).await, StatusCode::BAD_REQUEST);
+    assert_eq!(post_logout_token(&app, "application/x-www-form-urlencoded", "other=1".into()).await, StatusCode::BAD_REQUEST);
+    let wrong_aud = logout_token(&issuer, "someone-else", &subject, &format!("jti-{}", Uuid::new_v4()));
+    assert_eq!(post_logout_token(&app, "application/x-www-form-urlencoded", form(&wrong_aud)).await, StatusCode::BAD_REQUEST);
+    let wrong_iss = logout_token("https://evil.example", CLIENT_ID, &subject, &format!("jti-{}", Uuid::new_v4()));
+    assert_eq!(post_logout_token(&app, "application/x-www-form-urlencoded", form(&wrong_iss)).await, StatusCode::BAD_REQUEST);
+    assert!(alive(first.clone()).await && alive(second.clone()).await, "refused tokens revoke nothing");
+
+    // Accepted: both sessions of the identity end; another principal's session does not.
+    assert_eq!(post_logout_token(&app, "application/x-www-form-urlencoded; charset=utf-8", form(&good)).await, StatusCode::OK);
+    assert!(!alive(first.clone()).await && !alive(second.clone()).await);
+    assert!(alive(bystander).await);
+    let (reason,): (String,) = sqlx::query_as("SELECT revoke_reason FROM browser_sessions WHERE token_hash = $1")
+        .bind(figcraft_cloud_storage::sessions::session_token_hash(&first).to_vec())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(reason, "logout");
+
+    // The same token again is a replay: refused.
+    assert_eq!(post_logout_token(&app, "application/x-www-form-urlencoded", form(&good)).await, StatusCode::BAD_REQUEST);
+    // A valid token for an identity with no sessions, or no link at all: the same 200.
+    let again = logout_token(&issuer, CLIENT_ID, &subject, &format!("jti-{}", Uuid::new_v4()));
+    assert_eq!(post_logout_token(&app, "application/x-www-form-urlencoded", form(&again)).await, StatusCode::OK);
+    let unknown = logout_token(&issuer, CLIENT_ID, &format!("d1-nobody-{}", Uuid::new_v4()), &format!("jti-{}", Uuid::new_v4()));
+    assert_eq!(post_logout_token(&app, "application/x-www-form-urlencoded", form(&unknown)).await, StatusCode::OK);
+    Ok(())
+}
+
 #[tokio::test]
 async fn rate_limit_still_applies_to_the_auth_routes() {
     let config =

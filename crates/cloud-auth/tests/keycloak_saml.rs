@@ -15,11 +15,18 @@
 //! logout, broker key rotation (unknown `kid` → one JWKS refresh) and revocation at the IdP,
 //! at the broker and at FigCraft. One sequential scenario: the steps share Keycloak state.
 //! Principals it creates are named `e4-alice Corp` under the container's unique issuer.
+//!
+//! The test also configures the broker client (G4, S4-025): a protocol mapper emits the brokered
+//! user's `groups` attribute (imported from the SAML `memberOf` attribute) as an ID-token claim,
+//! and Keycloak's back-channel logout URL points at a listener the test runs on loopback
+//! (reached from the container as `FIGCRAFT_TEST_KEYCLOAK_BACKCHANNEL_HOST`, default
+//! `host.docker.internal`). The listener hands each logout token to
+//! `OidcProvider::backchannel_logout`, as `POST /api/v1/auth/backchannel-logout` does.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use figcraft_cloud_auth::oidc::{LoginOutcome, OidcConfig, OidcError, OidcProvider};
+use figcraft_cloud_auth::oidc::{LoginOutcome, OidcConfig, OidcError, OidcProvider, logout_token_from_form};
 use figcraft_cloud_storage::sessions::{self, SessionLimits};
 use serde_json::{Value, json};
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -31,6 +38,7 @@ const MAX_BODY_BYTES: usize = 512 * 1024;
 const MAX_STEPS: usize = 20;
 const ROTATED_KEY_NAME: &str = "e4-rotated-rsa";
 const IDP_ALIAS: &str = "corp-saml";
+const GROUPS_MAPPER: &str = "e4-groups";
 
 struct Setup {
     keycloak_url: String,
@@ -196,6 +204,41 @@ impl Admin<'_> {
             "config": {"priority": ["1000"], "algorithm": ["RS256"], "keySize": ["2048"], "active": ["true"], "enabled": ["true"]},
         });
         self.call(reqwest::Method::POST, &format!("/{realm}/components"), Some(component)).await.map(|_| ())
+    }
+
+    async fn client_path(&self) -> Result<String, BoxError> {
+        let clients = self.get(&format!("/{}/clients?clientId={}", self.setup.broker_realm, self.setup.client_id)).await?;
+        let id = clients.get(0).and_then(|client| client.get("id")).and_then(Value::as_str).ok_or("no broker client")?;
+        Ok(format!("/{}/clients/{id}", self.setup.broker_realm))
+    }
+
+    /// Send back-channel logout for the FigCraft client to `backchannel_url` (session id
+    /// required), and emit the user's `groups` attribute as a multivalued ID-token claim.
+    async fn configure_client(&self, backchannel_url: &str) -> Result<(), BoxError> {
+        let path = self.client_path().await?;
+        let mut client = self.get(&path).await?;
+        let object = client.as_object_mut().ok_or("client is not an object")?;
+        object.insert("frontchannelLogout".to_owned(), Value::Bool(false));
+        let attributes = object.entry("attributes").or_insert_with(|| json!({}));
+        let attributes = attributes.as_object_mut().ok_or("client attributes are not an object")?;
+        attributes.insert("backchannel.logout.url".to_owned(), Value::String(backchannel_url.to_owned()));
+        attributes.insert("backchannel.logout.session.required".to_owned(), Value::String("true".to_owned()));
+        attributes.insert("backchannel.logout.revoke.offline.tokens".to_owned(), Value::String("false".to_owned()));
+        self.call(reqwest::Method::PUT, &path, Some(client)).await?;
+        let mappers = self.get(&format!("{path}/protocol-mappers/models")).await?;
+        let present =
+            mappers.as_array().is_some_and(|items| items.iter().any(|item| item.get("name").and_then(Value::as_str) == Some(GROUPS_MAPPER)));
+        if !present {
+            let mapper = json!({
+                "name": GROUPS_MAPPER, "protocol": "openid-connect", "protocolMapper": "oidc-usermodel-attribute-mapper",
+                "config": {
+                    "user.attribute": "groups", "claim.name": "groups", "jsonType.label": "String", "multivalued": "true",
+                    "id.token.claim": "true", "access.token.claim": "false", "userinfo.token.claim": "false",
+                },
+            });
+            self.call(reqwest::Method::POST, &format!("{path}/protocol-mappers/models"), Some(mapper)).await?;
+        }
+        Ok(())
     }
 
     /// The active RS256 key's id and certificate.
@@ -461,6 +504,39 @@ async fn login(
     Ok((flow, outcome))
 }
 
+type LogoutResult = (String, Result<u64, OidcError>);
+
+/// A loopback listener standing in for `POST /api/v1/auth/backchannel-logout`: every logout
+/// token Keycloak sends goes through `OidcProvider::backchannel_logout`; the token and result are
+/// reported on the channel. Returns the URL the container uses and the channel.
+async fn start_backchannel(
+    provider: Arc<OidcProvider>,
+    pool: PgPool,
+) -> Result<(String, tokio::sync::mpsc::UnboundedReceiver<LogoutResult>), BoxError> {
+    let bind = std::env::var("FIGCRAFT_TEST_KEYCLOAK_BACKCHANNEL_BIND").unwrap_or_else(|_| "127.0.0.1:0".to_owned());
+    let host = std::env::var("FIGCRAFT_TEST_KEYCLOAK_BACKCHANNEL_HOST").unwrap_or_else(|_| "host.docker.internal".to_owned());
+    let listener = tokio::net::TcpListener::bind(bind).await?;
+    let url = format!("http://{host}:{}/api/v1/auth/backchannel-logout", listener.local_addr()?.port());
+    let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+    let handler = move |body: axum::body::Bytes| {
+        let (provider, pool, sender) = (Arc::clone(&provider), pool.clone(), sender.clone());
+        async move {
+            let Some(token) = logout_token_from_form(&body) else {
+                return axum::http::StatusCode::BAD_REQUEST;
+            };
+            let result = provider.backchannel_logout(&pool, &token).await;
+            let status = if result.is_ok() { axum::http::StatusCode::OK } else { axum::http::StatusCode::BAD_REQUEST };
+            let _ = sender.send((token, result));
+            status
+        }
+    };
+    let router = axum::Router::new().route("/api/v1/auth/backchannel-logout", axum::routing::post(handler));
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, router).await;
+    });
+    Ok((url, receiver))
+}
+
 async fn jwks_kids(http: &reqwest::Client, issuer: &str) -> Result<Vec<String>, BoxError> {
     let jwks: Value = serde_json::from_str(&read_body(http.get(format!("{issuer}/protocol/openid-connect/certs")).send().await?).await?)?;
     Ok(jwks
@@ -497,8 +573,10 @@ async fn saml_federation_through_the_keycloak_broker() -> TestResult {
         allow_insecure_loopback: true,
         ..OidcConfig::new(&setup.issuer, &setup.client_id, Some(&setup.client_secret), &setup.redirect_url)
     };
-    let provider = OidcProvider::discover(config.clone()).await?;
+    let provider = Arc::new(OidcProvider::discover(config.clone()).await?);
     assert_eq!(provider.issuer(), setup.issuer);
+    let (backchannel_url, mut logouts) = start_backchannel(Arc::clone(&provider), pool.clone()).await?;
+    admin.configure_client(&backchannel_url).await?;
 
     // 1. First login: broker → SAML IdP password form → SAML POST → broker creates the user →
     //    FigCraft creates the principal.
@@ -529,6 +607,10 @@ async fn saml_federation_through_the_keycloak_broker() -> TestResult {
     assert_eq!(name, "e4-alice Corp");
     assert_eq!(metadata.get("email").and_then(Value::as_str), Some("alice@corp.example"));
     assert_eq!(metadata.get("email_verified").and_then(Value::as_bool), Some(true));
+    // The SAML `memberOf` attribute reaches FigCraft as the bounded `groups` claim (recorded,
+    // never granted from).
+    assert_eq!(metadata.get("groups"), Some(&json!(["designers"])), "{metadata}");
+    assert_eq!(metadata.get("groups_truncated"), None);
 
     // 2. SSO: the broker session answers without the IdP; same principal, no duplicate.
     let (flow, outcome) = login(&provider, &pool, &mut browser).await?;
@@ -553,6 +635,26 @@ async fn saml_federation_through_the_keycloak_broker() -> TestResult {
     let (flow, outcome) = login(&provider, &pool, &mut browser).await?;
     assert!(flow.saw_saml && flow.saw_password_form, "{flow:?}");
     assert_eq!(outcome.ok_or("login after full logout stopped")??.principal_id, first.principal_id);
+
+    //    Back-channel logout: ending the broker session makes Keycloak POST a logout token to
+    //    FigCraft, which ends every FigCraft session of the principal. The same token again is
+    //    a replay and is refused.
+    while logouts.try_recv().is_ok() {}
+    let (web, desktop) =
+        (sessions::create_session(&pool, first.principal_id, limits).await?, sessions::create_session(&pool, first.principal_id, limits).await?);
+    assert!(sessions::resolve_session(&pool, &web.token, limits).await.is_ok());
+    admin.logout_user(broker, &broker_user).await?;
+    let (logout_token, result) = tokio::time::timeout(Duration::from_secs(15), logouts.recv()).await?.ok_or("back-channel listener stopped")?;
+    assert!(matches!(result, Ok(revoked) if revoked >= 2), "{result:?}");
+    assert!(sessions::resolve_session(&pool, &web.token, limits).await.is_err());
+    assert!(sessions::resolve_session(&pool, &desktop.token, limits).await.is_err());
+    assert_eq!(provider.backchannel_logout(&pool, &logout_token).await, Err(OidcError::InvalidLogoutToken));
+    let (reason,): (String,) = sqlx::query_as("SELECT revoke_reason FROM browser_sessions WHERE token_hash = $1")
+        .bind(sessions::session_token_hash(&web.token).to_vec())
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(reason, "logout");
+    eprintln!("back-channel logout: {result:?}");
 
     // 4. Broker key rotation: a new, higher-priority RS256 key signs the next ID token. Its kid
     //    is not in the JWKS the provider cached at discovery, so it refreshes once and accepts.

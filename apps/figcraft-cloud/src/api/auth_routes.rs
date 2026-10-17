@@ -8,14 +8,15 @@
 //! | `POST logout` | revokes the session, clears the session and share cookies (`204`, idempotent) |
 //! | `POST bootstrap/complete {"token"}` | single-tenant only: the signed-in user completes bootstrap and becomes `tenant_owner`; the session is rotated (privilege change) |
 //! | `POST share/exchange {"token"}` | exchanges a share token for a share-session cookie bound to its document, living at most 1 h and never past the link's expiry |
+//! | `POST backchannel-logout` (form `logout_token`) | OIDC Back-Channel Logout 1.0 from the provider (server to server, no cookies, no same-origin check): validates the logout token and revokes every session of the principal linked to `(issuer, sub)`. `200` whether or not any session existed, `400` for any invalid, replayed or `sub`-less token, `503` when no provider is configured or the store is down (the provider retries) |
 //! | `GET session` | who am I: credential kind, principal, tenant role and grants, scopes or shared document; never a secret. Rotates a browser session past the rotation interval |
 //!
-//! Every `POST` here must pass the same-origin check (`Origin` or `Sec-Fetch-Site`), session or
+//! Every `POST` here except `backchannel-logout` must pass the same-origin check (`Origin` or `Sec-Fetch-Site`), session or
 //! not, so a cross-site page cannot log a victim out, into a share session, or into bootstrap.
 //!
 //! While a single-tenant deployment still needs bootstrap, [`bootstrap_gate`] answers every other
-//! `/api/v1` route with a fixed `403 bootstrap_required`; only login, callback, logout, session
-//! and bootstrap completion are served.
+//! `/api/v1` route with a fixed `403 bootstrap_required`; only login, callback, logout,
+//! back-channel logout, session and bootstrap completion are served.
 
 use axum::Router;
 use axum::body::Body;
@@ -24,7 +25,7 @@ use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use figcraft_cloud_auth::oidc::{LOGIN_ATTEMPT_LIFETIME_SECS, return_to_allowed};
+use figcraft_cloud_auth::oidc::{LOGIN_ATTEMPT_LIFETIME_SECS, MAX_LOGOUT_FORM_BYTES, OidcError, logout_token_from_form, return_to_allowed};
 use figcraft_cloud_auth::session_policy::{COOKIE_NAME, RotationTrigger, clear_cookie};
 use figcraft_cloud_domain::{DeploymentMode, ErrorCode, PrincipalId, TenantId};
 use figcraft_cloud_storage::begin_tenant_transaction;
@@ -53,6 +54,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/login", get(login))
         .route("/callback", get(callback))
         .route("/logout", post(logout))
+        .route("/backchannel-logout", post(backchannel_logout))
         .route("/bootstrap/complete", post(complete_bootstrap))
         .route("/share/exchange", post(exchange_share))
         .route("/session", get(session))
@@ -161,6 +163,29 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
         revoke_best_effort(&state, token).await?;
     }
     respond(StatusCode::NO_CONTENT, &[clear_cookie(), clear_host_cookie(SHARE_COOKIE, "Strict")], None, None)
+}
+
+/// `POST backchannel-logout`: the provider's server-to-server logout notice. The answer never
+/// depends on whether a session existed (`200` either way).
+async fn backchannel_logout(State(state): State<AppState>, request: Request) -> Result<Response, ApiError> {
+    identity(&state)?;
+    let provider = state.oidc().ok_or(ApiError::unavailable())?;
+    let form = request
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(';').next())
+        .is_some_and(|media| media.trim().eq_ignore_ascii_case("application/x-www-form-urlencoded"));
+    if !form {
+        return Err(ApiError::new(ErrorCode::InvalidRequest));
+    }
+    let body = axum::body::to_bytes(request.into_body(), MAX_LOGOUT_FORM_BYTES).await.map_err(|_| ApiError::new(ErrorCode::InvalidRequest))?;
+    let token = logout_token_from_form(&body).ok_or(ApiError::new(ErrorCode::InvalidRequest))?;
+    match provider.backchannel_logout(state.pool(), &token).await {
+        Ok(_) => respond(StatusCode::OK, &[], None, None),
+        Err(OidcError::Storage | OidcError::Discovery) => Err(ApiError::unavailable()),
+        Err(_) => Err(ApiError::new(ErrorCode::InvalidRequest)),
+    }
 }
 
 #[derive(Deserialize)]
@@ -305,7 +330,12 @@ async fn gate_check(state: &AppState, identity: &IdentityConfig, tenant: TenantI
 fn bootstrap_exempt(path: &str) -> bool {
     matches!(
         path,
-        "/api/v1/auth/login" | "/api/v1/auth/callback" | "/api/v1/auth/logout" | "/api/v1/auth/session" | "/api/v1/auth/bootstrap/complete"
+        "/api/v1/auth/login"
+            | "/api/v1/auth/callback"
+            | "/api/v1/auth/logout"
+            | "/api/v1/auth/backchannel-logout"
+            | "/api/v1/auth/session"
+            | "/api/v1/auth/bootstrap/complete"
     )
 }
 
