@@ -1,4 +1,8 @@
 :root {
+  /* Runtime branding (src/branding.ts) overrides these from /branding.json. */
+  --brand-primary: #b7df79;
+  --brand-accent: #94b85c;
+
   color: #ebece7;
   background: #121412;
   font-family:
@@ -31,7 +35,11 @@ a {
 .app-shell {
   min-height: 100vh;
   background:
-    radial-gradient(circle at 82% 8%, rgb(148 184 92 / 12%), transparent 32rem),
+    radial-gradient(
+      circle at 82% 8%,
+      color-mix(in srgb, var(--brand-accent) 12%, transparent),
+      transparent 32rem
+    ),
     #121412;
 }
 
@@ -55,9 +63,40 @@ a {
 .brand-mark {
   width: 13px;
   height: 13px;
-  border: 2px solid #b7df79;
+  border: 2px solid var(--brand-primary);
   border-radius: 4px 8px 4px 8px;
   transform: rotate(-9deg);
+}
+
+.brand-logo {
+  display: block;
+  width: auto;
+  max-width: 160px;
+  height: 24px;
+  object-fit: contain;
+}
+
+.site-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 20px 28px;
+  color: #999f93;
+  font-size: 0.85rem;
+  border-top: 1px solid #2b2e29;
+}
+
+.site-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.site-footer a:hover,
+.site-footer a:focus-visible {
+  color: var(--brand-primary);
 }
 
 .environment-label,
@@ -114,7 +153,7 @@ a {
 }
 
 .workspace-main > .eyebrow {
-  color: #b7df79;
+  color: var(--brand-primary);
 }
 
 h1 {

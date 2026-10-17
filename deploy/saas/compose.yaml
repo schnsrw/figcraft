@@ -80,6 +80,24 @@ services:
       dockerfile: deploy/saas/web.Dockerfile
       args:
         CADDY_IMAGE: ${CADDY_IMAGE:?set a reviewed Caddy image reference}
+    # Runtime branding, rendered into /branding.json per request: change these and restart the
+    # web container (no rebuild). Web service only: the cloud service rejects unknown FIGCRAFT_*
+    # settings. See docs/saas/branding-and-configuration.md.
+    environment:
+      FIGCRAFT_BRAND_PRODUCT_NAME: ${FIGCRAFT_BRAND_PRODUCT_NAME:-}
+      FIGCRAFT_BRAND_SHORT_NAME: ${FIGCRAFT_BRAND_SHORT_NAME:-}
+      FIGCRAFT_BRAND_PRIMARY_COLOR: ${FIGCRAFT_BRAND_PRIMARY_COLOR:-}
+      FIGCRAFT_BRAND_ACCENT_COLOR: ${FIGCRAFT_BRAND_ACCENT_COLOR:-}
+      FIGCRAFT_BRAND_LOGO_URL: ${FIGCRAFT_BRAND_LOGO_URL:-}
+      FIGCRAFT_BRAND_FAVICON_URL: ${FIGCRAFT_BRAND_FAVICON_URL:-}
+      FIGCRAFT_BRAND_SUPPORT_URL: ${FIGCRAFT_BRAND_SUPPORT_URL:-}
+      FIGCRAFT_BRAND_TERMS_URL: ${FIGCRAFT_BRAND_TERMS_URL:-}
+      FIGCRAFT_BRAND_PRIVACY_URL: ${FIGCRAFT_BRAND_PRIVACY_URL:-}
+      FIGCRAFT_BRAND_FOOTER_TEXT: ${FIGCRAFT_BRAND_FOOTER_TEXT:-}
+    # Optional deployer brand assets, served read-only at /brand/* (for example
+    # FIGCRAFT_BRAND_LOGO_URL=/brand/logo.svg). Uncomment and point at a directory you own:
+    # volumes:
+    #   - ./brand:/srv/brand:ro
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
       interval: 10s

@@ -1,0 +1,22 @@
+{{- /*
+  FigCraft Cloud runtime branding, rendered by Caddy's `templates` handler on every request to
+  /branding.json from FIGCRAFT_BRAND_* variables in the web container's environment.
+
+  Every value goes through sprig's `toJson` (Go encoding/json): quotes, backslashes, control
+  characters, `<`, `>` and `&` are escaped and invalid UTF-8 becomes U+FFFD, so an env value can
+  only ever become one JSON string. Clients still validate every field and fall back to the
+  default for anything invalid (docs/saas/branding-and-configuration.md).
+*/ -}}
+{
+  "version": 1,
+  "productName": {{ env "FIGCRAFT_BRAND_PRODUCT_NAME" | default "FigCraft" | toJson }},
+  "shortName": {{ env "FIGCRAFT_BRAND_SHORT_NAME" | default "FigCraft" | toJson }},
+  "primaryColor": {{ env "FIGCRAFT_BRAND_PRIMARY_COLOR" | default "#b7df79" | toJson }},
+  "accentColor": {{ env "FIGCRAFT_BRAND_ACCENT_COLOR" | default "#94b85c" | toJson }},
+  "logoUrl": {{ env "FIGCRAFT_BRAND_LOGO_URL" | toJson }},
+  "faviconUrl": {{ env "FIGCRAFT_BRAND_FAVICON_URL" | toJson }},
+  "supportUrl": {{ env "FIGCRAFT_BRAND_SUPPORT_URL" | toJson }},
+  "termsUrl": {{ env "FIGCRAFT_BRAND_TERMS_URL" | toJson }},
+  "privacyUrl": {{ env "FIGCRAFT_BRAND_PRIVACY_URL" | toJson }},
+  "footerText": {{ env "FIGCRAFT_BRAND_FOOTER_TEXT" | toJson }}
+}

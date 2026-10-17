@@ -18,8 +18,15 @@
 //! URL fragment: `#join=<url-encoded invite link>` joins that live session on startup (how a
 //! FigCraft Cloud share link opens the editor at `/edit/`); the fragment is then cleared so the
 //! link's secret doesn't stay in the address bar, history or bookmarks.
+//!
+//! Branding: on startup the page fetches `/branding.json` from its own origin (FigCraft Cloud's
+//! web container renders it from `FIGCRAFT_BRAND_*`); a valid product name replaces the document
+//! title and the loading text. Without it the defaults stay.
 
-// The fragment parser is pure (tested on the host); only the browser shell calls it.
+// The branding validator and fragment parser are pure (tested on the host); only the browser
+// shell calls them.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod branding;
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod hash;
 #[cfg(target_arch = "wasm32")]

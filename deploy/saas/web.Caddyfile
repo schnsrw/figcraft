@@ -1,6 +1,32 @@
 :8080 {
 	encode zstd gzip
 
+	# Runtime branding (docs/saas/branding-and-configuration.md): rendered per request from the
+	# container's FIGCRAFT_BRAND_* environment, so a restart of this container rebrands the shell
+	# and the editor without a rebuild. The template JSON-escapes every value; clients validate.
+	handle /branding.json {
+		root * /etc/caddy/branding
+		header Content-Type "application/json; charset=utf-8"
+		header Cache-Control "no-cache"
+		header X-Content-Type-Options nosniff
+		header -ETag
+		header -Last-Modified
+		templates {
+			mime application/json
+		}
+		file_server
+	}
+
+	# Deployer-supplied brand assets (optional read-only bind mount at /srv/brand). Never falls
+	# back to index.html; scripts inside an SVG opened directly are sandboxed.
+	handle /brand/* {
+		root * /srv
+		header Cache-Control "no-cache"
+		header X-Content-Type-Options nosniff
+		header Content-Security-Policy "default-src 'none'; img-src 'self'; style-src 'unsafe-inline'; sandbox"
+		file_server
+	}
+
 	# The FigCraft editor (wasm32). `/edit/#join=<invite link>` joins a cloud document; the
 	# fragment never reaches the server. No SPA fallback here: a missing asset is a 404, never
 	# index.html served as `.wasm`.
