@@ -63,9 +63,12 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
   Progress (2026-10-18, not complete): in real browsers a rectangle drawn in one session appears in
   the other and an ellipse drawn there appears in the first with the other person's cursor and a
   coloured avatar; a third session that joins later sees both shapes and both people; after every
-  session closed and the cloud container restarted, a new session still showed both shapes. Not yet
-  checked: losing the connection mid-edit and reconnecting without losing work, export, and names
-  (people show as "Guest 1/2", see TS-007). Defects: the editor shows the file as "Untitled"
+  session closed and the cloud container restarted, a new session still showed both shapes. With the cloud
+  service stopped, a rectangle drawn in one open session was kept, and when the service came back
+  that session reconnected and the second session showed all four layers including it. Not yet
+  checked: export (the Export page as PNG button gave no download event in headless Chrome; the
+  editor may use a save-file picker, so this is unverified, not failing), and names (people show as
+  "Guest 1/2", see TS-007). Defects: the editor shows the file as "Untitled"
   instead of its workspace name, and opens an extra empty local tab beside it.
 - [ ] **TS-005** Teams and projects work as a team expects: a team owns projects, files inherit
   the team's access, members have roles, an admin adds people and a team lead (S6-052, the
@@ -3154,3 +3157,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | TS-003 checked off: real-browser run of setup, sign-in, workspace, project, file and editor with two live sessions and a late joiner (webapp/e2e). TS-004 progress recorded. Added TS-015 (UI quality pass) after owner feedback. |
 | 2026-10-18 | TS-012..014 screens: login name at invitation sign-up, link-only invitations, admin temporary passwords (typed or generated, shown once), set a new password, must-change-password screen. 157 web tests. |
 | 2026-10-18 | TS-010 checked off (self-host guide, init-secrets, backup and restore with a rehearsed drill); added TS-016 (HTTPS gateway for a team hostname, partly verified). |
+| 2026-10-18 | TS-004 progress: real outage (cloud service stopped mid-edit) kept the edit and both sessions converged after it returned; export still unverified. |
