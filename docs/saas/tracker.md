@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (19/25) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (19/25); S6 in progress (1/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 19 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 1 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2394,8 +2394,17 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ### Host registration and tokens
 
-- [ ] **S6-001** Implement registered host systems, issuers, keys, audiences and allowed origins.
+- [x] **S6-001** Implement registered host systems, issuers, keys, audiences and allowed origins.
   Depends on S4-GATE and S5-GATE.
+  Evidence: migration `20261018000001_host_systems.sql` (`host_systems`, `host_system_keys`, forced
+  RLS, definer lookup `figcraft_host_issuer`), `crates/cloud-storage/src/host_systems.rs` and
+  `crates/cloud-storage/tests/host_systems.rs` (register/read/update/disable, input validation of
+  exact https origins and bounds, issuer and system-id conflicts, rotation overlap and retirement
+  windows, live-key cap, cross-tenant RLS isolation; run live against PostgreSQL). Only public
+  EdDSA/ES256 keys are stored (no HMAC hosts, no secrets at rest). Not done: the schema version
+  gate constants in `apps/figcraft-cloud/src/main.rs`, `deploy/saas/smoke-preflight.sh` and docs
+  still say `20261017000007` and must move to the newest migration (left to the S5 owner of
+  `main.rs`); no admin API or UI to register hosts yet (S6-012).
 - [ ] **S6-002** Implement external tenant, workspace, principal and resource mappings.
 - [ ] **S6-003** Implement short-lived embed-token validation and one-use `jti` consumption.
 - [ ] **S6-004** Enforce host maximum role and mapped resource boundary.
@@ -2696,3 +2705,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S5-006: a replica passes a client on to the room's owner (relay-to-relay proxy over the lease's endpoint) instead of refusing it; no client, protocol or gateway change. Revocation, two-replica and race tests pass live. S5 reaches 17/25. |
 | 2026-10-18 | S5-012: SIGTERM/SIGINT drain for rolling releases (not ready, new relay connections turned away with the restarting code, grace period, then commit, snapshot, lease release and a restarting close for connected clients); verified against the real process. S5 reaches 18/25. |
 | 2026-10-18 | S5-011: emptied rooms stay warm for a configurable period before closing (saved, lease released); busy rooms snapshot by batch count or time instead of only on close. Hub housekeeping tick added (patch FP-008). S5 reaches 19/25. |
+| 2026-10-18 | S6-001: registered embedding host systems (issuer, audiences, exact https parent origins, max role, enabled flag) with rotating public EdDSA/ES256 keys, tenant RLS and a pre-tenant issuer lookup. S6 reaches 1/31. |

@@ -15,6 +15,7 @@ pub mod events;
 pub mod exports;
 pub mod external_mappings;
 pub mod garbage_collection;
+pub mod host_systems;
 pub mod idempotency;
 pub mod invitations;
 pub mod job_authorization;
@@ -200,7 +201,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                     'upload_reservations', 'libraries', 'library_team_grants', 'library_versions', 'library_usages',
                     'plugins', 'plugin_versions', 'exports', 'document_thumbnails', 'retention_holds', 'share_links', 'oidc_login_attempts', 'browser_sessions',
                     'tenant_bootstrap', 'service_accounts', 'service_account_credentials', 'team_invitations',
-                    'member_permissions', 'support_access_grants', 'room_leases'
+                    'member_permissions', 'support_access_grants', 'room_leases', 'host_systems', 'host_system_keys'
                 ])
             LOOP
                 EXECUTE format('ALTER TABLE public.%I OWNER TO figcraft_migrator', table_name);
@@ -220,7 +221,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                 SELECT p.oid::regprocedure::text FROM pg_proc p
                 WHERE p.pronamespace = 'public'::regnamespace AND p.proname = ANY (ARRAY[
                     'figcraft_live_share_link', 'figcraft_dead_share_links', 'figcraft_service_credential',
-                    'figcraft_invitation_tenant', 'figcraft_principal_tenants'
+                    'figcraft_invitation_tenant', 'figcraft_principal_tenants', 'figcraft_host_issuer'
                 ])
             LOOP
                 EXECUTE format('ALTER FUNCTION %s OWNER TO figcraft_migrator', function_signature);

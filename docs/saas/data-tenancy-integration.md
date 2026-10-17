@@ -68,6 +68,8 @@ RLS policy work must account for membership-based tenant discovery before a tena
 | `projects` | `id`, `tenant_id`, `workspace_id`, optional owning `team_id`, `name`, `state`, timestamps |
 | `documents` | `id`, `tenant_id`, `workspace_id`, `project_id`, `name`, `state`, `current_seq`, `fencing_token`, snapshot pointer, timestamps |
 | `room_leases` | `tenant_id`, `document_id`, `owner_id`, bounded WebSocket endpoint, `fencing_token`, expiry and update time |
+| `host_systems` | `tenant_id`, `system_id`, globally unique `issuer`, `audiences`, exact `allowed_origins`, `max_role` (viewer/commenter/editor), `enabled` |
+| `host_system_keys` | `tenant_id`, `system_id`, `kid`, `alg` (EdDSA or ES256), public key, `not_before`, `expires_at`, `retired_at`; public keys only |
 | `document_members` | `tenant_id`, `document_id`, `principal_id`, `role`, timestamps |
 | `document_team_grants` | `tenant_id`, `document_id`, `team_id`, `role`, timestamps |
 | `share_links` | `id`, `tenant_id`, `document_id`, `token_hash`, `role`, expiry, revocation, timestamps |
