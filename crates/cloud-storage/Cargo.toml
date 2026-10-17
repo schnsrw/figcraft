@@ -33,6 +33,7 @@ roxmltree = "0.21"
 unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
+figcraft-doc = { workspace = true }
 zip = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "io-util"] }
 

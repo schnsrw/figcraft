@@ -1921,6 +1921,7 @@ dependencies = [
  "crc32fast",
  "figcraft-cloud-domain",
  "figcraft-collab",
+ "figcraft-doc",
  "jiff",
  "md-5",
  "reqwest",

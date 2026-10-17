@@ -2441,6 +2441,11 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   bytes is the transport's existing, separately tested behaviour (S5-024 measured it); per-tenant
   and per-plan quotas are S8 work.
 - [ ] **S5-018** Move large image transfer to verified asset references and negotiated capability.
+  Progress (TS-009 steps, one commit each; unchecked until step 6 has its end-to-end evidence):
+  (1/6) measured. Inline images of 12 MiB and over are accepted by the collaboration server but
+  can never be stored (16 MiB event cap), so the room is closed and the sender retries for ever;
+  late joiners download every image in one welcome; stored state holds each image twice.
+  `crates/cloud-storage/tests/large_image_limits.rs` (no database), `large-images.md`.
 - [x] **S5-019** Preserve compatibility with current filesystem-server and desktop-hosted sessions.
   Evidence: Compatibility with self-hosted sessions is proven by three new test files; all pass. (1)
   apps/figcraft-server/tests/cloud_compat.rs starts figcraft-server in-process on loopback with a
