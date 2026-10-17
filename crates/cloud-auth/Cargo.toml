@@ -6,5 +6,8 @@ license.workspace = true
 publish = false
 description = "Authentication and authorization adapters for FigCraft Cloud"
 
+[dependencies]
+figcraft-cloud-domain = { path = "../cloud-domain" }
+
 [lints]
 workspace = true
