@@ -61,6 +61,8 @@ export interface CloudDocument {
   /** Present on a single-document read: the caller's role there and whether they can edit. */
   role?: string | null;
   can_edit?: boolean;
+  /** Unix seconds of the last edit, rename or state change, when the server reports it. */
+  updated_at?: number;
 }
 
 export interface CollabLink {

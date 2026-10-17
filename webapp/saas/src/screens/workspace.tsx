@@ -10,11 +10,16 @@ import {
 } from "../api/workspaces";
 import {
   CreateForm,
+  EmptyState,
   ErrorNotice,
   LoadingNotice,
   NameDialog,
+  PageHeader,
   StateBadge,
   asApiError,
+  initialOf,
+  relativeTime,
+  tint,
   useLoad,
 } from "../components";
 import { Link, useRouter } from "../router";
@@ -108,58 +113,67 @@ export function WorkspaceScreen({ workspaceId }: { workspaceId: string }) {
 
   return (
     <>
-      <nav aria-label="Breadcrumb" className="muted small">
-        <Link to="/">Files</Link> / <span aria-current="page">{ws.name}</span>
-      </nav>
-      <div className="toolbar">
-        <h1>
-          {ws.name} <StateBadge state={ws.state} />
-        </h1>
-        <div className="actions">
-          {can?.rename === true && (
-            <button
-              type="button"
-              className="button"
-              onClick={() => setDialog({ kind: "rename-workspace" })}
-            >
-              Rename workspace
-            </button>
-          )}
-          {can?.archive === true && ws.state === "active" && (
-            <button
-              type="button"
-              className="button"
-              onClick={() =>
-                void act(
-                  () => workspaces.archive(client, ws.id),
-                  reloadWorkspace,
-                )
-              }
-            >
-              Archive workspace
-            </button>
-          )}
-          {can?.restore === true && ws.state === "archived" && (
-            <button
-              type="button"
-              className="button primary"
-              onClick={() =>
-                void act(
-                  () => workspaces.restore(client, ws.id),
-                  reloadWorkspace,
-                )
-              }
-            >
-              Restore workspace
-            </button>
-          )}
-        </div>
-      </div>
+      <PageHeader
+        breadcrumb={
+          <nav aria-label="Breadcrumb" className="breadcrumb">
+            <Link to="/">Files</Link>
+            <span aria-hidden="true">/</span>
+            <span aria-current="page">{ws.name}</span>
+          </nav>
+        }
+        title={
+          <>
+            {ws.name} <StateBadge state={ws.state} />
+          </>
+        }
+        description={`${visibleProjects.length} project${visibleProjects.length === 1 ? "" : "s"}`}
+        actions={
+          <>
+            {can?.rename === true && (
+              <button
+                type="button"
+                className="button"
+                onClick={() => setDialog({ kind: "rename-workspace" })}
+              >
+                Rename workspace
+              </button>
+            )}
+            {can?.archive === true && ws.state === "active" && (
+              <button
+                type="button"
+                className="button"
+                onClick={() =>
+                  void act(
+                    () => workspaces.archive(client, ws.id),
+                    reloadWorkspace,
+                  )
+                }
+              >
+                Archive workspace
+              </button>
+            )}
+            {can?.restore === true && ws.state === "archived" && (
+              <button
+                type="button"
+                className="button primary"
+                onClick={() =>
+                  void act(
+                    () => workspaces.restore(client, ws.id),
+                    reloadWorkspace,
+                  )
+                }
+              >
+                Restore workspace
+              </button>
+            )}
+          </>
+        }
+      />
 
       {problem !== null && <ErrorNotice error={problem} />}
 
       <div className="layout-two">
-        <section aria-labelledby="projects-heading">
+        <aside className="side-panel" aria-labelledby="projects-heading">
           <h2 id="projects-heading">Projects</h2>
           {projectList.kind === "loading" && (
             <LoadingNotice label="Loading projects…" />
@@ -170,7 +184,7 @@ export function WorkspaceScreen({ workspaceId }: { workspaceId: string }) {
           {projectList.kind === "ready" && (
             <>
               {visibleProjects.length === 0 ? (
-                <p className="muted">No projects yet.</p>
+                <p className="muted small">No projects yet.</p>
               ) : (
                 <ul className="side-list" aria-label="Projects">
                   {visibleProjects.map((project) => (
@@ -181,45 +195,57 @@ export function WorkspaceScreen({ workspaceId }: { workspaceId: string }) {
                           current?.id === project.id ? "page" : undefined
                         }
                       >
-                        {project.name} <StateBadge state={project.state} />
+                        <span>{project.name}</span>
+                        <StateBadge state={project.state} />
                       </Link>
                     </li>
                   ))}
                 </ul>
               )}
-              <label className="check">
-                <input
-                  type="checkbox"
-                  checked={showArchived}
-                  onChange={(event) => setShowArchived(event.target.checked)}
-                />
-                Show archived
-              </label>
+              {allProjects.some((project) => project.state === "archived") && (
+                <label className="check">
+                  <input
+                    type="checkbox"
+                    checked={showArchived}
+                    onChange={(event) => setShowArchived(event.target.checked)}
+                  />
+                  Show archived
+                </label>
+              )}
               {can?.create_project === true && ws.state === "active" && (
-                <CreateForm
-                  label="New project"
-                  buttonLabel="Add project"
-                  onCreate={async (name) => {
-                    const created = await projects.create(client, ws.id, name);
-                    reloadProjects();
-                    navigate(`/workspace/${ws.id}?project=${created.id}`);
-                  }}
-                />
+                <div className="side-form">
+                  <CreateForm
+                    label="New project"
+                    buttonLabel="Add project"
+                    onCreate={async (name) => {
+                      const created = await projects.create(
+                        client,
+                        ws.id,
+                        name,
+                      );
+                      reloadProjects();
+                      navigate(`/workspace/${ws.id}?project=${created.id}`);
+                    }}
+                  />
+                </div>
               )}
             </>
           )}
-        </section>
+        </aside>
 
         <section aria-labelledby="files-heading">
           {current === null ? (
-            <>
-              <h2 id="files-heading">Files</h2>
-              <p className="muted">
-                {projectList.kind === "ready"
-                  ? "Choose or create a project to see its files."
-                  : ""}
-              </p>
-            </>
+            projectList.kind === "ready" ? (
+              <EmptyState
+                glyph="▤"
+                title="No project selected"
+                text={
+                  can?.create_project === true
+                    ? "Projects group related files, like one per product or campaign. Add the first one in the panel on the left."
+                    : "Choose a project on the left to see its files. Ask an administrator if you expected to see some."
+                }
+              />
+            ) : null
           ) : (
             <ProjectFiles
               key={current.id}
@@ -336,22 +362,32 @@ function ProjectFiles({
         )
       : [];
 
+  const canAdd = can?.create_document === true && project.state === "active";
+  const createFile = async (name: string) => {
+    await documents.create(client, project.id, name);
+    reloadFiles();
+  };
+
   return (
     <>
-      <div className="toolbar">
+      <div className="section-head">
         <h2 id="files-heading">
           {project.name} <StateBadge state={project.state} />
         </h2>
         <div className="actions">
           {can?.rename === true && (
-            <button type="button" className="button" onClick={onRenameProject}>
+            <button
+              type="button"
+              className="button small"
+              onClick={onRenameProject}
+            >
               Rename project
             </button>
           )}
           {can?.archive === true && project.state === "active" && (
             <button
               type="button"
-              className="button"
+              className="button small"
               onClick={() =>
                 void act(
                   () => projects.archive(client, project.id),
@@ -368,7 +404,7 @@ function ProjectFiles({
           {can?.restore === true && project.state === "archived" && (
             <button
               type="button"
-              className="button"
+              className="button small"
               onClick={() =>
                 void act(
                   () => projects.restore(client, project.id),
@@ -385,15 +421,15 @@ function ProjectFiles({
         </div>
       </div>
 
-      {can?.create_document === true && project.state === "active" && (
-        <CreateForm
-          label="New file"
-          buttonLabel="Add file"
-          onCreate={async (name) => {
-            await documents.create(client, project.id, name);
-            reloadFiles();
-          }}
-        />
+      {canAdd && items.length > 0 && (
+        <div className="card-form">
+          <CreateForm
+            label="New file"
+            buttonLabel="Add file"
+            successLabel={(name) => `File “${name}” added.`}
+            onCreate={createFile}
+          />
+        </div>
       )}
 
       {files.kind === "loading" && <LoadingNotice label="Loading files…" />}
@@ -403,22 +439,52 @@ function ProjectFiles({
       {files.kind === "ready" && (
         <>
           {items.length === 0 ? (
-            <p className="muted">
-              {can?.create_document === true
-                ? "No files yet. Add your first one above."
-                : "No files in this project."}
-            </p>
+            canAdd ? (
+              <EmptyState
+                glyph="+"
+                title="Add the first file"
+                text="Files are where design happens. Name it after the screen or the idea; you can rename it any time."
+              >
+                <CreateForm
+                  label="New file"
+                  buttonLabel="Add file"
+                  successLabel={(name) => `File “${name}” added.`}
+                  onCreate={createFile}
+                />
+              </EmptyState>
+            ) : (
+              <EmptyState
+                glyph="▤"
+                title="No files in this project"
+                text="When someone adds a file here it will show up for you."
+              />
+            )
           ) : (
-            <ul className="list" aria-label="Files">
+            <ul className="cards" aria-label="Files">
               {items.map((file) => (
-                <li key={file.id}>
-                  <div className="row-main">
-                    <Link to={`/workspace/${workspaceId}/file/${file.id}`}>
+                <li className="card" key={file.id}>
+                  <div
+                    className="tile"
+                    style={{ background: tint(file.id) }}
+                    aria-hidden="true"
+                  >
+                    {initialOf(file.name)}
+                  </div>
+                  <div className="card-body">
+                    <Link
+                      className="card-title"
+                      to={`/workspace/${workspaceId}/file/${file.id}`}
+                    >
                       {file.name}
                     </Link>
+                    <div className="card-meta">
+                      <StateBadge state={file.state} />
+                      {file.updated_at !== undefined && (
+                        <span>Edited {relativeTime(file.updated_at)}</span>
+                      )}
+                    </div>
                   </div>
-                  <StateBadge state={file.state} />
-                  <div className="actions">
+                  <div className="card-actions">
                     {can?.create_document === true &&
                       file.state === "active" && (
                         <button
@@ -470,14 +536,16 @@ function ProjectFiles({
           {files.value.truncated && (
             <p className="muted small">Showing the first files only.</p>
           )}
-          <label className="check">
-            <input
-              type="checkbox"
-              checked={showArchived}
-              onChange={(event) => setShowArchived(event.target.checked)}
-            />
-            Show archived files
-          </label>
+          {files.value.items.some((file) => file.state === "archived") && (
+            <label className="check">
+              <input
+                type="checkbox"
+                checked={showArchived}
+                onChange={(event) => setShowArchived(event.target.checked)}
+              />
+              Show archived files
+            </label>
+          )}
         </>
       )}
     </>

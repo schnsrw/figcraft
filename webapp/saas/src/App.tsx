@@ -72,14 +72,21 @@ function Shell({ branding }: { branding: Branding }) {
         </Link>
         {state.kind === "ready" && (
           <nav className="topnav" aria-label="Main">
-            <Link to="/">Files</Link>
-            <Link to="/search">Search</Link>
-            <Link to="/people">People</Link>
+            <NavItem to="/" on={["home", "workspace", "file"]}>
+              Files
+            </NavItem>
+            <NavItem to="/search" on={["search"]}>
+              Search
+            </NavItem>
+            <NavItem to="/people" on={["people"]}>
+              People
+            </NavItem>
             {(state.tenant.role === "tenant_owner" ||
               state.tenant.role === "tenant_admin") && (
-              <Link to="/settings">Settings</Link>
+              <NavItem to="/settings" on={["settings"]}>
+                Settings
+              </NavItem>
             )}
-            <Link to="/account">Account</Link>
           </nav>
         )}
         <AccountMenu />
@@ -104,6 +111,24 @@ function Shell({ branding }: { branding: Branding }) {
         </footer>
       )}
     </div>
+  );
+}
+
+/** A navigation link that says (to assistive technology too) when its section is the current one. */
+function NavItem({
+  to,
+  on,
+  children,
+}: {
+  to: string;
+  on: string[];
+  children: ReactNode;
+}) {
+  const { route } = useRouter();
+  return (
+    <Link to={to} aria-current={on.includes(route.name) ? "page" : undefined}>
+      {children}
+    </Link>
   );
 }
 

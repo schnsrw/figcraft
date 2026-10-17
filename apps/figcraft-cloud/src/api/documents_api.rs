@@ -513,6 +513,30 @@ pub(crate) fn document_can(access: &ResourceAccess) -> Value {
     })
 }
 
+/// Add `updated_at` (Unix seconds of the last edit, rename or state change) to document views,
+/// from one query for the whole page. A view whose row cannot be read keeps no `updated_at`.
+async fn attach_updated_at(transaction: &mut TenantTransaction<'_>, views: &mut [Value]) -> Result<(), ApiError> {
+    let ids: Vec<String> = views.iter().filter_map(|view| view["id"].as_str().map(str::to_owned)).collect();
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT id::text, floor(extract(epoch FROM updated_at))::bigint FROM documents WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(&ids)
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(|_| ApiError::unavailable())?;
+    for view in views.iter_mut() {
+        let found = view["id"].as_str().and_then(|id| rows.iter().find(|(row, _)| row == id)).map(|(_, at)| *at);
+        if let Some(at) = found {
+            view["updated_at"] = Value::from(at);
+        }
+    }
+    Ok(())
+}
+
 fn no_store(mut response: Response) -> Response {
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
@@ -805,7 +829,8 @@ async fn list_documents_handler(
     let mut transaction = begin(&state, &caller).await?;
     let id = project_access(&mut transaction, &caller, &id, Action::ProjectView).await?;
     let page = list_documents(&mut transaction, id, after, size).await.map_err(repository_error)?;
-    let items: Vec<Value> = page.items.iter().map(document_view).collect();
+    let mut items: Vec<Value> = page.items.iter().map(document_view).collect();
+    attach_updated_at(&mut transaction, &mut items).await?;
     Ok(Json(json!({"items": items, "next_cursor": paging.next(page.next_cursor.map(CloudDocumentId::as_uuid))})))
 }
 
@@ -833,6 +858,7 @@ async fn get_document_handler(State(state): State<AppState>, caller: Authenticat
     view["role"] = access.role.map_or(Value::Null, |role| Value::String(role_str(role).to_string()));
     view["can_edit"] = Value::Bool(allows(&access, Kind::Document, Action::DocumentEdit));
     view["can"] = document_can(&access);
+    attach_updated_at(&mut transaction, std::slice::from_mut(&mut view)).await?;
     Ok(Json(view))
 }
 

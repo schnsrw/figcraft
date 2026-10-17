@@ -246,7 +246,7 @@ export function SignInScreen({
         </p>
       )}
       {methods.bootstrap_required !== true && (
-        <p className="muted small">
+        <p className="muted small" style={{ marginTop: "var(--s-4)" }}>
           Setting this up for the first time?{" "}
           <Link to="/setup">Set up the first administrator</Link>
         </p>

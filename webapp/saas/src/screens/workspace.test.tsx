@@ -119,7 +119,7 @@ describe("workspace home", () => {
         return { status: 201, body: workspaceRow() };
       });
     render(<App client={api.client()} />);
-    await screen.findByText(/don't have any workspaces yet/);
+    await screen.findByText(/Create your first workspace/);
     await userEvent.type(screen.getByLabelText("Workspace name"), "  Brand  ");
     await userEvent.click(
       screen.getByRole("button", { name: "Create workspace" }),

@@ -1,7 +1,9 @@
 import { type FormEvent, type MouseEvent, useId, useState } from "react";
 
+import { me } from "../api/account";
 import { ApiError } from "../api/client";
 import type { Deployment, SessionInfo, TenantSummary } from "../api/types";
+import { Avatar, useLoad } from "../components";
 import { Link } from "../router";
 import { useSession } from "../session";
 
@@ -296,40 +298,83 @@ export function roleLabel(role: string | null | undefined): string {
   return ROLE_LABELS[role] ?? "Member";
 }
 
-/** The signed-in person's menu: who they act as, organisation switching and sign-out. */
+/** The signed-in person's corner of the header: who they are, which organisation, sign out. */
 export function AccountMenu() {
-  const { state, signOut, chooseTenant } = useSession();
+  const { state, signOut } = useSession();
   if (state.kind === "loading" || state.kind === "signed_out") return null;
   if (state.kind === "unavailable") return null;
-  const tenants = state.kind === "ready" ? state.tenants : [];
-  const current = state.kind === "ready" ? state.tenant.id : null;
-  const currentName = tenants.find((tenant) => tenant.id === current)?.name;
-  const switchable =
-    state.kind === "ready" &&
-    state.session.deployment !== "single" &&
-    tenants.length > 1;
+  if (state.kind === "ready") return <ReadyAccount />;
   return (
     <div className="account" role="group" aria-label="Account">
-      {currentName !== undefined && (
-        <span className="org-name">
-          {switchable ? (
-            <select
-              aria-label="Organisation"
-              value={current ?? ""}
-              onChange={(event) => void chooseTenant(event.target.value)}
-            >
-              {tenants.map((tenant) => (
-                <option key={tenant.id} value={tenant.id}>
-                  {tenant.name}
-                </option>
-              ))}
-            </select>
-          ) : (
-            currentName
+      <button
+        type="button"
+        className="button small"
+        onClick={() => void signOut()}
+      >
+        Sign out
+      </button>
+    </div>
+  );
+}
+
+function ReadyAccount() {
+  const { state, client, signOut, chooseTenant } = useSession();
+  // The display name and colour come from the account; without them (an older server) the
+  // header just shows the organisation.
+  const [profile] = useLoad(
+    () => me.profile(client).catch(() => null),
+    [client],
+  );
+  if (state.kind !== "ready") return null;
+  const tenants = state.tenants;
+  const current = state.tenant.id;
+  const currentName = tenants.find((tenant) => tenant.id === current)?.name;
+  const switchable =
+    state.session.deployment !== "single" && tenants.length > 1;
+  const person = profile.kind === "ready" ? profile.value : null;
+  return (
+    <div className="account" role="group" aria-label="Account">
+      <Link
+        to="/account"
+        className="account-who"
+        aria-label={
+          person === null
+            ? "Your account"
+            : `Your account, ${person.display_name}`
+        }
+      >
+        {person !== null && (
+          <Avatar name={person.display_name} color={person.color} />
+        )}
+        <span className="account-text">
+          {person !== null && (
+            <span className="account-name">{person.display_name}</span>
+          )}
+          {currentName !== undefined && !switchable && (
+            <span className="account-org">{currentName}</span>
           )}
         </span>
+      </Link>
+      {switchable && (
+        <span className="account-org">
+          <select
+            aria-label="Organisation"
+            value={current}
+            onChange={(event) => void chooseTenant(event.target.value)}
+          >
+            {tenants.map((tenant) => (
+              <option key={tenant.id} value={tenant.id}>
+                {tenant.name}
+              </option>
+            ))}
+          </select>
+        </span>
       )}
-      <button type="button" className="button" onClick={() => void signOut()}>
+      <button
+        type="button"
+        className="button small"
+        onClick={() => void signOut()}
+      >
         Sign out
       </button>
     </div>

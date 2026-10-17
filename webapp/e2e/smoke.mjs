@@ -29,6 +29,7 @@ const browser = await chromium.launch({
 });
 const problems = [];
 const step = (name) => console.log(`- ${name}`);
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const must = (ok, what) => {
   if (!ok) {
     problems.push(what);

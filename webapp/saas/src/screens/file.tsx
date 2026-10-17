@@ -7,6 +7,9 @@ import {
   LoadingNotice,
   StateBadge,
   asApiError,
+  initialOf,
+  relativeTime,
+  tint,
   useLoad,
 } from "../components";
 import { goTo } from "../platform";
@@ -93,53 +96,84 @@ export function FileScreen({
 
   return (
     <>
-      <nav aria-label="Breadcrumb" className="muted small">
-        <Link to="/">Files</Link> /{" "}
+      <nav aria-label="Breadcrumb" className="breadcrumb">
+        <Link to="/">Files</Link>
+        <span aria-hidden="true">/</span>
         <Link to={`/workspace/${workspaceId}?project=${found.project_id}`}>
           {workspaceName ?? "Workspace"}
-        </Link>{" "}
-        / <span aria-current="page">{found.name}</span>
-      </nav>
-      <h1>
-        {found.name} <StateBadge state={found.state} />
-      </h1>
-      <p className="muted">
-        Your role: <strong>{roleLabel(found.role)}</strong>
-        {found.can_edit === true
-          ? " — you can edit this file."
-          : " — you can view this file."}
-      </p>
-
-      {archived && (
-        <p className="notice" role="status">
-          This file is archived. Restore it from its project to open it again.
-        </p>
-      )}
-
-      <div className="actions">
-        <button
-          type="button"
-          className="button primary"
-          disabled={!canOpen || opening}
-          onClick={() => void open()}
-        >
-          {opening ? "Opening…" : "Open in editor"}
-        </button>
-        {found.can?.share === true && !archived && (
-          <button
-            type="button"
-            className="button"
-            onClick={() => setSharing(true)}
-          >
-            Share
-          </button>
-        )}
-        <Link
-          className="button"
-          to={`/workspace/${workspaceId}?project=${found.project_id}`}
-        >
-          Back to project
         </Link>
+        <span aria-hidden="true">/</span>
+        <span aria-current="page">{found.name}</span>
+      </nav>
+
+      <div className="file-hero">
+        <div
+          className="tile"
+          style={{ background: tint(found.id) }}
+          aria-hidden="true"
+        >
+          {initialOf(found.name)}
+        </div>
+        <div>
+          <h1>
+            {found.name} <StateBadge state={found.state} />
+          </h1>
+          <p className="muted">
+            Your role: <strong>{roleLabel(found.role)}</strong>
+            {found.can_edit === true
+              ? " — you can edit this file."
+              : " — you can view this file."}
+          </p>
+
+          <dl className="facts">
+            {found.updated_at !== undefined && (
+              <div className="fact">
+                <dt>Last edited</dt>
+                <dd>{relativeTime(found.updated_at)}</dd>
+              </div>
+            )}
+            <div className="fact">
+              <dt>Status</dt>
+              <dd>{archived ? "Archived" : "Active"}</dd>
+            </div>
+          </dl>
+
+          {archived && (
+            <p className="notice" role="status">
+              This file is archived. Restore it from its project to open it
+              again.
+            </p>
+          )}
+
+          <div className="actions">
+            <button
+              type="button"
+              className="button primary"
+              data-testid="open-editor"
+              disabled={!canOpen || opening}
+              aria-busy={opening}
+              onClick={() => void open()}
+            >
+              {opening ? "Opening…" : "Open in editor"}
+            </button>
+            {found.can?.share === true && !archived && (
+              <button
+                type="button"
+                className="button"
+                data-testid="share-open"
+                onClick={() => setSharing(true)}
+              >
+                Share
+              </button>
+            )}
+            <Link
+              className="button"
+              to={`/workspace/${workspaceId}?project=${found.project_id}`}
+            >
+              Back to project
+            </Link>
+          </div>
+        </div>
       </div>
 
       {problem !== null && <ErrorNotice error={problem} />}

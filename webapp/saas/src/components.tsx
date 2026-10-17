@@ -243,14 +243,21 @@ export function CreateForm({
   label,
   buttonLabel,
   onCreate,
+  successLabel,
+  hint,
 }: {
   label: string;
   buttonLabel: string;
   onCreate: (name: string) => Promise<void>;
+  /** A confirmation to announce after a successful create. */
+  successLabel?: (name: string) => string;
+  /** Help under the field, such as an example name. */
+  hint?: string;
 }) {
   const id = useId();
   const [name, setName] = useState("");
   const [error, setError] = useState<ApiError | null>(null);
+  const [done, setDone] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const submit = async (event: FormEvent) => {
@@ -258,9 +265,12 @@ export function CreateForm({
     if (busy) return;
     setBusy(true);
     setError(null);
+    setDone(null);
     try {
-      await onCreate(name.trim());
+      const created = name.trim();
+      await onCreate(created);
       setName("");
+      if (successLabel !== undefined) setDone(successLabel(created));
     } catch (problem) {
       setError(asApiError(problem));
     }
@@ -275,20 +285,156 @@ export function CreateForm({
           id={id}
           value={name}
           maxLength={255}
-          onChange={(event) => setName(event.target.value)}
+          onChange={(event) => {
+            setDone(null);
+            setName(event.target.value);
+          }}
           aria-invalid={error !== null}
+          aria-describedby={hint === undefined ? undefined : `${id}-hint`}
         />
+        {hint !== undefined && (
+          <p id={`${id}-hint`} className="muted small">
+            {hint}
+          </p>
+        )}
       </div>
       <button
         type="submit"
         className="button primary"
         disabled={busy || name.trim() === ""}
+        aria-busy={busy}
       >
         {busy ? "Creating…" : buttonLabel}
       </button>
       {error !== null && <ErrorNotice error={error} />}
+      {done !== null && (
+        <p role="status" className="notice ok">
+          {done}
+        </p>
+      )}
     </form>
   );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Presentation building blocks
+
+const TINTS = [
+  "#b7df79",
+  "#8fd3c4",
+  "#9bbcf2",
+  "#f2c27b",
+  "#e9a0b6",
+  "#c3a6ec",
+  "#f0a58f",
+  "#a8d5ee",
+];
+
+/** A stable soft colour for `seed` (an id or a name), so the same thing always looks the same. */
+export function tint(seed: string): string {
+  let hash = 0;
+  for (let index = 0; index < seed.length; index += 1) {
+    hash = (hash * 31 + seed.charCodeAt(index)) >>> 0;
+  }
+  return TINTS[hash % TINTS.length] ?? "#b7df79";
+}
+
+/** The first letter of a name, uppercased ("?" for an empty one). */
+export function initialOf(name: string): string {
+  const letter = Array.from(name.trim())[0];
+  return letter === undefined ? "?" : letter.toUpperCase();
+}
+
+/** A round initial, coloured from `color` (a person's chosen colour) or from `seed`. */
+export function Avatar({
+  name,
+  color,
+  seed,
+  small = false,
+}: {
+  name: string;
+  color?: string | undefined;
+  seed?: string | undefined;
+  small?: boolean;
+}) {
+  return (
+    <span
+      className={small ? "avatar small" : "avatar"}
+      style={{ background: color ?? tint(seed ?? name) }}
+      aria-hidden="true"
+    >
+      {initialOf(name)}
+    </span>
+  );
+}
+
+/** Title, optional description and breadcrumb on the left; the page's main actions on the right. */
+export function PageHeader({
+  title,
+  description,
+  breadcrumb,
+  actions,
+}: {
+  title: ReactNode;
+  description?: ReactNode;
+  breadcrumb?: ReactNode;
+  actions?: ReactNode;
+}) {
+  return (
+    <header className="page-header">
+      <div className="titles">
+        {breadcrumb}
+        <h1>{title}</h1>
+        {description !== undefined && <p className="intro">{description}</p>}
+      </div>
+      {actions !== undefined && <div className="actions">{actions}</div>}
+    </header>
+  );
+}
+
+/** Nothing here yet: say what this is for and offer the one obvious next step. */
+export function EmptyState({
+  glyph = "+",
+  title,
+  text,
+  children,
+}: {
+  glyph?: string;
+  title: string;
+  text: string;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="empty" data-testid="empty-state">
+      <span className="glyph" aria-hidden="true">
+        {glyph}
+      </span>
+      <h2>{title}</h2>
+      <p>{text}</p>
+      {children}
+    </div>
+  );
+}
+
+/** "just now", "5 minutes ago", "yesterday", "3 days ago", or the date for older times. */
+export function relativeTime(
+  unixSeconds: number,
+  nowMs: number = Date.now(),
+): string {
+  const seconds = Math.round(nowMs / 1000 - unixSeconds);
+  if (seconds < 45) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.round(hours / 24);
+  if (days === 1) return "yesterday";
+  if (days < 14) return `${days} days ago`;
+  return new Date(unixSeconds * 1000).toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+  });
 }
 
 export function StateBadge({ state }: { state: string }) {
