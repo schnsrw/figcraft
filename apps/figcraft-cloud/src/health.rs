@@ -49,6 +49,10 @@ const fn serves_api(role: CloudRole) -> bool {
     matches!(role, CloudRole::All | CloudRole::Api)
 }
 
+const fn serves_worker(role: CloudRole) -> bool {
+    matches!(role, CloudRole::All | CloudRole::Worker)
+}
+
 const fn serves_relay(role: CloudRole) -> bool {
     matches!(role, CloudRole::All | CloudRole::Relay)
 }
@@ -106,6 +110,11 @@ pub(super) fn serve(config: &CloudConfig, ready: bool, drain: Drain) -> io::Resu
         }
         let settings = ContextSettings::new(config.role, MAX_IN_FLIGHT, REQUEST_DEADLINE, u64::try_from(max_body).unwrap_or(u64::MAX));
         let draining = Arc::new(AtomicBool::new(false));
+        // The worker roles deliver queued webhooks until the process is told to stop.
+        let stop_workers = Arc::new(AtomicBool::new(false));
+        if ready && serves_worker(config.role) {
+            start_webhook_dispatcher(config, stop_workers.clone());
+        }
         let app = app_draining(config.role, ready, api, settings, draining.clone());
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(HEALTH_ADDR)).await?;
         eprintln!(
@@ -117,9 +126,31 @@ pub(super) fn serve(config: &CloudConfig, ready: bool, drain: Drain) -> io::Resu
             .with_graceful_shutdown(async move {
                 termination().await;
                 drain.begin(&draining).await;
+                stop_workers.store(true, Ordering::Release);
             })
             .await
     })
+}
+
+/// Run the webhook delivery dispatcher (S6-014) on this runtime. Without a database or the
+/// signing key its secrets are sealed with, there is nothing it could deliver: say so, and don't.
+fn start_webhook_dispatcher(config: &CloudConfig, stop: Arc<AtomicBool>) {
+    let key = config.session_signing_key().and_then(|secret| figcraft_cloud_storage::secret_box::SecretKey::derive(secret.as_bytes()).ok());
+    let pool = config
+        .database_url()
+        .and_then(|url| sqlx::postgres::PgPoolOptions::new().max_connections(4).acquire_timeout(Duration::from_secs(5)).connect_lazy(url).ok());
+    match (pool, key) {
+        (Some(pool), Some(key)) => {
+            eprintln!("figcraft-cloud: webhook delivery dispatcher started");
+            tokio::spawn(figcraft_cloud_storage::webhook_delivery::run_dispatcher(
+                pool,
+                Arc::new(key),
+                figcraft_cloud_storage::webhooks::DestinationPolicy::PUBLIC_ONLY,
+                stop,
+            ));
+        }
+        _ => eprintln!("figcraft-cloud: webhook delivery dispatcher not started: it needs DATABASE_URL and SESSION_SIGNING_KEY"),
+    }
 }
 
 /// The API's shared state: a lazily connecting pool, the object store, the identity stack and,
