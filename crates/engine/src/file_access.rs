@@ -93,7 +93,18 @@ fn lexically_inside(path: &Path, roots: &[PathBuf]) -> bool {
             c => lexical.push(c),
         }
     }
-    roots.iter().any(|r| lexical.starts_with(r) || lexical.starts_with(shown(r)))
+    if roots.iter().any(|r| lexical.starts_with(r) || lexical.starts_with(shown(r))) {
+        return true;
+    }
+    // The folders above may be reached through a link of the system's own (macOS's `/var` is
+    // `/private/var`): resolve the nearest existing folder above the path, never the path itself.
+    let Some(folder) = lexical.ancestors().skip(1).find_map(|a| std::fs::canonicalize(a).ok().map(|c| (a, c))) else {
+        return false;
+    };
+    let (above, resolved) = folder;
+    let Ok(rest) = lexical.strip_prefix(above) else { return false };
+    let resolved = resolved.join(rest);
+    roots.iter().any(|r| resolved.starts_with(r))
 }
 
 /// Whether `path` lies in the app's own folder `folder`, both resolved (links and `..` followed);
