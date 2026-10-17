@@ -34,6 +34,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 FROM ${CADDY_IMAGE}
 COPY deploy/saas/web.Caddyfile /etc/caddy/Caddyfile
+# Rendered per request from FIGCRAFT_BRAND_* (docs/saas/branding-and-configuration.md).
+COPY deploy/saas/branding.json.tmpl /etc/caddy/branding/branding.json
 COPY --from=build /src/webapp/saas/dist/ /srv/
 COPY --from=editor /out/edit/ /srv/edit/
 EXPOSE 8080

@@ -2,14 +2,45 @@
 
 use figcraft_engine::Session;
 use figcraft_ui_egui::{FigApp, Services};
+use std::cell::RefCell;
+use std::rc::Rc;
 use wasm_bindgen::JsCast as _;
+
+use crate::branding::{self, Branding};
 
 const CANVAS_ID: &str = "figcraft_canvas";
 const LOADING_ID: &str = "figcraft_loading";
+/// Served by the FigCraft Cloud web container (docs/saas/branding-and-configuration.md).
+const BRANDING_URL: &str = "/branding.json";
+
+/// Startup branding shared by the branding fetch and the runner task.
+#[derive(Default)]
+struct Startup {
+    branding: Branding,
+    /// The runner finished (started or failed): the loading element is no longer ours to change.
+    done: bool,
+}
 
 pub fn start() {
     eframe::WebLogger::init(log::LevelFilter::Info).ok();
-    wasm_bindgen_futures::spawn_local(async {
+    let startup = Rc::new(RefCell::new(Startup::default()));
+    // The deployment's `/branding.json` (FigCraft Cloud renders it from the web container's
+    // environment); a failure or a page served without it keeps the default name.
+    let brand_state = Rc::clone(&startup);
+    wasm_bindgen_futures::spawn_local(async move {
+        let Some(body) = fetch_text(BRANDING_URL).await else { return };
+        let brand = branding::parse(&body);
+        let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+        document.set_title(&brand.title());
+        let mut state = brand_state.borrow_mut();
+        if !state.done
+            && let Some(el) = document.get_element_by_id(LOADING_ID)
+        {
+            el.set_text_content(Some(&brand.loading_text()));
+        }
+        state.branding = brand;
+    });
+    wasm_bindgen_futures::spawn_local(async move {
         let Some(document) = web_sys::window().and_then(|w| w.document()) else {
             log::error!("no document");
             return;
@@ -45,13 +76,31 @@ pub fn start() {
                 }),
             )
             .await;
+        let mut state = startup.borrow_mut();
+        state.done = true;
         if let Some(el) = document.get_element_by_id(LOADING_ID) {
             match result {
                 Ok(()) => el.remove(),
-                Err(e) => el.set_inner_html(&format!("<p>FigCraft failed to start: {e:?}</p><p>A browser with WebGPU or WebGL2 is required.</p>")),
+                // Text only: the product name comes from the deployment, never as markup.
+                Err(e) => el.set_text_content(Some(&state.branding.failure_text(&format!("{e:?}")))),
             }
         }
     });
+}
+
+/// `GET <url>` (relative to the page origin) as text; `None` on any failure, non-2xx status or a
+/// body over [`branding::MAX_BRANDING_BYTES`]. Uses `Response` through `js_sys::Reflect` so the
+/// crate needs no extra web-sys features.
+async fn fetch_text(url: &str) -> Option<String> {
+    let window = web_sys::window()?;
+    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str(url)).await.ok()?;
+    if !js_sys::Reflect::get(&response, &"ok".into()).ok()?.as_bool()? {
+        return None;
+    }
+    let text: js_sys::Function = js_sys::Reflect::get(&response, &"text".into()).ok()?.dyn_into().ok()?;
+    let promise: js_sys::Promise = text.call0(&response).ok()?.dyn_into().ok()?;
+    let body = wasm_bindgen_futures::JsFuture::from(promise).await.ok()?.as_string()?;
+    (body.len() <= branding::MAX_BRANDING_BYTES).then_some(body)
 }
 
 /// The `#join=<invite link>` the page was opened with, if any; a `#join` fragment is cleared from
