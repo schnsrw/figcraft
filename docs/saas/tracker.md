@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (21/25); S6 in progress (5/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (23/25); S6 in progress (5/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 21 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 23 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | in progress | 5 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2381,8 +2381,20 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   lease, all of its clients are served and every client of the other is refused. The storage-level
   three-case probe (simultaneous acquisition, expiry takeover, superseded fence) and the relay
   tests for a lease taken over and a fenced commit cover the stale owner.
-- [ ] **S5-022** Kill relay before commit and prove no edit was confirmed.
-- [ ] **S5-023** Kill relay after commit and prove the edit returns after reconnect.
+- [x] **S5-022** Kill relay before commit and prove no edit was confirmed.
+  Evidence (2026-10-18): `apps/figcraft-cloud/tests/kill.rs` runs the real binary against the dev
+  PostgreSQL/S3. After one confirmed edit the document's row is held locked from outside, so the
+  next edit's commit cannot finish; the edit is sent and no confirmation arrives over a 1.8 s
+  window; the process is then killed with SIGKILL (no graceful stop). Afterwards the database
+  holds exactly the one committed event (sequence and event count 1), the client's connection
+  ended with the process, and a restarted process serves sequence 1, so the client knows to send
+  the edit again.
+- [x] **S5-023** Kill relay after commit and prove the edit returns after reconnect.
+  Evidence (2026-10-18): the same test continues: the resent edit and one more are confirmed
+  (sequence 3, three events committed before the confirmation was read), the process is killed
+  with SIGKILL, and a restarted process (same address, so it reclaims the dead process's
+  still-live room lease at once, S5 restart reclaim) serves sequence 3 to the reconnecting client:
+  every confirmed edit is back, and the room carries on to sequence 4.
 - [x] **S5-024** Load-test reconnect storms, slow readers and maximum supported document size.
   Evidence (2026-10-17): `crates/cloud-relay/examples/relay_load.rs` drove a release relay against
   disposable PostgreSQL 18 and SeaweedFS S3 with 20 editors, 5 documents, 120 s and 2 batches/s.
@@ -2738,3 +2750,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-005: key rotation (overlap, expiry, retirement) and issuer disable verified end to end through the embed exchange against PostgreSQL. S6 reaches 5/31 and the first S6 block (host registration and tokens) is complete except the unstarted embed behaviour tasks. |
 | 2026-10-18 | Relay: a restarted replica reclaims its own stale room lease at once (same advertised address, fence moves past the dead process; `acquire_or_reclaim_room`), and one flush commits different rooms concurrently: measured 999 commits/s at 1.6 ms median where serial commits reached 570 to 799 at 104 to 126 ms. |
 | 2026-10-18 | S5-017: relay quotas (rooms, connections, clients per room, messages per second, message size, outbound queue bytes) are bounded operator settings, enforced and tested live through the real hub. S5 reaches 21/25. |
+| 2026-10-18 | S5-022, S5-023: SIGKILL tests against the real process: an edit whose commit was blocked is never confirmed and leaves nothing durable; confirmed edits all return after a restart that reclaims the dead process's lease. S5 reaches 23/25. |
