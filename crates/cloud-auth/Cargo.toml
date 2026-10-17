@@ -20,6 +20,8 @@ sqlx = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 base64 = { workspace = true }
+# S6-003: verifies embed-token signatures (Ed25519, ECDSA P-256); already built for rustls.
+ring = "0.17"
 sha2 = { workspace = true }
 # Already built for openidconnect: the ID-token verifier's clock is a chrono time.
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
@@ -28,7 +30,6 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form"] }
 rsa = { version = "0.9", features = ["sha2", "getrandom"] }
-ring = "0.17"
 
 [lints]
 workspace = true

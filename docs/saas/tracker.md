@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (20/25); S6 in progress (2/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (20/25); S6 in progress (3/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 20 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 2 / 31 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 3 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2414,7 +2414,8 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   `main.rs`); no admin API or UI to register hosts yet (S6-012).
 - [x] **S6-002** Implement external tenant, workspace, principal and resource mappings.
   Evidence: `crates/cloud-storage/src/host_mappings.rs` and `tests/host_mappings.rs` (live PostgreSQL): a registered host maps its tenant, workspace, project, document and principal ids onto internal ids over the existing `external_mappings` table (no migration). Tests cover resolve, reverse lookup and unmap per kind; uniqueness per host and kind; refusal of empty, control-character and oversize external ids, unregistered hosts, duplicates (never re-pointed) and cross-tenant internal ids (one fixed NotFound); cross-tenant RLS isolation. Not done: no admin API to manage mappings (S6-012); principals are not auto-provisioned from `sub` claims; the per-host cap of 100000 mappings is checked in code and not load tested.
-- [ ] **S6-003** Implement short-lived embed-token validation and one-use `jti` consumption.
+- [x] **S6-003** Implement short-lived embed-token validation and one-use `jti` consumption.
+  Evidence: migration `20261018000002_embed_token_uses.sql`, `crates/cloud-auth/src/embed_token.rs` (pure `verify_embed_token`, `exchange_embed_token`), `crates/cloud-storage/src/embed_tokens.rs`, tests `embed_token` unit tests (6) and `crates/cloud-auth/tests/embed_exchange.rs` (4, live PostgreSQL). Covered: valid EdDSA and ES256 tokens; wrong issuer, audience, expired, not-yet-valid, over-long lifetime, bad or missing claims, bad signature, tampered claims, unknown or missing kid, alg none/HS256/RS256/case variants and key-algorithm mismatch, crit headers, oversize and malformed tokens; key not-before, expiry and retirement; replay refused; ten concurrent exchanges of one token give exactly one success; refused tokens do not burn their jti; disabled host refused; expired jti rows swept; RLS isolation. All refusals share the public message 'embed token refused'. Algorithms are EdDSA and ES256 only (no HMAC, no RSA); clock skew is a fixed 30 s and token lifetime at most 300 s. Not done: the role ceiling and mapped boundary (S6-004); the HTTP exchange endpoint and session minting (later S6 tasks); no per-host rate limit on exchanges yet.
 - [ ] **S6-004** Enforce host maximum role and mapped resource boundary.
 - [ ] **S6-005** Add key rotation and issuer-disable behavior.
 
@@ -2716,3 +2717,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-001: registered embedding host systems (issuer, audiences, exact https parent origins, max role, enabled flag) with rotating public EdDSA/ES256 keys, tenant RLS and a pre-tenant issuer lookup. S6 reaches 1/31. |
 | 2026-10-18 | S5-001: audited realtime tickets and covered them through the owner-routing path (a ticket at a non-owning replica is checked, passed on and checked again by the owner; attribution and access hold). S5 reaches 20/25. |
 | 2026-10-18 | S6-002: host-managed external id mappings (tenant, workspace, project, document, principal) that require a registered host and a same-tenant internal resource, with bounds and cross-tenant refusal. S6 reaches 2/31. |
+| 2026-10-18 | S6-003: embed-token validation (EdDSA/ES256 against registered rotating keys, issuer, audience, expiry, not-before, skew, lifetime and size bounds) and atomic one-use jti consumption in PostgreSQL (schema 20261018000002). S6 reaches 3/31. |

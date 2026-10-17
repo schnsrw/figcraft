@@ -11,6 +11,7 @@ pub mod bucket_admin;
 pub mod document_snapshots;
 pub mod downloads;
 pub mod effective_roles;
+pub mod embed_tokens;
 pub mod events;
 pub mod exports;
 pub mod external_mappings;
@@ -202,7 +203,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                     'upload_reservations', 'libraries', 'library_team_grants', 'library_versions', 'library_usages',
                     'plugins', 'plugin_versions', 'exports', 'document_thumbnails', 'retention_holds', 'share_links', 'oidc_login_attempts', 'browser_sessions',
                     'tenant_bootstrap', 'service_accounts', 'service_account_credentials', 'team_invitations',
-                    'member_permissions', 'support_access_grants', 'room_leases', 'host_systems', 'host_system_keys'
+                    'member_permissions', 'support_access_grants', 'room_leases', 'host_systems', 'host_system_keys', 'embed_token_uses'
                 ])
             LOOP
                 EXECUTE format('ALTER TABLE public.%I OWNER TO figcraft_migrator', table_name);
