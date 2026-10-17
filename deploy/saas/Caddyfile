@@ -4,6 +4,13 @@
 		reverse_proxy cloud:8081
 	}
 
+	# Core slice: the collaboration relay (FigCraft's collaboration protocol over WebSocket). The
+	# path is kept: the relay answers on any path and invite links name /ws/v1/collab.
+	@collab path /ws/v1/collab /ws/v1/collab/*
+	handle @collab {
+		reverse_proxy cloud:8082
+	}
+
 	@realtime path /ws/v1 /ws/v1/*
 	handle @realtime {
 		reverse_proxy cloud:8081

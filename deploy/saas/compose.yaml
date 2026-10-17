@@ -88,6 +88,11 @@ services:
 
   cloud:
     <<: *cloud-settings
+    # 8081: API and health; 8082: the collaboration relay (the gateway routes /ws/v1/collab to it).
+    # Neither is published on the host: everything goes through the gateway.
+    expose:
+      - "8081"
+      - "8082"
     depends_on:
       postgres:
         condition: service_healthy

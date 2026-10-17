@@ -2,8 +2,11 @@
 
 mod config;
 mod health;
+mod relay;
 
 use config::{CloudConfig, CloudRole, Secret};
+use figcraft_cloud_domain::CloudDocumentId;
+use figcraft_cloud_storage::share_links::ShareRole;
 use std::env;
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -18,6 +21,7 @@ enum Arguments {
     Migrate,
     InitObjectStore,
     ProvisionDatabaseRoles,
+    CreateShareLink { document: Option<CloudDocumentId>, role: ShareRole },
     Role(Option<CloudRole>),
 }
 
@@ -58,6 +62,9 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
                 Err("--provision-db-roles cannot be combined with other arguments")
             };
         }
+        if argument == "--create-share-link" {
+            return if role.is_none() { parse_share_link(args) } else { Err("--create-share-link cannot be combined with --role") };
+        }
         let value = if argument == "--role" {
             args.next().ok_or("--role requires one of: all, api, relay, worker")?.into_string().map_err(|_| "arguments must be valid UTF-8")?
         } else if let Some(value) = argument.strip_prefix("--role=") {
@@ -74,9 +81,45 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
     Ok(Arguments::Role(role))
 }
 
+/// The options after `--create-share-link`: `--document <uuid>` and `--role editor|viewer`, each
+/// at most once.
+fn parse_share_link(args: impl Iterator<Item = OsString>) -> Result<Arguments, &'static str> {
+    let mut args = args;
+    let (mut document, mut role) = (None, None);
+    while let Some(argument) = args.next() {
+        let argument = argument.into_string().map_err(|_| "arguments must be valid UTF-8")?;
+        let mut value = || args.next().and_then(|value| value.into_string().ok()).ok_or("--document and --role each need a value");
+        match argument.as_str() {
+            "--document" if document.is_none() => document = Some(value()?.parse().map_err(|_| "--document must be a document UUID")?),
+            "--role" if role.is_none() => role = Some(ShareRole::parse(&value()?).ok_or("--role must be editor or viewer")?),
+            _ => return Err("--create-share-link takes only --document <uuid> and --role <editor|viewer>, each once"),
+        }
+    }
+    Ok(Arguments::CreateShareLink { document, role: role.unwrap_or(ShareRole::Editor) })
+}
+
+fn run_create_share_link(document: Option<CloudDocumentId>, role: ShareRole) -> ExitCode {
+    let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
+    let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
+    let Ok(config) = CloudConfig::parse(settings) else {
+        eprintln!("figcraft-cloud: invalid cloud configuration");
+        return ExitCode::from(2);
+    };
+    match relay::create_link(&config, document, role) {
+        Ok(url) => {
+            println!("{url}");
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("figcraft-cloud: share link not created: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn usage() {
     println!(
-        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n\nDefaults to --role all."
+        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n       figcraft-cloud --create-share-link [--document <uuid>] [--role editor|viewer]\n\nDefaults to --role all."
     );
 }
 
@@ -252,6 +295,7 @@ fn main() -> ExitCode {
         Ok(Arguments::Migrate) => run_migrations(),
         Ok(Arguments::InitObjectStore) => run_object_store_init(),
         Ok(Arguments::ProvisionDatabaseRoles) => run_role_provisioning(),
+        Ok(Arguments::CreateShareLink { document, role }) => run_create_share_link(document, role),
         Ok(Arguments::Role(cli_role)) => {
             let environment: Vec<_> = env::vars_os().filter_map(|(key, value)| Some((key.into_string().ok()?, value.into_string().ok()?))).collect();
             let settings = environment.iter().map(|(key, value)| (key.as_str(), value.as_str()));
@@ -271,6 +315,22 @@ fn main() -> ExitCode {
                 eprintln!("figcraft-cloud: object store is unconfigured, unreachable or refused the bucket check; readiness will fail");
             }
             let ready = schema_ready && objects_ready;
+            // Every role serves the collaboration relay for now (the core slice runs one process).
+            let _relay = if ready {
+                match relay::start(&config) {
+                    Ok(hosting) => {
+                        eprintln!("figcraft-cloud: collaboration relay listening on {}", hosting.addr());
+                        Some(hosting)
+                    }
+                    Err(error) => {
+                        eprintln!("figcraft-cloud: collaboration relay not started: {error}");
+                        None
+                    }
+                }
+            } else {
+                eprintln!("figcraft-cloud: collaboration relay not started: dependencies are not ready");
+                None
+            };
             match health::serve(config.role, ready) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => {
@@ -345,6 +405,23 @@ mod tests {
         assert!(arguments(&["--init-object-store", "--role", "api"]).is_err());
         assert!(arguments(&["--role", "api", "--init-object-store"]).is_err());
         assert!(arguments(&["--init-object-store", "--migrate"]).is_err());
+    }
+
+    #[test]
+    fn share_link_command_takes_a_document_and_a_role() {
+        use super::ShareRole;
+        assert_eq!(arguments(&["--create-share-link"]), Ok(Arguments::CreateShareLink { document: None, role: ShareRole::Editor }));
+        let id = "b1300000-0000-4000-8000-000000000001";
+        assert_eq!(
+            arguments(&["--create-share-link", "--document", id, "--role", "viewer"]),
+            Ok(Arguments::CreateShareLink { document: Some(id.parse().unwrap()), role: ShareRole::Viewer })
+        );
+        assert!(arguments(&["--create-share-link", "--role", "owner"]).is_err());
+        assert!(arguments(&["--create-share-link", "--document", "nope"]).is_err());
+        assert!(arguments(&["--create-share-link", "--document"]).is_err());
+        assert!(arguments(&["--create-share-link", "--role", "viewer", "--role", "editor"]).is_err());
+        assert!(arguments(&["--role", "api", "--create-share-link"]).is_err());
+        assert!(arguments(&["--create-share-link", "--migrate"]).is_err());
     }
 
     #[test]
