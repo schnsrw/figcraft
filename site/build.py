@@ -16,6 +16,7 @@ does not exist, so a broken site never deploys silently.
 from __future__ import annotations
 
 import html
+import json
 import re
 import shutil
 import sys
@@ -29,6 +30,20 @@ ROADMAP = ROOT / "docs" / "saas" / "roadmap.md"
 PAGES = ["index.html", "why.html", "changes.html", "roadmap.html", "docs.html"]
 IMAGE_DIRS = [ROOT / "docs" / "images", ROOT / "assets" / "app-icon"]
 REPO_BLOB = "https://github.com/schnsrw/figcraft/blob/main/"
+BASE_URL = "https://schnsrw.github.io/figcraft/"
+SOCIAL_IMAGE = "shot-7-collab.png"
+# Repository files served whole in llms-full.txt (plain Markdown, in this order).
+LLMS_FULL_DOCS = [
+    "README.md",
+    "docs/saas/README.md",
+    "docs/saas/product-requirements.md",
+    "docs/saas/architecture.md",
+    "docs/saas/security.md",
+    "docs/saas/deployment-operations.md",
+    "docs/saas/branding-and-configuration.md",
+    "docs/saas/roadmap.md",
+]
+MAX_LLMS_FULL_BYTES = 2_000_000
 
 MAX_SOURCE_BYTES = 4 * 1024 * 1024  # tracker and pages are far smaller; refuse anything absurd
 MAX_ROWS = 40
@@ -353,6 +368,121 @@ def check_docs_index(text: str) -> None:
         print(f"::warning::docs.html does not list: {', '.join(missing)}", file=sys.stderr)
 
 
+
+def page_meta(page: str, text: str) -> tuple[str, str]:
+    """The page's <title> and meta description (both required)."""
+    title = re.search(r"<title>(.*?)</title>", text, re.S)
+    desc = re.search(r'<meta name="description" content="([^"]*)"', text)
+    if not title or not desc:
+        raise BuildError(f"{page}: needs a <title> and a meta description")
+    return plain(title.group(1)), desc.group(1)
+
+
+def page_url(page: str) -> str:
+    return BASE_URL if page == "index.html" else BASE_URL + page
+
+
+def head_tags(page: str, title: str, desc: str) -> str:
+    """Canonical, Open Graph, Twitter card, manifest and theme tags for one page."""
+    url = esc(page_url(page))
+    image = esc(BASE_URL + "img/" + SOCIAL_IMAGE)
+    t = esc(title)
+    return (
+        f'  <link rel="canonical" href="{url}">\n'
+        f'  <link rel="manifest" href="site.webmanifest">\n'
+        f'  <link rel="apple-touch-icon" href="img/figcraft-256.png">\n'
+        f'  <meta name="theme-color" content="#0f1412">\n'
+        f'  <meta property="og:type" content="website">\n'
+        f'  <meta property="og:site_name" content="FigCraft Cloud">\n'
+        f'  <meta property="og:title" content="{t}">\n'
+        f'  <meta property="og:description" content="{desc}">\n'
+        f'  <meta property="og:url" content="{url}">\n'
+        f'  <meta property="og:image" content="{image}">\n'
+        f'  <meta name="twitter:card" content="summary_large_image">\n'
+        f'  <meta name="twitter:title" content="{t}">\n'
+        f'  <meta name="twitter:description" content="{desc}">\n'
+        f'  <meta name="twitter:image" content="{image}">\n'
+    )
+
+
+def write_discovery_files(out_dir: Path, metas: dict[str, tuple[str, str]], updated: str, rows) -> None:
+    """sitemap.xml, robots.txt, llms.txt, llms-full.txt and site.webmanifest."""
+    urls = "".join(
+        f"  <url><loc>{esc(page_url(page))}</loc><lastmod>{esc(updated)}</lastmod>"
+        f"<priority>{'1.0' if page == 'index.html' else '0.8'}</priority></url>\n"
+        for page in PAGES
+    )
+    (out_dir / "sitemap.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' + urls + "</urlset>\n",
+        encoding="utf-8",
+    )
+    (out_dir / "robots.txt").write_text(
+        f"User-agent: *\nAllow: /\n\nSitemap: {BASE_URL}sitemap.xml\n", encoding="utf-8"
+    )
+    progress = "\n".join(f"- {r['label']}: {r['status']}, {r['done']}/{r['total']} tasks" for r in rows)
+    pages = "\n".join(f"- [{metas[p][0]}]({page_url(p)}): {metas[p][1]}" for p in PAGES)
+    docs = "\n".join(
+        f"- [{d.split('/')[-1]}]({REPO_BLOB}{d})" for d in LLMS_FULL_DOCS[1:]
+    )
+    llms = (
+        "# FigCraft Cloud\n\n"
+        "> Self-hostable, browser-based collaborative interface design in pure Rust: the FigCraft design "
+        "editor in the browser with real-time co-editing, every confirmed edit stored in PostgreSQL and "
+        "S3-compatible storage, and multi-tenancy, OIDC/SAML sign-in and permissions. An independent, "
+        "open-source (MIT OR Apache-2.0) fork of FigCraft; early alpha.\n\n"
+        f"Progress as of {updated} (generated from the project tracker):\n\n{progress}\n\n"
+        f"## Site\n\n{pages}\n\n"
+        f"## Documentation\n\n{docs}\n- [Progress tracker]({REPO_BLOB}docs/saas/tracker.md)\n\n"
+        f"## Source\n\n- [Repository](https://github.com/schnsrw/figcraft)\n"
+        f"- [Upstream FigCraft](https://github.com/storytold/figcraft)\n\n"
+        "## Optional\n\n"
+        f"- [Full text of the main documents]({BASE_URL}llms-full.txt)\n"
+    )
+    (out_dir / "llms.txt").write_text(llms, encoding="utf-8")
+    full = [llms, "\n"]
+    for doc in LLMS_FULL_DOCS:
+        full.append(f"\n\n---\n\n# Source: {REPO_BLOB}{doc}\n\n")
+        full.append(read_text(ROOT / doc))
+    body = "".join(full)
+    if len(body.encode("utf-8")) > MAX_LLMS_FULL_BYTES:
+        raise BuildError("llms-full.txt is over its size limit")
+    (out_dir / "llms-full.txt").write_text(body, encoding="utf-8")
+    manifest = {
+        "name": "FigCraft Cloud",
+        "short_name": "FigCraft",
+        "description": metas["index.html"][1],
+        "start_url": "./",
+        "scope": "./",
+        "display": "browser",
+        "background_color": "#0f1412",
+        "theme_color": "#0f1412",
+        "icons": [
+            {"src": "img/figcraft-256.png", "sizes": "256x256", "type": "image/png"},
+            {"src": "img/figcraft-512.png", "sizes": "512x512", "type": "image/png"},
+        ],
+    }
+    (out_dir / "site.webmanifest").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def not_found_page(header: str, footer: str) -> str:
+    return (
+        '<!doctype html>\n<html lang="en">\n<head>\n  <meta charset="utf-8">\n'
+        '  <meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        "  <title>Page not found</title>\n"
+        '  <meta name="robots" content="noindex">\n'
+        f'  <base href="{BASE_URL}">\n'
+        '  <link rel="icon" type="image/png" href="img/figcraft-64.png">\n'
+        '  <link rel="stylesheet" href="style.css">\n</head>\n<body>\n'
+        + header
+        + '\n<main id="main"><section class="band"><div class="wrap section-head">'
+        '<h1>Page not found</h1><p>That page does not exist. Try the <a href="./">home page</a> or the '
+        '<a href="docs.html">documentation</a>.</p></div></section></main>\n'
+        + footer
+        + "\n</body>\n</html>\n"
+    )
+
+
 def build(out_dir: Path) -> None:
     tracker = read_text(TRACKER)
     rows = parse_milestones(tracker)
@@ -383,9 +513,16 @@ def build(out_dir: Path) -> None:
     (out_dir / ".figcraft-site").write_text("built by site/build.py\n", encoding="utf-8")
     (out_dir / ".nojekyll").write_text("", encoding="utf-8")
 
-    images: set[str] = set()
+    images: set[str] = {SOCIAL_IMAGE, "figcraft-256.png", "figcraft-512.png", "figcraft-64.png"}
+    metas: dict[str, tuple[str, str]] = {}
     for page in PAGES:
         text = read_text(SITE / page)
+        title, desc = page_meta(page, text)
+        metas[page] = (title, desc)
+        anchor = re.search(r'<meta name="description" content="[^"]*">\n', text)
+        if anchor is None:
+            raise BuildError(f"{page}: meta description must end its line")
+        text = text[: anchor.end()] + head_tags(page, title, desc) + text[anchor.end() :]
         for marker in ("<!-- HEADER -->", "<!-- FOOTER -->"):
             if text.count(marker) != 1:
                 raise BuildError(f"{page}: expected exactly one {marker}")
@@ -408,6 +545,8 @@ def build(out_dir: Path) -> None:
         (out_dir / page).write_text(text, encoding="utf-8")
 
     shutil.copyfile(SITE / "style.css", out_dir / "style.css")
+    write_discovery_files(out_dir, metas, updated, rows)
+    (out_dir / "404.html").write_text(not_found_page(mark_active(header, ""), footer), encoding="utf-8")
     for name in sorted(images):
         shutil.copyfile(find_image(name), out_dir / "img" / name)
 
