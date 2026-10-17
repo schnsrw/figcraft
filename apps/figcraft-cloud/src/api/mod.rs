@@ -191,6 +191,13 @@ impl AppState {
         self.webhook_policy
     }
 
+    /// Replace the per-issuer embed-exchange limit (tests use a tiny, non-refilling one).
+    #[must_use]
+    pub(crate) fn with_embed_limit(mut self, config: RateLimitConfig) -> Self {
+        self.embed_limiter = Arc::new(RateLimiter::new(config));
+        self
+    }
+
     pub(crate) fn embed_limiter(&self) -> &RateLimiter {
         &self.embed_limiter
     }

@@ -342,6 +342,115 @@ th {
   white-space: nowrap;
 }
 
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin-top: 24px;
+  border-bottom: 1px solid #2b2e29;
+}
+
+.tab {
+  padding: 10px 16px;
+  color: #b9bdb4;
+  font: inherit;
+  cursor: pointer;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+}
+
+.tab[aria-selected="true"] {
+  color: #f2f3ef;
+  border-bottom-color: var(--brand-primary);
+}
+
+.tabpanel {
+  padding-top: 20px;
+}
+
+.tabpanel:focus-visible {
+  outline-offset: -2px;
+}
+
+.linklike {
+  display: block;
+  width: 100%;
+  padding: 9px 12px;
+  color: #b9bdb4;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border: 0;
+  border-radius: 8px;
+  background: none;
+}
+
+.linklike:hover,
+.linklike[aria-current="true"] {
+  color: #f2f3ef;
+  background: #252823;
+}
+
+.share-section {
+  margin: 20px 0;
+}
+
+.share-section h3 {
+  margin: 0 0 8px;
+  font-size: 1rem;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgb(0 0 0 / 60%);
+}
+
+.modal {
+  width: min(560px, 100%);
+  max-height: calc(100vh - 32px);
+  padding: 24px;
+  overflow: auto;
+  border: 1px solid #4a4f44;
+  border-radius: 14px;
+  background: #1a1d19;
+}
+
+.modal h2 {
+  margin-top: 0;
+}
+
+.inline-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+  margin: 12px 0;
+}
+
+.inline-form .notice {
+  flex-basis: 100%;
+}
+
+.field.grow {
+  flex: 1 1 200px;
+}
+
+.check {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 0.9rem;
+}
+
+.new-block {
+  margin-top: 32px;
+}
+
 @media (max-width: 720px) {
   .layout-two {
     grid-template-columns: 1fr;

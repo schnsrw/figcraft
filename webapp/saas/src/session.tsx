@@ -217,6 +217,24 @@ export function useSession(): SessionValue {
   return value;
 }
 
+/** The organisation being acted in. Only call this from screens shown in the `ready` state. */
+export function useReady(): {
+  tenantId: string;
+  role: string | null;
+  principalId: string | null;
+  client: ApiClient;
+} {
+  const { state, client } = useSession();
+  if (state.kind !== "ready")
+    throw new Error("not signed in to an organisation");
+  return {
+    tenantId: state.tenant.id,
+    role: state.tenant.role,
+    principalId: state.session.principal_id,
+    client,
+  };
+}
+
 /** Whether the caller's tenant role is one of `roles`. */
 export function hasRole(
   tenantRole: string | null,

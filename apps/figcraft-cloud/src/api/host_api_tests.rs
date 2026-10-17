@@ -57,6 +57,10 @@ fn app(pool: PgPool) -> Fallible<Router> {
 }
 
 fn app_with(pool: PgPool, signing_key: Option<&[u8]>) -> Fallible<Router> {
+    app_limited(pool, signing_key, super::host_api::EMBED_LIMIT)
+}
+
+fn app_limited(pool: PgPool, signing_key: Option<&[u8]>, embed_limit: RateLimitConfig) -> Fallible<Router> {
     let objects = figcraft_cloud_storage::objects::ObjectStore::new(&figcraft_cloud_storage::objects::ObjectStoreSettings {
         endpoint: "http://127.0.0.1:9".to_string(),
         region: "us-east-1".to_string(),
@@ -72,7 +76,7 @@ fn app_with(pool: PgPool, signing_key: Option<&[u8]>) -> Fallible<Router> {
         auth_rate_limit: RateLimitConfig { burst: 1_000_000, refill_every: Duration::from_millis(1), max_keys: 1_000 },
         ..ApiConfig::default()
     };
-    let state = AppState::new(pool, objects, config).with_identity(identity);
+    let state = AppState::new(pool, objects, config).with_identity(identity).with_embed_limit(embed_limit);
     Ok(crate::health::app(CloudRole::Api, true, Some(api_router(state)), ContextSettings::new(CloudRole::Api, 256, Duration::from_secs(30), 1 << 20)))
 }
 
@@ -858,10 +862,12 @@ async fn document_changes_publish_minimal_events_to_subscribed_endpoints_only() 
 async fn the_embed_exchange_is_rate_limited_per_issuer() -> Fallible<()> {
     let Some(pool) = pool().await? else { return Ok(()) };
     let world = world(&pool).await?;
-    let app = app(pool.clone())?;
+    // A small bucket that never refills in the test, so timing cannot matter.
+    let limit = RateLimitConfig { burst: 5, refill_every: Duration::from_secs(3600), max_keys: 16 };
+    let app = app_limited(pool.clone(), Some(b"s6-host-api-signing-key-0123456"), limit)?;
     let same_origin = [("origin", ORIGIN)];
     let mut limited = 0;
-    for _ in 0..140 {
+    for _ in 0..12 {
         let reply = send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&json!({"token": sign(&world, "short", |_| {})}))).await?;
         if reply.status == 429 {
             limited += 1;
@@ -871,7 +877,9 @@ async fn the_embed_exchange_is_rate_limited_per_issuer() -> Fallible<()> {
             assert_eq!(reply.status, 401);
         }
     }
-    assert!(limited >= 10, "burst of 120 then throttled, got {limited} throttled of 140");
+    assert_eq!(limited, 7, "a burst of 5 is allowed, the other 7 of 12 are throttled");
+    // The production limit is a real burst, not a trickle.
+    assert!(super::host_api::EMBED_LIMIT.burst >= 60);
     Ok(())
 }
 

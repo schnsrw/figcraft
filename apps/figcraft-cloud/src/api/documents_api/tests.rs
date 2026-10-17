@@ -91,6 +91,41 @@ fn kind(scope: Scope) -> Kind {
 }
 
 #[test]
+fn the_can_summaries_follow_the_role_and_the_lifecycle() {
+    use super::{document_can, project_can, workspace_can};
+    // (role, workspace: create project / rename / archive, project: create document / rename /
+    // archive, document: edit / rename / archive / share), from the permission matrix above.
+    let expected = [
+        (Some(Role::WorkspaceAdmin), [true, true, true, true, true, true, true, true, true, true]),
+        (Some(Role::Editor), [true, false, false, true, true, false, true, true, false, true]),
+        (Some(Role::Commenter), [false, false, false, false, false, false, false, false, false, false]),
+        (Some(Role::Viewer), [false, false, false, false, false, false, false, false, false, false]),
+        (None, [false, false, false, false, false, false, false, false, false, false]),
+    ];
+    for (role, want) in expected {
+        let active = access(ResourceState::Active, role);
+        let (workspace, project, document) = (workspace_can(&active), project_can(&active), document_can(&active));
+        let got = [
+            workspace["create_project"].as_bool(),
+            workspace["rename"].as_bool(),
+            workspace["archive"].as_bool(),
+            project["create_document"].as_bool(),
+            project["rename"].as_bool(),
+            project["archive"].as_bool(),
+            document["edit"].as_bool(),
+            document["rename"].as_bool(),
+            document["archive"].as_bool(),
+            document["share"].as_bool(),
+        ];
+        assert_eq!(got.map(|value| value == Some(true)), want, "{role:?}");
+    }
+    // An archived workspace can be restored by its admin and nothing else.
+    let archived = access(ResourceState::Archived, Some(Role::WorkspaceAdmin));
+    let can = workspace_can(&archived);
+    assert_eq!((can["restore"].as_bool(), can["create_project"].as_bool(), can["rename"].as_bool()), (Some(true), Some(false), Some(false)));
+}
+
+#[test]
 fn every_route_has_exactly_one_expected_row() {
     let routes: BTreeSet<(&str, &str)> = ROUTES.iter().map(|route| (route.method, route.path)).collect();
     assert_eq!(routes.len(), ROUTES.len(), "duplicate route");

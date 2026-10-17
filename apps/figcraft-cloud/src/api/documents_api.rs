@@ -448,6 +448,39 @@ fn document_view(record: &DocumentRecord) -> Value {
     })
 }
 
+/// What the caller may do with a workspace, so a client can offer only those actions. The server
+/// still authorizes every request; this is a convenience, not a grant.
+pub(crate) fn workspace_can(access: &ResourceAccess) -> Value {
+    json!({
+        "create_project": allows(access, Kind::Workspace, Action::ProjectCreate),
+        "rename": allows(access, Kind::Workspace, Action::WorkspaceUpdate),
+        "archive": allows(access, Kind::Workspace, Action::WorkspaceArchive),
+        "restore": allows(access, Kind::Workspace, Action::WorkspaceRestore),
+        "manage_members": allows(access, Kind::Workspace, Action::WorkspaceManageMembers),
+    })
+}
+
+/// What the caller may do with a project (see [`workspace_can`]).
+pub(crate) fn project_can(access: &ResourceAccess) -> Value {
+    json!({
+        "create_document": allows(access, Kind::Project, Action::DocumentCreate),
+        "rename": allows(access, Kind::Project, Action::ProjectUpdate),
+        "archive": allows(access, Kind::Project, Action::ProjectArchive),
+        "restore": allows(access, Kind::Project, Action::ProjectRestore),
+    })
+}
+
+/// What the caller may do with a document (see [`workspace_can`]).
+pub(crate) fn document_can(access: &ResourceAccess) -> Value {
+    json!({
+        "edit": allows(access, Kind::Document, Action::DocumentEdit),
+        "rename": allows(access, Kind::Document, Action::DocumentRename),
+        "archive": allows(access, Kind::Document, Action::DocumentArchive),
+        "restore": allows(access, Kind::Document, Action::DocumentRestore),
+        "share": allows(access, Kind::Document, Action::DocumentShare),
+    })
+}
+
 fn no_store(mut response: Response) -> Response {
     response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     response
@@ -475,10 +508,12 @@ async fn list_workspaces_handler(
     for record in &page.items {
         // Re-decide each row: the listing query is only a pre-filter.
         let access = resolve_workspace_access(&mut transaction, caller.principal, record.id).await.map_err(membership_error)?;
-        if access.is_some_and(|access| {
-            allows(&access, Kind::Workspace, Action::WorkspaceView) || allows(&access, Kind::Workspace, Action::WorkspaceRestore)
-        }) {
-            items.push(workspace_view(record));
+        if let Some(access) = access
+            .filter(|access| allows(access, Kind::Workspace, Action::WorkspaceView) || allows(access, Kind::Workspace, Action::WorkspaceRestore))
+        {
+            let mut view = workspace_view(record);
+            view["can"] = workspace_can(&access);
+            items.push(view);
         }
     }
     Ok(Json(json!({"items": items, "next_cursor": paging.next(page.next_cursor.map(WorkspaceId::as_uuid))})))
@@ -501,9 +536,13 @@ async fn create_workspace_handler(
 
 async fn get_workspace_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let mut transaction = begin(&state, &caller).await?;
-    let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceView).await?;
+    let id: WorkspaceId = id.parse().map_err(|_| ApiError::not_found())?;
+    let access = resolve_workspace_access(&mut transaction, caller.principal, id).await.map_err(membership_error)?;
+    let access = check(access, Kind::Workspace, Action::WorkspaceView)?;
     let record = get_workspace(&mut transaction, id).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
-    Ok(Json(workspace_view(&record)))
+    let mut view = workspace_view(&record);
+    view["can"] = workspace_can(&access);
+    Ok(Json(view))
 }
 
 async fn rename_workspace_handler(
@@ -669,9 +708,13 @@ async fn create_project_handler(
 
 async fn get_project_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
     let mut transaction = begin(&state, &caller).await?;
-    let id = project_access(&mut transaction, &caller, &id, Action::ProjectView).await?;
+    let id: ProjectId = id.parse().map_err(|_| ApiError::not_found())?;
+    let access = resolve_project_access(&mut transaction, caller.principal, id).await.map_err(membership_error)?;
+    let access = check(access, Kind::Project, Action::ProjectView)?;
     let record = get_project_by_id(&mut transaction, id).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
-    Ok(Json(project_view(&record)))
+    let mut view = project_view(&record);
+    view["can"] = project_can(&access);
+    Ok(Json(view))
 }
 
 async fn rename_project_handler(
@@ -757,6 +800,7 @@ async fn get_document_handler(State(state): State<AppState>, caller: Authenticat
     let mut view = document_view(&record);
     view["role"] = access.role.map_or(Value::Null, |role| Value::String(role_str(role).to_string()));
     view["can_edit"] = Value::Bool(allows(&access, Kind::Document, Action::DocumentEdit));
+    view["can"] = document_can(&access);
     Ok(Json(view))
 }
 

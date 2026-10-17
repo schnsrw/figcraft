@@ -13,6 +13,7 @@ import {
   UnsupportedScreen,
 } from "./screens/entry";
 import { BootstrapScreen } from "./screens/bootstrap";
+import { InviteScreen, captureInviteToken } from "./screens/invite";
 import { ReadyRoutes } from "./screens/routes";
 import { SessionProvider, useSession } from "./session";
 
@@ -121,6 +122,10 @@ function Body({ branding }: { branding: Branding }) {
   const { state } = useSession();
   const { path, route } = useRouter();
   useDocumentTitle(branding, route.name);
+  // An invitation token arrives in the fragment; keep it (for the sign-in round trip) and hide it.
+  useEffect(() => {
+    if (route.name === "invite") captureInviteToken();
+  }, [route.name]);
 
   switch (state.kind) {
     case "loading":
@@ -134,7 +139,11 @@ function Body({ branding }: { branding: Branding }) {
         <SignedOutScreen
           productName={branding.productName}
           signInHref={signInHref(path)}
-          deepLink={route.name === "file" || route.name === "workspace"}
+          deepLink={
+            route.name === "file" ||
+            route.name === "workspace" ||
+            route.name === "invite"
+          }
         />
       );
     case "unavailable":
@@ -144,9 +153,18 @@ function Body({ branding }: { branding: Branding }) {
     case "bootstrap_required":
       return <BootstrapScreen />;
     case "choose_tenant":
-      return <TenantPicker tenants={state.tenants} />;
+      // An invitation can be accepted before choosing an organisation.
+      return route.name === "invite" ? (
+        <InviteScreen />
+      ) : (
+        <TenantPicker tenants={state.tenants} />
+      );
     case "no_tenant":
-      return <NoTenantScreen deployment={state.session.deployment} />;
+      return route.name === "invite" ? (
+        <InviteScreen />
+      ) : (
+        <NoTenantScreen deployment={state.session.deployment} />
+      );
     case "ready":
       return route.name === "not_found" ? <NotFoundScreen /> : <ReadyRoutes />;
   }
