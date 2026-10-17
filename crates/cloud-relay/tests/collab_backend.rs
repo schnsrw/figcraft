@@ -12,16 +12,20 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 use figcraft_cloud_domain::{CloudDocumentId, ProjectId, TenantId, WorkspaceId};
-use figcraft_cloud_relay::collab_backend::{CloudBackend, CloudBackendConfig, REFUSED, RevocationSweeper};
+use figcraft_cloud_relay::collab_backend::{
+    CloudBackend, CloudBackendConfig, DEFAULT_MAX_CLOUD_NODES, REFUSED, RevocationSweeper, UNAVAILABLE, base_document,
+};
 use figcraft_cloud_storage::begin_tenant_transaction;
+use figcraft_cloud_storage::document_snapshots::store_snapshot;
 use figcraft_cloud_storage::events::{claim_sequencer, read_events};
 use figcraft_cloud_storage::metadata::{archive_document, create_document};
-use figcraft_cloud_storage::objects::ObjectStoreSettings;
+use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
 use figcraft_cloud_storage::share_links::{ShareRole, create_share_link, revoke_share_link};
 use figcraft_collab::message::{self, Access, CatchUp, ClientMsg, ServerMsg};
-use figcraft_collab::{Change, Client, Json, NodeId, Prop};
+use figcraft_collab::{Change, Client, Json, Limits, NodeId, Prop, Server};
 use figcraft_collab_net::NetLimits;
 use figcraft_collab_net::hub::{Backend, Hosting, STOPPED};
+use figcraft_doc::NodeKind;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tungstenite::protocol::WebSocket;
 use tungstenite::{Bytes, Message};
@@ -346,6 +350,35 @@ fn confirmed_batches_are_durable_and_survive_a_restart() -> TestResult {
     assert_eq!(fixture.events(document), (3, vec![1, 2, 3]));
     drop(cleo);
     hosting.stop();
+    Ok(())
+}
+
+#[test]
+fn recovered_room_above_its_configured_node_limit_is_refused() -> TestResult {
+    let Some(fixture) = Fixture::new()? else {
+        return Ok(());
+    };
+    assert_eq!(fixture.config().limits.max_nodes, DEFAULT_MAX_CLOUD_NODES);
+    let document = fixture.document();
+    let file = document.to_string();
+    let (_, editor) = fixture.link(document, ShareRole::Editor, None);
+    let mut contents = base_document();
+    let page = contents.first_page().ok_or("base page missing")?;
+    contents.create(page, NodeKind::Frame, "One frame", 0.0, 0.0, 100.0, 100.0)?;
+    let state = Server::new(contents, "", Limits::default()).state()?;
+    let store = ObjectStore::new(&fixture.objects)?;
+    fixture.runtime.block_on(async {
+        let mut transaction = begin_tenant_transaction(&fixture.pool, fixture.tenant()).await.map_err(|error| format!("{error:?}"))?;
+        store_snapshot(&fixture.pool, &mut transaction, &store, document, &state, "figcraft-cloud test").await?;
+        transaction.commit().await?;
+        Ok::<_, Box<dyn std::error::Error>>(())
+    })?;
+
+    let mut config = fixture.config();
+    config.limits.max_nodes = 1;
+    let mut backend = CloudBackend::connect(&config)?;
+    assert_eq!(backend.admit(&file, &editor)?.access, Access::Edit);
+    assert!(matches!(backend.open(&file), Err(reason) if reason == UNAVAILABLE));
     Ok(())
 }
 

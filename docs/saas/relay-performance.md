@@ -1,14 +1,11 @@
 # Relay performance (S5-024, S5-025)
 
-Status: first measurements. One relay process, small scale, on a development machine with
-unrelated load. These are the first measured numbers for the cloud relay and they replace guesses.
-Production sizing still needs a quiet host, multiple replicas and larger runs (see "What is not
-covered yet").
-
-The 2026-10-17 figures below precede the S5-025 recovery change that transfers the already
-restored `Server` from `DurableRoom` into the live hub. The former path serialized that server and
-called `Server::restore` a second time. The change removes one restore pass; its latency effect
-still needs measurement with the same harness before changing the verdicts or sizing figures.
+Status: initial and post-fix measurements. One relay process on a development machine with local
+PostgreSQL and S3; production sizing still needs a quiet host, multiple replicas and larger runs.
+The initial 2026-10-17 figures below precede the S5-025 change that transfers the already restored
+`Server` from `DurableRoom` into the live hub. Run D repeats the same release workload after that
+change. The cloud room's initial supported limit is one page and 20,000 design layers
+(`DEFAULT_MAX_CLOUD_NODES = 20_001`); the editor core retains its independent 5M-node limit.
 
 ## Harness
 
@@ -56,6 +53,15 @@ $R --documents 1 --phases large,recovery --large-nodes 20000 --large-commits 50 
 # Run C: the large phase with a 60 s timeout, then the core alone.
 $R --documents 1 --phases large --large-nodes 20000 --large-commits 50 --timeout 60
 $R --cpu-nodes 20000
+
+# Run D: after the duplicate-restore fix, repeat run A with the default 15 s timeout.
+$R --editors 20 --documents 5 --seconds 120 --rate 2 --slow 2 --storm 20 \
+  --large-nodes 20000 --large-commits 50 \
+  --recovery-nodes 20000 --recovery-events 500 --recovery-runs 3
+
+# Run E: after adding the 20,001-node cloud cap, verify that boundary still opens.
+$R --documents 1 --phases large,recovery --large-nodes 20000 --large-commits 50 \
+  --recovery-nodes 20000 --recovery-events 500 --recovery-runs 1
 ```
 
 The admin URL is optional; without it the database figures are skipped (row-level security hides
@@ -154,6 +160,35 @@ and snapshot) and 5 cold reopens of small documents.
 Replaying 500 events costs tens of milliseconds; the snapshot restore is the whole cost. The p95
 of 14.3 s with 500 events is one slow open on a loaded host, 0.7 s short of the timeout.
 
+### Post-fix run D: same workload, disposable PostgreSQL/S3, default 15 s timeout
+
+| measure | n | p50 ms | p95 ms | p99 ms | max ms |
+|---|---|---|---|---|---|
+| commit latency (send to confirmation) | 4800 | 2.9 | 3.7 | 4.9 | 31.8 |
+| reconnect to welcome | 20 | 100.1 | 100.2 | 100.3 | 100.3 |
+| first commit after reconnect | 20 | 8.0 | 8.2 | 8.3 | 8.3 |
+| seeding commit (2000 creates per batch) | 10 | 348.1 | 882.0 | 882.0 | 882.0 |
+| rename commit on 20,000 frames | 50 | 1.4 | 3.4 | 5.6 | 5.6 |
+
+All 4,800 edits were confirmed and present as event rows, with zero refused batches or failed
+editors. Two slow readers were evicted between 45 and 50 seconds; the other editors continued.
+The 20-editor reconnect storm completed its first commits within 110 ms. The 20,000-frame cold
+open took 4,216 ms, with a 616,366-byte welcome; a warm join took 11 ms.
+
+| snapshot frames | events after it | n | refused | p50 ms | p95 ms | max ms |
+|---|---|---|---|---|---|---|
+| 0 | 500 | 3 | 0 | 44.3 | 48.0 | 48.0 |
+| 20,000 | 0 | 3 | 0 | 4,162.7 | 4,166.1 | 4,166.1 |
+| 20,000 | 500 | 3 | 0 | 4,223.9 | 4,235.1 | 4,235.1 |
+
+The same 20,000-frame, 500-event recovery scenario fell from the initial 14,295.5 ms p95 to
+4,235.1 ms p95. Both runs used the same release harness and 15 s timeout, but neither controlled
+background host load; this comparison supports the duplicate-restore fix, not a production SLO.
+Run E rebuilt the release binary with the 20,001-node cap: its 20,000-frame cold open took
+4,193 ms, and the snapshot plus 500-event cold open took 4,307 ms (one run, no refusal).
+An integration test separately proves an already stored document above its configured cap is
+refused on recovery.
+
 ## Against the targets
 
 Targets come from `docs/saas/product-requirements.md` ("Non-functional requirements"). The
@@ -161,8 +196,8 @@ roadmap's S5 exit asks that room recovery meets the initial target for supported
 
 | target | measured | verdict |
 |---|---|---|
-| Relay p95 server processing under 50 ms (no client network, no snapshot loading) | commit p95 37.6 ms end to end on loopback (p50 4.4 ms, p99 52.2 ms), including the PostgreSQL commit, at load 37 | met at this scale on this host (111.5 ms p95 at load 100+). Re-measure on a quiet host and at production scale |
-| Room recovery p95 under 10 s within the configured size limit | small documents with 500 events: p95 66 ms. 20k-frame snapshot: p50 8.3 to 8.5 s, p95 8.6 to 14.3 s, and 2 of 2 in-process cold opens timed out at 15 s under load | met for small documents; not met for 20k frames. Restoring once is the first fix; the default storage timeout must exceed the recovery time of the largest supported document |
+| Relay p95 server processing under 50 ms (no client network, no snapshot loading) | run D commit p95 3.7 ms end to end on loopback, including PostgreSQL, over 4,800 edits | met at measured scale; production-scale and quiet-host runs remain |
+| Room recovery p95 under 10 s within the configured size limit | run D p95 4.17 s for a 20k-frame snapshot and 4.24 s with 500 later events; the cloud default caps rooms at one page plus 20k layers | met at the initial cloud size limit in three cold opens per scenario; multiple replicas and a quiet host remain |
 | No acknowledged-edit loss | 4800 of 4800 confirmed batches are in `document_events` (rows counted per tenant) | holds for this run |
 
 ## Sizing from measurements
@@ -183,7 +218,7 @@ from the runs above. Assumptions are stated and are deliberately conservative.
   Scale on commit latency p95 and active rooms (`deployment-operations.md`, "Scaling
   thresholds").
 - **Recovery is serial too:** a cold open runs on the hub thread, so while a 20k-frame document
-  restores (8 s here) every other room on that relay waits for its next flush. Until restore is
+  restores (4.2 s in run D) every other room on that relay waits for its next flush. Until restore is
   faster or moved off the hub thread, keep large documents spread across replicas and alert on
   recovery time.
 - **PostgreSQL:** each batch is one `document_events` row of about 152 B of row data, about
@@ -195,7 +230,7 @@ from the runs above. Assumptions are stated and are deliberately conservative.
   a 20k-frame document sends 616 kB per join, and a reconnect storm of K editors on large
   documents sends K × welcome size at once.
 - **Reconnect storms:** 20 simultaneous reconnects finished in 100 to 221 ms for small documents.
-  For large documents the cold-open time per room (8 to 10 s at 20k frames, serial on the hub
+  For large documents the cold-open time per room (4.2 s at 20k frames, serial on the hub
   thread) dominates. A relay restart with many large rooms open needs staggered reconnects or a
   faster restore.
 - **Slow readers:** a non-reading client is disconnected after about `NetLimits::queue` (1024)
@@ -209,14 +244,17 @@ from the runs above. Assumptions are stated and are deliberately conservative.
 - **Production scale and a quiet host:** hundreds of documents, thousands of editors, PostgreSQL
   on its own host, and a run long enough to see snapshot scheduling.
 - **Separate client processes,** so RSS counts the relay alone.
-- **The maximum supported document size:** 20k frames was measured; the 5M-node `Limits` maximum
-  was not, and at the measured restore cost (about 0.2 ms per node) it cannot meet the recovery
-  target. A supported size limit has to be declared from these numbers.
+- **Larger documents:** cloud rooms now cap at 20,001 nodes (one page plus 20,000 frames in this
+  workload); larger native documents and the editor core's 5M-node limit are outside this cloud
+  measurement. A later raise needs another load and recovery run before changing the cap.
 
 ## Revision history
 
+- 2026-10-17: run D repeated the full release workload after the duplicate-restore fix; cold
+  recovery at the initial cloud size limit measured 4.24 s p95 and commit 3.7 ms p95. Run E
+  rebuilt with the cap and verified that 20,000 frames still open.
 - 2026-10-17: removed the second `Server::restore` during `CloudBackend` recovery. The existing
-  measurements remain the baseline until a comparable run is recorded.
+  measurements were the baseline for run D.
 - 2026-10-17: first harness and measurements (S5-024 and S5-025, partial). Phase selection,
   `--timeout`, relay logs and non-fatal cold-open refusals added after the default 15 s timeout
   refused a 20k-frame cold open.

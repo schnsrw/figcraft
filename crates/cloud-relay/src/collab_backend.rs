@@ -78,6 +78,9 @@ pub const UNAVAILABLE: &str = "this document can't be opened right now: try agai
 pub const PRODUCER: &str = concat!("figcraft-cloud-relay ", env!("CARGO_PKG_VERSION"));
 /// The name of [`base_document`] (fixed: the document's own name is metadata, not content).
 pub const BASE_NAME: &str = "Untitled";
+/// The initial cloud room limit: one page plus 20,000 design layers. Recovery of this size
+/// meets the S5 target in the release load harness; the editor core keeps its larger limit.
+pub const DEFAULT_MAX_CLOUD_NODES: usize = 20_001;
 /// Admissions remembered for documents that aren't open yet.
 const MAX_ADMITTED: usize = 4096;
 /// Links watched for revocation in one document; a hello with one more is refused as
@@ -119,7 +122,7 @@ impl CloudBackendConfig {
         Self {
             database_url: database_url.into(),
             object_store,
-            limits: Limits::default(),
+            limits: Limits { max_nodes: DEFAULT_MAX_CLOUD_NODES, ..Limits::default() },
             timeout: Duration::from_secs(15),
             max_connections: 8,
             max_open: 1024,
@@ -472,6 +475,10 @@ impl CloudBackend {
             }
         };
         let restored = room.restored_snapshot();
+        if room.server().document().node_count() > self.limits.max_nodes {
+            log::warn!("document {file}: recovered document exceeds the cloud node limit");
+            return Err(UNAVAILABLE.into());
+        }
         let fencing_token = room.fencing_token();
         let server = room.into_server();
         let snapshot_seq = restored.and_then(|(_, seq)| u64::try_from(seq).ok());

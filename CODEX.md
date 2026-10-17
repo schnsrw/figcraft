@@ -143,17 +143,21 @@ the continuation point, a blocker or a major decision changes.
    `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
    ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
    sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
-   STATE: S4 is complete (25/25) and its gate passes (2026-10-17). S5 is 6/25.
+   STATE: S4 is complete (25/25) and its gate passes (2026-10-17). S5 is 8/25.
    S5-002 fixes batch actor attribution: each accepted batch is now stored under its own
    admitted client's principal, verified with two editors in a live room against PostgreSQL/S3.
-   RESUME HERE (S5): the duplicate room restore is removed; re-measure it, then move storage work
+   S5-024/025 measured the repeat release load against disposable PostgreSQL/S3: 4,800 edits
+   confirmed, commit p95 3.7 ms and 20k-frame plus 500-event recovery p95 4.24 s. Cloud rooms
+   now cap at the measured 20,001 nodes. Production-scale evidence remains in the S5 gate.
+   RESUME HERE (S5): implement PostgreSQL room leases and owner routing, then move storage work
    off the hub thread (see below). Orchestration is decided (owner): our own PostgreSQL leases beside the
    fencing tokens, any relay redirects to the owner, drain on shutdown; not Plane/Rivet. Next:
    S5-003/004 lease rows, S5-006 redirect, S5-012 drain, S5-014 commenter/viewer enforcement at
    message level, S5-016..018 quotas/presence/large assets, S5-020..023 two-replica and kill
    tests. PRIORITY FINDING from S5-024 (`docs/saas/relay-performance.md`): the relay hub runs
    commits and cold restores serially on one thread (a 20k-node restore blocked other rooms for
-   8 s); move storage work off the hub thread before multi-replica work.
+   8 s before the duplicate-restore fix and 4.2 s afterward); move storage work off the hub thread
+   before multi-replica work.
    Testing policy (owner): targeted suites per step, quick scan (fmt, clippy on dependents,
    layers, affected tests) before push; full smoke/`cargo xtask ci` only when GitHub CI is red. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.

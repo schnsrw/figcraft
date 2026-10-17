@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (6/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (8/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -2264,38 +2264,28 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 - [ ] **S5-021** Test simultaneous lease acquisition and stale-owner fencing.
 - [ ] **S5-022** Kill relay before commit and prove no edit was confirmed.
 - [ ] **S5-023** Kill relay after commit and prove the edit returns after reconnect.
-- [ ] **S5-024** Load-test reconnect storms, slow readers and maximum supported document size.
-  Partial (2026-10-17): crates/cloud-relay/examples/relay_load.rs starts a real collab_net hub with
-  CloudBackend on loopback against the dev PostgreSQL and S3. It creates documents and editor share
-  links in tenant transactions (fixture tenant prefix f1) and drives raw tungstenite editors that
-  send hello and then rename batches. The phases are steady, slow readers, reconnect storm, large
-  document and recovery; --phases selects them, --timeout sets the storage timeout and --cpu-nodes
-  times the collaboration core alone. Measured at 20 editors, 5 documents, 120 s and 2 batches/s:
-  4800 of 4800 batches were confirmed, with no failures. The hub dropped both slow readers 45 to 50
-  s in, after about 1024 queued messages, and the other editors kept committing. In a reconnect
-  storm, 20 editors reconnected and had a commit confirmed within 221 ms, with no failures. A
-  20k-frame document took 8.5 s to cold-open with a 60 s timeout, about 4 KiB RSS per node and a 616
-  kB welcome. With the relay's default 15 s storage timeout, that cold open was refused twice under
-  host load ("recovery timed out"). Not covered: multiple replicas, production scale, separate
-  client processes, and the 5M-node maximum document size.
-- [ ] **S5-025** Measure room recovery and commit latency against roadmap targets.
-  Partial (2026-10-17): docs/saas/relay-performance.md records the machine, the exact commands and
-  the results, and compares them with the product-requirements targets. It also adds a "Sizing from
-  measurements" section. Commit latency, send to confirmation including the PostgreSQL commit: p50
-  4.4 ms, p95 37.6 ms, p99 52.2 ms at host load 37. An earlier run at load 100+ gave a p95 of 111.5
-  ms. That is within the 50 ms p95 target at this scale, but needs re-measuring on a quiet host.
-  Room recovery on a fresh hub: 500 events with no snapshot gives a p95 of 66 ms. A 20k-frame
-  snapshot gives p50 8.5 s and p95 8.6 s; with 500 events after it, p50 8.3 s and p95 14.3 s. That
-  misses the 10 s target for 20k frames. CloudBackend::recover restores the server twice, and the
-  in-process restore takes 4.1 s at 20k frames, so the double restore accounts for about half the
-  cold-open time. Other figures: document_events grows by 152 B per row (about 350 B with indexes,
-  up to about 860 B of WAL), which is 7,172 rows and 1.04 MiB per editor-hour at 2 batches/s;
-  outbound traffic is 162 B/s per editor; RSS is about 2.3 MiB per open small document. Both
-  multi-replica and production-scale targets are still outstanding.
-  Follow-up (2026-10-17): `CloudBackend::recover` now transfers the already restored server out of
-  `DurableRoom`, eliminating the second serialization and `Server::restore`. The earlier latency
-  measurements remain the baseline; a comparable load run and a declared supported document size
-  are still required before this task can be checked.
+- [x] **S5-024** Load-test reconnect storms, slow readers and maximum supported document size.
+  Evidence (2026-10-17): `crates/cloud-relay/examples/relay_load.rs` drove a release relay against
+  disposable PostgreSQL 18 and SeaweedFS S3 with 20 editors, 5 documents, 120 s and 2 batches/s.
+  All 4,800 batches confirmed with no editor failures. The hub evicted two slow readers after 45 to
+  50 s without delaying the others. Twenty simultaneous reconnects got their first commits within
+  110 ms. The initial cloud limit is 20,001 nodes (one page plus 20,000 frames in the measured
+  document); the 20k-frame cold open and edit succeeded at the default 15 s timeout. A second
+  release run after applying that cap confirmed a 4,193 ms cold open at the boundary. The test
+  `recovered_room_above_its_configured_node_limit_is_refused` verifies an oversized stored room is
+  not served. `docs/saas/relay-performance.md` records the commands and measurements. Multiple
+  replicas, production scale and clients in separate processes remain S5-GATE work.
+- [x] **S5-025** Measure room recovery and commit latency against roadmap targets.
+  Evidence (2026-10-17): the repeat release run recorded commit p95 3.7 ms for 4,800 edits,
+  including the PostgreSQL commit and loopback client round trip, below the initial 50 ms server
+  processing target at this scale. A fresh hub recovered a 20k-frame snapshot in 4,166 ms p95 and
+  that snapshot plus 500 committed events in 4,235 ms p95 (three cold opens each, zero refusals),
+  below the 10 s initial target at the configured cloud size limit. Removing a duplicate restore
+  lowered the latter scenario from the 14,296 ms baseline. The bounded 20,001-node cloud limit is
+  enforced on edits and recovered rooms; the editor core's 5M-node limit is separate. These are
+  development-host measurements, not a production SLO; quiet-host and multi-replica evidence
+  remains in S5-GATE. The complete baseline, repeat run, commands and sizing assumptions are in
+  `docs/saas/relay-performance.md`.
 
 ### S5 gate
 
@@ -2597,3 +2587,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S4 complete (25/25) and its gate passes: team-member search and workspace grant listing with full audit; relay action matrix; resume bound to the issuing credential (a viewer could otherwise take over an editor's client id); every mutating request re-validates access inside its transaction; tenant locks moved to FOR NO KEY UPDATE after a deadlock with audit inserts; OIDC back-channel logout and a recorded groups claim; Keycloak image pinned for validation. |
 | 2026-10-17 | S5-002: bound each accepted relay batch to the principal of its own admitted client, rather than the room opener; a two-editor PostgreSQL/S3 regression verifies per-event actors and commit order. S5 reaches 6/25. |
 | 2026-10-17 | S5-025 follow-up: removed a duplicate server restore from cold room recovery; comparable latency measurement remains open. S5 stays 6/25. |
+| 2026-10-17 | S5-024/025: repeated the release load on disposable PostgreSQL/S3 after the recovery fix: 4,800/4,800 edits confirmed, commit p95 3.7 ms, 20k-frame plus 500-event recovery p95 4.24 s, two slow readers evicted, 20 reconnects committed within 110 ms. Capped cloud rooms at the measured 20,001 nodes and verified both the boundary and an oversized stored snapshot. S5 reaches 8/25; production-scale and multi-replica tests remain in the gate. |
