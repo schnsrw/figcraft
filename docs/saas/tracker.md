@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (23/25); S6 in progress (5/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (23/25); S6 in progress (6/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 23 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 5 / 31 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 6 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2458,7 +2458,8 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ### API and webhooks
 
-- [ ] **S6-011** Publish versioned OpenAPI for host document and job operations.
+- [x] **S6-011** Publish versioned OpenAPI for host document and job operations.
+  Evidence: versioned OpenAPI 3.1 document `apps/figcraft-cloud/openapi/host-api-v1.json` (info.version 1.0.0, server /api/v1, bearer service-account security, one operation per host route with its required scope, the fixed error envelope, idempotency-key parameter) served unauthenticated at `GET /api/v1/host/openapi.json`; `api/host_api.rs` holds the Rust route table (`HOST_ROUTES`) and 6 tests: served verbatim through the router, valid 3.1 and major version 1, document and table equal in both directions (method, path, operationId, scope), scopes on the service-account allowlist, all $ref resolve, authenticated operations document 401 and 403. Not done: only the openapi route is served by this commit; the document, resolve, archive, restore and export operations it describes are implemented in S6-012, which adds the router-level conformance test; webhook endpoints are added to the document by S6-013/S6-014; no generated client or schema validator beyond these structural checks.
 - [ ] **S6-012** Implement idempotent host create, resolve, archive, restore and export flows.
 - [ ] **S6-013** Implement webhook endpoint management and encrypted signing secrets.
 - [ ] **S6-014** Implement signed delivery, retry schedule, terminal failure and manual replay.
@@ -2751,3 +2752,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | Relay: a restarted replica reclaims its own stale room lease at once (same advertised address, fence moves past the dead process; `acquire_or_reclaim_room`), and one flush commits different rooms concurrently: measured 999 commits/s at 1.6 ms median where serial commits reached 570 to 799 at 104 to 126 ms. |
 | 2026-10-18 | S5-017: relay quotas (rooms, connections, clients per room, messages per second, message size, outbound queue bytes) are bounded operator settings, enforced and tested live through the real hub. S5 reaches 21/25. |
 | 2026-10-18 | S5-022, S5-023: SIGKILL tests against the real process: an edit whose commit was blocked is never confirmed and leaves nothing durable; confirmed edits all return after a restart that reclaims the dead process's lease. S5 reaches 23/25. |
+| 2026-10-18 | S6-011: versioned OpenAPI 1.0.0 for the host document and job operations, checked in, served at /api/v1/host/openapi.json and tied to a Rust route table by tests. S6 reaches 6/31. |

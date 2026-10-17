@@ -1,0 +1,193 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FigCraft Cloud host API",
+    "version": "1.0.0",
+    "description": "Server-to-server API for a registered host product that embeds FigCraft: create, resolve, archive and restore documents by the host's own identifiers and request exports. Versioned by the /api/v1 prefix; additive changes keep 1.x, a breaking change would be /api/v2. Every failure uses the fixed error envelope; messages never contain request data."
+  },
+  "servers": [{ "url": "/api/v1" }],
+  "security": [{ "serviceAccount": [] }],
+  "paths": {
+    "/host/openapi.json": {
+      "get": {
+        "operationId": "getHostOpenApi",
+        "summary": "This document.",
+        "security": [],
+        "responses": { "200": { "description": "The OpenAPI document.", "content": { "application/json": { "schema": { "type": "object" } } } } }
+      }
+    },
+    "/host/systems/{system_id}/documents": {
+      "post": {
+        "operationId": "createHostDocument",
+        "summary": "Create a document inside a mapped project and map the host's external id onto it.",
+        "description": "Requires scope documents:write and an Idempotency-Key header. Repeating the request with the same key and body replays the first response; the same key with a different body is 409 conflict. An external_id that is already mapped is 409 conflict.",
+        "x-required-scope": "documents:write",
+        "parameters": [{ "$ref": "#/components/parameters/SystemId" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CreateDocument" } } } },
+        "responses": {
+          "201": { "description": "Created.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Document" } } } },
+          "200": { "description": "Replay of an earlier identical request.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Document" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/host/systems/{system_id}/documents/{external_id}": {
+      "get": {
+        "operationId": "resolveHostDocument",
+        "summary": "Resolve the host's external document id.",
+        "x-required-scope": "documents:read",
+        "parameters": [{ "$ref": "#/components/parameters/SystemId" }, { "$ref": "#/components/parameters/ExternalId" }],
+        "responses": {
+          "200": { "description": "The document.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Document" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/host/systems/{system_id}/documents/{external_id}/archive": {
+      "post": {
+        "operationId": "archiveHostDocument",
+        "summary": "Archive the document. Idempotent: archiving an archived document succeeds unchanged.",
+        "x-required-scope": "documents:write",
+        "parameters": [{ "$ref": "#/components/parameters/SystemId" }, { "$ref": "#/components/parameters/ExternalId" }],
+        "responses": {
+          "200": { "description": "The document, now archived.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Document" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/host/systems/{system_id}/documents/{external_id}/restore": {
+      "post": {
+        "operationId": "restoreHostDocument",
+        "summary": "Restore an archived document. Idempotent: restoring an active document succeeds unchanged.",
+        "x-required-scope": "documents:write",
+        "parameters": [{ "$ref": "#/components/parameters/SystemId" }, { "$ref": "#/components/parameters/ExternalId" }],
+        "responses": {
+          "200": { "description": "The document, now active.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Document" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/host/systems/{system_id}/documents/{external_id}/exports": {
+      "post": {
+        "operationId": "requestHostExport",
+        "summary": "Request an export job for the document on behalf of a mapped host user.",
+        "description": "Requires scope exports:create and an Idempotency-Key header. The job runs asynchronously; poll the export with getHostExport or subscribe to the export.* webhook events.",
+        "x-required-scope": "exports:create",
+        "parameters": [{ "$ref": "#/components/parameters/SystemId" }, { "$ref": "#/components/parameters/ExternalId" }, { "$ref": "#/components/parameters/IdempotencyKey" }],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RequestExport" } } } },
+        "responses": {
+          "202": { "description": "Accepted (or replayed).", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Export" } } } },
+          "400": { "$ref": "#/components/responses/Error" },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" },
+          "409": { "$ref": "#/components/responses/Error" },
+          "429": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    },
+    "/host/systems/{system_id}/exports/{export_id}": {
+      "get": {
+        "operationId": "getHostExport",
+        "summary": "The state of an export job requested through this host.",
+        "x-required-scope": "jobs:read",
+        "parameters": [{ "$ref": "#/components/parameters/SystemId" }, { "name": "export_id", "in": "path", "required": true, "schema": { "type": "string", "format": "uuid" } }],
+        "responses": {
+          "200": { "description": "The export.", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Export" } } } },
+          "401": { "$ref": "#/components/responses/Error" },
+          "403": { "$ref": "#/components/responses/Error" },
+          "404": { "$ref": "#/components/responses/Error" }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "serviceAccount": { "type": "http", "scheme": "bearer", "description": "A tenant service-account credential with the scope named by x-required-scope." }
+    },
+    "parameters": {
+      "SystemId": { "name": "system_id", "in": "path", "required": true, "description": "The registered host system id.", "schema": { "type": "string", "minLength": 1, "maxLength": 128 } },
+      "ExternalId": { "name": "external_id", "in": "path", "required": true, "description": "The host's own identifier, as mapped.", "schema": { "type": "string", "minLength": 1, "maxLength": 512 } },
+      "IdempotencyKey": { "name": "Idempotency-Key", "in": "header", "required": true, "schema": { "type": "string", "minLength": 8, "maxLength": 255 } }
+    },
+    "responses": {
+      "Error": {
+        "description": "The fixed error envelope; the message depends only on the code.",
+        "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ErrorEnvelope" } } }
+      }
+    },
+    "schemas": {
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "request_id"],
+            "properties": {
+              "code": { "enum": ["invalid_request", "unauthenticated", "forbidden", "not_found", "conflict", "precondition_failed", "resource_inactive", "quota_exceeded", "rate_limited", "temporarily_unavailable", "internal", "invalid_cursor"] },
+              "message": { "type": "string" },
+              "request_id": { "type": "string" }
+            }
+          }
+        }
+      },
+      "CreateDocument": {
+        "type": "object",
+        "required": ["external_id", "external_project_id", "name"],
+        "additionalProperties": false,
+        "properties": {
+          "external_id": { "type": "string", "minLength": 1, "maxLength": 512 },
+          "external_project_id": { "type": "string", "minLength": 1, "maxLength": 512, "description": "The host's id of a mapped project." },
+          "name": { "type": "string", "minLength": 1, "maxLength": 255 }
+        }
+      },
+      "Document": {
+        "type": "object",
+        "required": ["id", "external_id", "workspace_id", "project_id", "name", "state"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "external_id": { "type": "string" },
+          "workspace_id": { "type": "string", "format": "uuid" },
+          "project_id": { "type": "string", "format": "uuid" },
+          "name": { "type": "string" },
+          "state": { "enum": ["active", "archived"] }
+        }
+      },
+      "RequestExport": {
+        "type": "object",
+        "required": ["format", "external_user_id"],
+        "additionalProperties": false,
+        "properties": {
+          "format": { "enum": ["png", "jpeg", "webp", "svg", "pdf", "figcraft"] },
+          "external_user_id": { "type": "string", "minLength": 1, "maxLength": 512, "description": "The host's id of a mapped, active member who is recorded as the requester." }
+        }
+      },
+      "Export": {
+        "type": "object",
+        "required": ["id", "document_id", "format", "state"],
+        "properties": {
+          "id": { "type": "string", "format": "uuid" },
+          "document_id": { "type": "string", "format": "uuid" },
+          "format": { "type": "string" },
+          "state": { "enum": ["queued", "running", "succeeded", "failed", "expired"] },
+          "error_code": { "type": ["string", "null"] },
+          "completed_at": { "type": ["integer", "null"], "description": "Unix seconds." }
+        }
+      }
+    }
+  }
+}

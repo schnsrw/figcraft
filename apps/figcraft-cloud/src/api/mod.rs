@@ -28,6 +28,7 @@ pub(crate) mod context;
 pub(crate) mod cursor;
 pub(crate) mod documents_api;
 pub(crate) mod error;
+pub(crate) mod host_api;
 pub(crate) mod rate_limit;
 pub(crate) mod realtime;
 pub(crate) mod teams_api;
@@ -167,7 +168,7 @@ impl AppState {
 pub(crate) fn api_router(state: AppState) -> Router {
     // S4 modules merge their routers here, e.g. `.merge(oidc::routes())`.
     let auth: Router<AppState> = Router::new().merge(auth_routes::routes());
-    let resources: Router<AppState> = Router::new().merge(tenants_api::routes()).merge(documents_api::routes());
+    let resources: Router<AppState> = Router::new().merge(tenants_api::routes()).merge(documents_api::routes()).merge(host_api::router());
     api_router_with(state, auth, resources)
 }
 
