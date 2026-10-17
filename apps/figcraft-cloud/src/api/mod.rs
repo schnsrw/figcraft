@@ -183,4 +183,6 @@ async fn unavailable() -> ApiError {
 }
 
 #[cfg(test)]
+mod route_matrix_tests;
+#[cfg(test)]
 mod tests;
