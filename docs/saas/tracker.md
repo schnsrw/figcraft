@@ -1861,6 +1861,16 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ## S5 — Distributed collaboration relay
 
+> **Orchestration decision (product owner, 2026-10-17):** build the relay orchestration ourselves
+> rather than adopting Plane or Rivet. Room leases live in PostgreSQL next to the existing fencing
+> tokens (no Redis dependency for ownership), any relay accepts a connection and redirects a
+> client to the current owner, and draining snapshots rooms and releases leases. Rationale:
+> lowest effort and no external dependency to maintain. Fencing tokens already enforce single-writer
+> safety (a stale owner's write is refused even during a partition), and commit-before-broadcast,
+> snapshot recovery and quarantine already exist. Rivet's scalable self-hosted storage needs
+> FoundationDB under an enterprise licence; Plane (MIT) fits the model but its long-term maintenance
+> is uncertain after Jamsocket's acquisition. Details: `relay-orchestration-decision.md`.
+
 ### Admission and routing
 
 - [ ] **S5-001** Implement short-lived, document-bound realtime tickets. Depends on S3-GATE and

@@ -152,8 +152,9 @@ the continuation point, a blocker or a major decision changes.
    (owner confirmed all defaults in `docs/saas/identity-mapping-policy.md`), S4-025 (Keycloak SAML
    run per `docs/saas/saml-federation.md`), then the S4 gate. Also: a CLI that prints the bootstrap
    token, browser relay admission by short-lived realtime tickets instead of share links, and
-   `snapshots::set_current_snapshot` should report NotFound for another tenant's document. Before
-   S5, evaluate Plane (jamsocket/plane) against our own lease design. Testing policy: targeted suites per step and a quick scan before push; run the full
+   `snapshots::set_current_snapshot` should report NotFound for another tenant's document. S5 orchestration is decided
+   (owner, 2026-10-17): our own leases in PostgreSQL beside the fencing tokens, relay-to-owner
+   redirects and drain; not Plane or Rivet (see the S5 note in the tracker). Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.
    Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
    plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight
