@@ -53,11 +53,11 @@ impl PageSize {
         Ok(Self(requested as u8))
     }
 
-    fn query_limit(self) -> i64 {
+    pub(crate) fn query_limit(self) -> i64 {
         i64::from(self.0) + 1
     }
 
-    fn as_usize(self) -> usize {
+    pub(crate) fn as_usize(self) -> usize {
         usize::from(self.0)
     }
 }
@@ -108,12 +108,12 @@ pub struct DocumentRecord {
     pub state: ResourceState,
 }
 
-type TenantRow = (String, String, String, String, String, String);
+pub(crate) type TenantRow = (String, String, String, String, String, String);
 type WorkspaceRow = (String, String, Option<String>, String, String);
 type ProjectRow = (String, String, String, Option<String>, String, String);
 type DocumentRow = (String, String, String, String, String, String);
 
-fn state(value: &str) -> Result<ResourceState, RepositoryError> {
+pub(crate) fn state(value: &str) -> Result<ResourceState, RepositoryError> {
     match value {
         "pending" => Ok(ResourceState::Pending),
         "active" => Ok(ResourceState::Active),
@@ -125,7 +125,7 @@ fn state(value: &str) -> Result<ResourceState, RepositoryError> {
     }
 }
 
-fn tenant(row: TenantRow) -> Result<TenantRecord, RepositoryError> {
+pub(crate) fn tenant(row: TenantRow) -> Result<TenantRecord, RepositoryError> {
     Ok(TenantRecord {
         id: row.0.parse().map_err(|_| RepositoryError::CorruptRow)?,
         slug: row.1,
@@ -168,7 +168,7 @@ fn document(row: DocumentRow) -> Result<DocumentRecord, RepositoryError> {
     })
 }
 
-fn page<T, Id: Copy>(mut items: Vec<T>, size: PageSize, id: impl Fn(&T) -> Id) -> Page<T, Id> {
+pub(crate) fn page<T, Id: Copy>(mut items: Vec<T>, size: PageSize, id: impl Fn(&T) -> Id) -> Page<T, Id> {
     let has_more = items.len() > size.as_usize();
     items.truncate(size.as_usize());
     let next_cursor = if has_more { items.last().map(id) } else { None };
