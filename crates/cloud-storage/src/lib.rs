@@ -4,6 +4,8 @@ use figcraft_cloud_domain::TenantId;
 use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 pub mod access_guard;
+pub mod account_settings;
+pub mod accounts;
 pub mod assets;
 pub mod audit;
 pub mod bootstrap;
@@ -210,7 +212,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                     'upload_reservations', 'libraries', 'library_team_grants', 'library_versions', 'library_usages',
                     'plugins', 'plugin_versions', 'exports', 'document_thumbnails', 'retention_holds', 'share_links', 'oidc_login_attempts', 'browser_sessions',
                     'tenant_bootstrap', 'service_accounts', 'service_account_credentials', 'team_invitations',
-                    'member_permissions', 'support_access_grants', 'room_leases', 'room_clients', 'host_systems', 'host_system_keys', 'embed_token_uses', 'webhook_endpoints', 'webhook_deliveries', 'webhook_delivery_attempts', 'local_credentials',
+                    'member_permissions', 'support_access_grants', 'room_leases', 'room_clients', 'host_systems', 'host_system_keys', 'embed_token_uses', 'webhook_endpoints', 'webhook_deliveries', 'webhook_delivery_attempts', 'local_credentials', 'tenant_account_settings',
                     'platform_admins', 'platform_sessions', 'platform_bootstrap', 'platform_audit_events', 'workspace_owner_invitations'
                 ])
             LOOP
@@ -231,7 +233,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                 SELECT p.oid::regprocedure::text FROM pg_proc p
                 WHERE p.pronamespace = 'public'::regnamespace AND p.proname = ANY (ARRAY[
                     'figcraft_live_share_link', 'figcraft_dead_share_links', 'figcraft_service_credential',
-                    'figcraft_invitation_tenant', 'figcraft_principal_tenants', 'figcraft_host_issuer', 'figcraft_claim_webhook_deliveries',
+                    'figcraft_invitation_tenant', 'figcraft_principal_tenants', 'figcraft_host_issuer', 'figcraft_tenant_by_slug', 'figcraft_claim_webhook_deliveries',
                     'figcraft_platform_workspaces', 'figcraft_platform_workspace', 'figcraft_owner_invitation_tenant'
                 ])
             LOOP

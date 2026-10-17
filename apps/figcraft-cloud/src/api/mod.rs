@@ -20,6 +20,8 @@
 
 #![allow(dead_code, reason = "S4 modules (OIDC, sessions, service accounts, tenant APIs) build on this foundation")]
 
+pub(crate) mod account_routes;
+pub(crate) mod accounts_contract;
 pub(crate) mod auth;
 pub(crate) mod auth_routes;
 pub(crate) mod authenticator;
@@ -220,8 +222,13 @@ impl AppState {
 /// The `/api/v1` router (full paths) with every module's routes.
 pub(crate) fn api_router(state: AppState) -> Router {
     // S4 modules merge their routers here, e.g. `.merge(oidc::routes())`.
-    let auth: Router<AppState> = Router::new().merge(auth_routes::routes()).merge(host_api::auth_router());
-    let resources: Router<AppState> = Router::new().merge(tenants_api::routes()).merge(documents_api::routes()).merge(host_api::router());
+    let auth: Router<AppState> = Router::new()
+        .merge(auth_routes::routes())
+        .merge(account_routes::auth_routes())
+        .merge(accounts_contract::routes())
+        .merge(host_api::auth_router());
+    let resources: Router<AppState> =
+        Router::new().merge(tenants_api::routes()).merge(account_routes::resource_routes()).merge(documents_api::routes()).merge(host_api::router());
     api_router_with(state, auth, resources)
 }
 

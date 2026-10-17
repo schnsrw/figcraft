@@ -97,6 +97,17 @@ hold both).
   full computation for unknown logins and unusable hashes (no account oracle in text or timing).
   Concurrent hashes are bounded. Passwords are NFKC-normalised; 12 to 128 characters; no composition
   rules; common-password and pattern deny-list. Decision record: `password-hashing-decision.md`.
+* **Sign-up** (S6-034): only through an invitation (the login is the invited address; the token is
+  locked first, so of concurrent sign-ups exactly one wins; principal, credential and memberships are
+  one transaction), through the tenant's **open registration** (a tenant setting, **off by default**,
+  `viewer` role, no team), or, for the first owner of a single-tenant deployment, with the printed
+  bootstrap token plus a password (a self-hoster needs no external identity provider). Misuse of an
+  invitation token is one fixed `404`; a password the policy refuses is explained (`error.reason =
+  password_policy`); a taken login is `409`.
+* **Per-tenant account settings** (`tenant_account_settings`, forced RLS, `tenant.update_policy`,
+  audited): allowed sign-in methods (password, oidc; at least one on), open registration, second
+  factor required. Contract: `apps/figcraft-cloud/openapi/accounts-api-v1.json`, served at
+  `GET /api/v1/auth/openapi.json`.
 * **Never** logged, returned or audited: passwords, hashes, reset or invitation tokens.
 
 ## Authorization controls

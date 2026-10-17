@@ -139,7 +139,7 @@ if test "$(migration_ledger)" != t; then
 fi
 schema_version=$("${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -Atqc \
   "SELECT MAX(version) FROM public._sqlx_migrations WHERE success = TRUE")
-if test "$schema_version" != 20261018000020; then
+if test "$schema_version" != 20261018000021; then
   printf 'Expected the S5 room lease migration, got schema version %s\n' "$schema_version" >&2
   exit 1
 fi

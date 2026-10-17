@@ -36,6 +36,16 @@ pub(crate) struct ApiError {
     code: ErrorCode,
     status: StatusCode,
     retry_after_seconds: Option<u64>,
+    note: Option<ErrorNote>,
+}
+
+/// A fixed, static explanation that may accompany an error whose cause the person can act on (a
+/// password policy sentence): `error.reason` and `error.message` replace the code's generic message.
+/// Only compile-time strings can be put here, so no input or internal detail can reach a client.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ErrorNote {
+    pub(crate) reason: &'static str,
+    pub(crate) message: &'static str,
 }
 
 /// Left on an error response so the context middleware can write the envelope with the request ID.
@@ -45,7 +55,7 @@ pub(crate) struct ErrorMarker(pub(crate) ErrorCode);
 impl ApiError {
     /// The error for `code` with its default status.
     pub(crate) const fn new(code: ErrorCode) -> Self {
-        Self { code, status: default_status(code), retry_after_seconds: None }
+        Self { code, status: default_status(code), retry_after_seconds: None, note: None }
     }
 
     pub(crate) const fn not_found() -> Self {
@@ -66,12 +76,22 @@ impl ApiError {
 
     /// `413` with the `invalid_request` code (there is no separate public code for size).
     pub(crate) const fn payload_too_large() -> Self {
-        Self { code: ErrorCode::InvalidRequest, status: StatusCode::PAYLOAD_TOO_LARGE, retry_after_seconds: None }
+        Self { code: ErrorCode::InvalidRequest, status: StatusCode::PAYLOAD_TOO_LARGE, retry_after_seconds: None, note: None }
     }
 
     /// `429 rate_limited` with `Retry-After` (at least one second).
     pub(crate) fn rate_limited(retry_after_seconds: u64) -> Self {
-        Self { code: ErrorCode::RateLimited, status: StatusCode::TOO_MANY_REQUESTS, retry_after_seconds: Some(retry_after_seconds.max(1)) }
+        Self {
+            code: ErrorCode::RateLimited,
+            status: StatusCode::TOO_MANY_REQUESTS,
+            retry_after_seconds: Some(retry_after_seconds.max(1)),
+            note: None,
+        }
+    }
+
+    /// Attach a static explanation (see [`ErrorNote`]).
+    pub(crate) const fn with_note(self, reason: &'static str, message: &'static str) -> Self {
+        Self { note: Some(ErrorNote { reason, message }), ..self }
     }
 
     /// Override the status for a code (e.g. `405` or `415` with `invalid_request`).
@@ -113,6 +133,12 @@ pub(crate) fn envelope(code: ErrorCode, request_id: RequestId) -> String {
         .unwrap_or_else(|_| String::from("{\"error\":{\"code\":\"internal\",\"message\":\"The request could not be completed.\"}}"))
 }
 
+/// [`envelope`] with an [`ErrorNote`]'s `reason` and `message`.
+pub(crate) fn envelope_with_note(code: ErrorCode, request_id: RequestId, note: ErrorNote) -> String {
+    serde_json::json!({"error": {"code": code.as_str(), "reason": note.reason, "message": note.message, "request_id": request_id.to_string()}})
+        .to_string()
+}
+
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         // Placeholder body (no request ID) in case the context middleware is absent; it is
@@ -125,6 +151,9 @@ impl IntoResponse for ApiError {
             response.headers_mut().insert(header::RETRY_AFTER, value);
         }
         response.extensions_mut().insert(ErrorMarker(self.code));
+        if let Some(note) = self.note {
+            response.extensions_mut().insert(note);
+        }
         response
     }
 }

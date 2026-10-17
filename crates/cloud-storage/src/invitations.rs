@@ -131,7 +131,7 @@ fn new_token() -> Result<String, InvitationError> {
     Ok(base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn well_formed(token: &str) -> bool {
+pub(crate) fn well_formed(token: &str) -> bool {
     token.len() == TOKEN_CHARS && token.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
@@ -297,7 +297,7 @@ pub async fn accept_invitation(
     Ok(accepted)
 }
 
-async fn accept_in(
+pub(crate) async fn accept_in(
     transaction: &mut TenantTransaction<'_>,
     hash: &[u8],
     principal: PrincipalId,

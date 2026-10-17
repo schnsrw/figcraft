@@ -60,11 +60,11 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/session", get(session))
 }
 
-fn identity(state: &AppState) -> Result<&IdentityConfig, ApiError> {
+pub(super) fn identity(state: &AppState) -> Result<&IdentityConfig, ApiError> {
     state.identity().ok_or(ApiError::unavailable())
 }
 
-fn authenticator(state: &AppState) -> Result<CredentialAuthenticator, ApiError> {
+pub(super) fn authenticator(state: &AppState) -> Result<CredentialAuthenticator, ApiError> {
     state.credential_authenticator().ok_or(ApiError::unavailable())
 }
 
@@ -74,7 +74,7 @@ fn header_value(value: &str) -> Result<HeaderValue, ApiError> {
 
 /// A response with `status`, `Set-Cookie` values, `Cache-Control: no-store` and an optional
 /// `Location`.
-fn respond(status: StatusCode, cookies: &[String], location: Option<&str>, body: Option<Value>) -> Result<Response, ApiError> {
+pub(super) fn respond(status: StatusCode, cookies: &[String], location: Option<&str>, body: Option<Value>) -> Result<Response, ApiError> {
     let mut response = match body {
         Some(body) => (status, axum::Json(body)).into_response(),
         None => (status, Body::empty()).into_response(),
@@ -90,15 +90,15 @@ fn respond(status: StatusCode, cookies: &[String], location: Option<&str>, body:
     Ok(response)
 }
 
-fn require_same_origin(identity: &IdentityConfig, headers: &HeaderMap) -> Result<(), ApiError> {
+pub(super) fn require_same_origin(identity: &IdentityConfig, headers: &HeaderMap) -> Result<(), ApiError> {
     if identity.same_origin(headers) { Ok(()) } else { Err(ApiError::forbidden()) }
 }
 
-fn session_cookie(identity: &IdentityConfig, created: &CreatedSession) -> Result<String, ApiError> {
+pub(super) fn session_cookie(identity: &IdentityConfig, created: &CreatedSession) -> Result<String, ApiError> {
     identity.policy().set_cookie(&created.token, created.absolute_remaining_secs).ok_or(ApiError::new(ErrorCode::Internal))
 }
 
-fn session_error(error: SessionError) -> ApiError {
+pub(super) fn session_error(error: SessionError) -> ApiError {
     match error {
         SessionError::Database | SessionError::Random => ApiError::unavailable(),
         SessionError::InactivePrincipal => ApiError::new(ErrorCode::ResourceInactive),
@@ -108,7 +108,7 @@ fn session_error(error: SessionError) -> ApiError {
 
 /// Revoke the session `token` names. A token that opens nothing is already as good as revoked;
 /// only an unreachable store fails the request (so a revocation is never silently skipped).
-async fn revoke_best_effort(state: &AppState, token: &str) -> Result<(), ApiError> {
+pub(super) async fn revoke_best_effort(state: &AppState, token: &str) -> Result<(), ApiError> {
     match sessions::logout(state.pool(), token).await {
         Err(SessionError::Database) => Err(ApiError::unavailable()),
         Ok(_) | Err(_) => Ok(()),
@@ -336,6 +336,9 @@ fn bootstrap_exempt(path: &str) -> bool {
             | "/api/v1/auth/backchannel-logout"
             | "/api/v1/auth/session"
             | "/api/v1/auth/bootstrap/complete"
+            | "/api/v1/auth/password/bootstrap"
+            | "/api/v1/auth/methods"
+            | "/api/v1/auth/openapi.json"
     )
 }
 

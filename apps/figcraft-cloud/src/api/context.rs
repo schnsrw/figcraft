@@ -18,7 +18,7 @@ use axum::response::{IntoResponse, Response};
 use figcraft_cloud_domain::RequestId;
 use tokio::sync::Semaphore;
 
-use super::error::{ApiError, ErrorMarker, envelope};
+use super::error::{ApiError, ErrorMarker, ErrorNote, envelope, envelope_with_note};
 
 /// Requests whose header names and values together exceed this are refused with `431` (the
 /// handwritten server this replaced capped the whole head at 8 KiB).
@@ -135,7 +135,11 @@ fn finish(response: Response, context: &RequestContext, route: &str) -> Response
             let (mut parts, _) = response.into_parts();
             parts.headers.remove(header::CONTENT_LENGTH);
             parts.headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
-            Response::from_parts(parts, Body::from(envelope(code, context.request_id)))
+            let body = match parts.extensions.get::<ErrorNote>().copied() {
+                Some(note) => envelope_with_note(code, context.request_id, note),
+                None => envelope(code, context.request_id),
+            };
+            Response::from_parts(parts, Body::from(body))
         }
         None if route.starts_with("/api/") && is_bare_rejection(response.status()) => {
             let status = response.status();
