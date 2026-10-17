@@ -50,7 +50,7 @@ use figcraft_cloud_domain::{CloudDocumentId, ErrorCode, PrincipalId, ProjectId, 
 use figcraft_cloud_storage::access_guard::MembershipRequirement;
 use figcraft_cloud_storage::audit::{RepositoryError as AuditError, record_audit_event};
 use figcraft_cloud_storage::effective_roles::{
-    ResourceAccess, TenantAccess, resolve_document_access, resolve_project_access, resolve_tenant_access, resolve_workspace_access,
+    ResourceAccess, TenantAccess, resolve_document_access, resolve_project_access, resolve_team_role, resolve_tenant_access, resolve_workspace_access,
 };
 use figcraft_cloud_storage::host_systems::HostRole;
 use figcraft_cloud_storage::memberships::{
@@ -419,6 +419,16 @@ pub(crate) struct NameBody {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub(crate) struct CreateProjectBody {
+    name: String,
+    /// The team that will own the project (its members inherit access). The caller must lead
+    /// that team (or administer the workspace's tenant).
+    #[serde(default)]
+    owning_team_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct CreateWorkspaceBody {
     name: String,
     #[serde(default)]
@@ -461,10 +471,28 @@ fn workspace_view(record: &WorkspaceRecord) -> Value {
     })
 }
 
+/// The caller may put a project in `team`'s hands: they lead the team, or they own or administer the
+/// tenant. Someone who can not even see the team gets `404`, everyone else `403`.
+async fn require_team_lead(transaction: &mut TenantTransaction<'_>, caller: &Authenticated, team: Uuid) -> Result<(), ApiError> {
+    let (state, member_role) = resolve_team_role(transaction, caller.principal, team).await.map_err(membership_error)?.ok_or(ApiError::not_found())?;
+    let tenant_admin = matches!(caller.tenant.role(), Role::TenantOwner | Role::TenantAdmin);
+    if state != ResourceState::Active {
+        return Err(ApiError::new(ErrorCode::Conflict));
+    }
+    if tenant_admin || member_role == Some(Role::TeamManager) {
+        Ok(())
+    } else if member_role.is_some() {
+        Err(ApiError::forbidden())
+    } else {
+        Err(ApiError::not_found())
+    }
+}
+
 fn project_view(record: &ProjectRecord) -> Value {
     json!({
         "id": record.id.to_string(),
         "workspace_id": record.workspace_id.to_string(),
+        "owning_team_id": record.owning_team_id.map(|team| team.to_string()),
         "name": record.name,
         "state": state_str(record.state),
     })
@@ -751,13 +779,25 @@ async fn create_project_handler(
     State(state): State<AppState>,
     caller: Authenticated,
     Path(id): Path<String>,
-    ApiJson(body): ApiJson<NameBody>,
+    ApiJson(body): ApiJson<CreateProjectBody>,
 ) -> Result<Response, ApiError> {
     let name = valid_name(&body.name)?;
+    let team = body.owning_team_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_| invalid())?;
     let mut transaction = begin(&state, &caller).await?;
     let id = workspace_access(&mut transaction, &caller, &id, Action::ProjectCreate).await?;
-    let record = create_project(&mut transaction, ProjectId::random(), id, name, None).await.map_err(repository_error)?;
-    audit(&mut transaction, &caller, "project.create", "project", record.id.as_uuid(), json!({"workspace_id": id.to_string()})).await?;
+    if let Some(team) = team {
+        require_team_lead(&mut transaction, &caller, team).await?;
+    }
+    let record = create_project(&mut transaction, ProjectId::random(), id, name, team).await.map_err(repository_error)?;
+    audit(
+        &mut transaction,
+        &caller,
+        "project.create",
+        "project",
+        record.id.as_uuid(),
+        json!({"workspace_id": id.to_string(), "owning_team_id": team.map(|team| team.to_string())}),
+    )
+    .await?;
     commit(transaction).await?;
     Ok(created(project_view(&record)))
 }
@@ -1059,6 +1099,11 @@ async fn create_share_link_handler(
     let (id, access) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
     // A link never grants more than its creator holds.
     if role == ShareRole::Editor && !allows(&access, Kind::Document, Action::DocumentEdit) {
+        return Err(ApiError::forbidden());
+    }
+    // The workspace policy decides whether share links exist at all, and whether they may edit.
+    let policy = figcraft_cloud_storage::workspace_policy::load(&mut transaction).await.map_err(|_| ApiError::unavailable())?;
+    if !policy.permits_share_link(role == ShareRole::Editor) {
         return Err(ApiError::forbidden());
     }
     let link =

@@ -627,6 +627,8 @@ pub async fn set_owning_team(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TeamGrant {
     Workspace(WorkspaceId, WorkspaceGrantRole),
+    /// Share a project with a team other than its owner (S6-052).
+    Project(Uuid, WorkspaceGrantRole),
     Library(Uuid, LibraryGrantRole),
 }
 
@@ -648,6 +650,20 @@ pub async fn grant_to_team(transaction: &mut TenantTransaction<'_>, team_id: Uui
             .await
             .map_err(|error| database_error(&error))?;
             ("workspace", id.as_uuid(), role.as_str())
+        }
+        TeamGrant::Project(id, role) => {
+            sqlx::query(
+                "INSERT INTO project_team_grants (tenant_id, project_id, team_id, role) VALUES ($1::uuid, $2::uuid, $3::uuid, $4) \
+                 ON CONFLICT (tenant_id, project_id, team_id) DO UPDATE SET role = EXCLUDED.role, updated_at = now()",
+            )
+            .bind(transaction.tenant_id().to_string())
+            .bind(id.to_string())
+            .bind(team_id.to_string())
+            .bind(role.as_str())
+            .execute(transaction.connection())
+            .await
+            .map_err(|error| database_error(&error))?;
+            ("project", id, role.as_str())
         }
         TeamGrant::Library(id, role) => {
             sqlx::query(
@@ -678,6 +694,7 @@ pub async fn grant_to_team(transaction: &mut TenantTransaction<'_>, team_id: Uui
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GrantTarget {
     Workspace(WorkspaceId),
+    Project(Uuid),
     Library(Uuid),
 }
 
@@ -695,6 +712,18 @@ pub async fn revoke_team_grant(
             "workspace",
             id.as_uuid(),
             sqlx::query("DELETE FROM workspace_team_grants WHERE tenant_id = $1::uuid AND workspace_id = $2::uuid AND team_id = $3::uuid")
+                .bind(transaction.tenant_id().to_string())
+                .bind(id.to_string())
+                .bind(team_id.to_string())
+                .execute(transaction.connection())
+                .await
+                .map_err(|error| database_error(&error))?
+                .rows_affected(),
+        ),
+        GrantTarget::Project(id) => (
+            "project",
+            id,
+            sqlx::query("DELETE FROM project_team_grants WHERE tenant_id = $1::uuid AND project_id = $2::uuid AND team_id = $3::uuid")
                 .bind(transaction.tenant_id().to_string())
                 .bind(id.to_string())
                 .bind(team_id.to_string())
@@ -722,6 +751,31 @@ pub async fn revoke_team_grant(
     audit(transaction, actor, "team.grant_revoke", team_id, serde_json::json!({ "resource_kind": kind, "resource_id": resource_id.to_string() }))
         .await?;
     Ok(true)
+}
+
+/// A team a project is shared with.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectTeamGrant {
+    pub team_id: Uuid,
+    pub team_name: String,
+    pub role: String,
+}
+
+/// The teams a project is shared with (not its owner), at most 200, by team name.
+pub async fn list_project_team_grants(transaction: &mut TenantTransaction<'_>, project: Uuid) -> Result<Vec<ProjectTeamGrant>, TeamError> {
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT g.team_id::text, t.name, g.role FROM project_team_grants g \
+         JOIN teams t ON t.tenant_id = g.tenant_id AND t.id = g.team_id \
+         WHERE g.tenant_id = $1::uuid AND g.project_id = $2::uuid ORDER BY t.name, g.team_id LIMIT 200",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(project.to_string())
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(|error| database_error(&error))?;
+    rows.into_iter()
+        .map(|(team_id, team_name, role)| Ok(ProjectTeamGrant { team_id: team_id.parse().map_err(|_| TeamError::CorruptRow)?, team_name, role }))
+        .collect()
 }
 
 #[cfg(test)]
