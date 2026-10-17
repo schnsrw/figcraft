@@ -250,6 +250,10 @@ pub(crate) async fn cancel_deletion(
     caller: PlatformCaller,
     Path(id): Path<TenantId>,
 ) -> Result<Response, ApiError> {
+    // Only a workspace in pending deletion can be taken back this way (otherwise it is just archive).
+    if fetch(&state, id).await?.state != ResourceState::Deleting {
+        return Err(ApiError::new(ErrorCode::Conflict));
+    }
     transition(&state, &context, &caller, id, ResourceState::Archived, None).await
 }
 

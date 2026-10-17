@@ -25,6 +25,8 @@ use crate::api::passwords::PasswordService;
 use crate::api::{ApiConfig, AppState};
 use crate::config::CloudRole;
 
+mod workspaces;
+
 const ORIGIN: &str = "https://ops.figcraft.test";
 const PASSWORD: &str = "violet glacier sunrise ledger 42";
 

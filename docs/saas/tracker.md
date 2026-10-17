@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (17/57) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (18/57) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 17 / 57 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 18 / 57 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2633,10 +2633,29 @@ holds projects. The platform API calls the company `workspace` in its paths and 
   rate limit, admin create/disable/enable with the audit log, bootstrap refusals, every documented
   operation routed and 401 without a session). Not done: password change and TOTP reset for an
   admin by another admin (disabling and recreating is the recovery for now); no recovery codes.
-- [ ] **S6-046** Platform API under `/platform/v1` with its own authenticator that a workspace
-  session cannot satisfy: create workspace (name, slug, owner invite or owner email and link, plan,
+- [x] **S6-046** Platform API under `/platform/v1` with its own authenticator that a workspace
+  session cannot satisfy: create workspace (name, slug, owner invite or owner email+link, plan,
   region), list/get, suspend, restore, archive, set plan, list/create/disable platform admins,
   platform audit; its own OpenAPI document. Depends on S6-044, S6-045.
+  Evidence: `apps/figcraft-cloud/src/platform_api/workspaces.rs` and
+  `crates/cloud-storage/src/platform_workspaces.rs`; `apps/figcraft-cloud/openapi/platform-api-v1.json`
+  (22 operations, served at `/platform/v1/openapi.json`, every operation proven routed and 401 without
+  a session by a test). Routes: `POST/GET /workspaces`, `GET /workspaces/{id}`, `POST
+  /workspaces/{id}/suspend|restore|archive|request-deletion|cancel-deletion`, `PUT
+  /workspaces/{id}/plan`, `POST /workspaces/{id}/owner-invitation`, `GET /audit` (signed keyset cursors).
+  Creation with an existing owner is `active`; with an email it is `pending` and returns the owner
+  invitation token once (the owner link is delivered by the operator; there is no mail server);
+  `accept_owner_invitation` (also the hook for A's sign-up flow) makes the acceptor `tenant_owner` and the
+  workspace `active`. Each change, the workspace's own audit event and the platform audit event commit in one
+  transaction. Lifecycle transitions follow `cloud-domain::policy` (illegal moves are 409 and audited as
+  denied; nothing is deleted). Live tests `platform_api/tests/workspaces.rs` (6): metadata-only shape,
+  both audit trails, pending workspaces and invitation acceptance (wrong, short, spent, expired and
+  replaced tokens, wrong email, inactive principal), re-issue, full lifecycle with audit and
+  idempotency, input validation (reserved slug, duplicate, plan, region, both or no owner, ghost owner,
+  unknown fields), paging with filters and cursor binding. Not done: self-service workspace creation
+  in `/api/v1/tenants` (multi-tenant mode, S4-007) is not yet switchable off by the platform; the
+  platform cannot rename a workspace or change its region; owner-invitation acceptance has no HTTP
+  route in the workspace API yet (storage function only).
 - [ ] **S6-047** Workspace lifecycle states (active, suspended, archived, pending-deletion) enforced
   on every surface: API, browser sessions, service accounts, relay admission and live rooms, share
   links, embed and host tokens, webhooks. A documented policy per state; live sessions end promptly
@@ -2948,3 +2967,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-034: invitation-based sign-up, off-by-default open registration, password bootstrap for self-hosters, per-tenant account settings and the accounts OpenAPI contract (schema 20261018000021). S6 reaches 17/57. |
 | 2026-10-18 | S6-035: password sign-in with enumeration-resistant failures, per-address, per-login and per-account limits, session rotation, rehash on login and per-tenant allowed methods. S6 reaches 16/57. |
 | 2026-10-18 | S6-045: platform admins sign in at /platform/v1 with Argon2id passwords and a mandatory TOTP second factor in their own cookie, with the one-time CLI bootstrap token, lockout, rate limits and audit; OpenAPI published. S6 reaches 17/57. |
+| 2026-10-18 | S6-046: workspace create (owner principal or invitation link), list, read, suspend, restore, archive, deletion request and cancel, plan and platform audit under /platform/v1, each change audited on both sides in one transaction. S6 reaches 18/57. |
