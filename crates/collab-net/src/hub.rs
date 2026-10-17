@@ -448,6 +448,8 @@ impl Wake {
 enum HubIn {
     /// A backend finished work started away from the hub's thread.
     Wake,
+    /// Stop taking new connections (see [`Hosting::drain`]).
+    Drain,
     /// A connection's first message (`Hello`, `Manage`, `OpenLibrary`, `OpenPlugins`,
     /// `OpenHosting` or `Resolve`) and its client's address ([`ip_key`]).
     Open {
@@ -530,6 +532,7 @@ impl Hosting {
             barred: HashMap::new(),
             opening: HashMap::new(),
             parked: 0,
+            draining: false,
         };
         if let Some(l) = local {
             let mut room = Room::new(l.server);
@@ -577,6 +580,14 @@ impl Hosting {
             hub_thread: Some(hub_thread),
             accept_thread: Some(accept_thread),
         })
+    }
+
+    /// Stop taking new connections: each is closed at once with the server-restarting code, so its
+    /// client retries (through the gateway, to another replica). Connections already in sessions
+    /// are untouched until [`stop`](Self::stop). For rolling releases: drain, wait for the
+    /// gateway to notice, then stop.
+    pub fn drain(&self) {
+        let _ = self.hub.send(HubIn::Drain);
     }
 
     /// Bytes waiting to be sent to clients, all connections together.
@@ -1221,6 +1232,8 @@ struct Hub<B> {
     opening: HashMap<String, Vec<Parked>>,
     /// All of `opening`'s hellos (bounded: a slow restore must not hold unlimited connections).
     parked: usize,
+    /// Draining: new connections (but the operator's) are sent away to reconnect elsewhere.
+    draining: bool,
 }
 
 /// A hello admitted for a file that is still opening.
@@ -1288,6 +1301,12 @@ impl<B: Backend> Hub<B> {
                 // The operator (with the server key) gets in from anywhere; everyone else is
                 // checked (blocked addresses, connection rates).
                 let operator = matches!(&first, ClientMsg::Manage(m) if self.backend.manage(&m.key).is_ok());
+                // A draining server takes no new connections: they are told to try again, which
+                // sends them to another replica (the operator's, for revocations, still gets in).
+                if self.draining && !operator {
+                    let _ = out.tx.try_send(Out::Close(CloseCode::Restart, reason(RESTARTING)));
+                    return;
+                }
                 if !operator && let Err(why) = self.backend.connect(ip) {
                     log::info!("event=refused ip={ip} reason={why:?}");
                     return refuse(&out, &why);
@@ -1339,6 +1358,7 @@ impl<B: Backend> Hub<B> {
                 }
             }
             HubIn::Wake => self.opened(),
+            HubIn::Drain => self.draining = true,
             HubIn::Stop => {}
         }
     }
@@ -1948,3 +1968,7 @@ mod async_open_tests;
 #[cfg(test)]
 #[path = "proxy_tests.rs"]
 mod proxy_tests;
+
+#[cfg(test)]
+#[path = "drain_tests.rs"]
+mod drain_tests;
