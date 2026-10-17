@@ -121,6 +121,9 @@ and the agent handoff in [`CODEX.md`](CODEX.md). The editor follows upstream's r
 assets, no panics in shipped code, everything is a command. Upstream changes are merged regularly
 ([`docs/saas/upstream-sync.md`](docs/saas/upstream-sync.md)).
 
+Coding agents can navigate the code through [`tools/codegraph`](tools/codegraph/README.md), an
+incremental code graph with a CLI and a read-only MCP server (registered in `.mcp.json`).
+
 ## License and credits
 
 Code and original assets are dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE),

@@ -1,0 +1,39 @@
+# Fork addition: developer tooling. tools/codegraph is a workspace of its own (never part of the
+# product build); this job checks it and smoke-tests indexing this repository.
+name: codegraph
+
+on:
+  push:
+    branches: [main]
+    paths: ["tools/codegraph/**", ".github/workflows/codegraph.yml"]
+  pull_request:
+    paths: ["tools/codegraph/**", ".github/workflows/codegraph.yml"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: tools/codegraph
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/codegraph
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - name: Index this repository (smoke)
+        run: |
+          cargo run --locked --release -q -- index
+          cargo run --locked --release -q -- index
+          cargo run --locked --release -q -- status
+          cargo run --locked --release -q -- symbol Backend --limit 3

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "cargo",
+      "args": ["run", "--quiet", "--release", "--manifest-path", "tools/codegraph/Cargo.toml", "--", "mcp"]
+    }
+  }
+}
