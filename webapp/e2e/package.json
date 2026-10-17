@@ -1,0 +1,13 @@
+{
+  "name": "figcraft-e2e",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Real-browser smoke run of the self-hosted stack (TS-003). Drives the installed Chrome; needs a running stack.",
+  "type": "module",
+  "scripts": {
+    "smoke": "node smoke.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "1.49.1"
+  }
+}

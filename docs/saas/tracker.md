@@ -48,12 +48,25 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
   password and invitation routes (S6-034, S6-035). The OIDC button appears only when a provider is
   configured and the workspace allows it.
   Evidence: `webapp/saas/src/screens/signin.tsx` (sign-in page driven by `GET /auth/methods`: password form, organisation button only when `oidc` is true, workspace prompt for multi-tenant, same-sentence failures, `Retry-After` wait text, 403 text; `/setup` first-owner form with password confirmation and the server's policy sentence; invitation-link sign-up and sign-in-instead), `screens/signin.test.tsx` (20 DB-free tests with a fake API; 116 web tests total, `npm run check` green), stable `data-testid`s listed in `docs/saas/web-workspace.md`. Not done: the screens were not run in a real browser against the stack (TS-003); the page learns that first-run setup is pending only from `bootstrap_required` on `/auth/methods` (requested from the accounts agent; until then it always offers the `/setup` link); the invitation form uses the invited address as the login because the API takes no chosen login yet (TS-012 to TS-014); open-registration sign-up has no screen.
-- [ ] **TS-003** A real-browser smoke run of the whole path, repeatable from a script against the
+- [x] **TS-003** A real-browser smoke run of the whole path, repeatable from a script against the
   Compose stack: sign in, create workspace, team, project and file, open the editor, make an edit.
   Screenshots are kept as evidence. Every defect it finds is fixed under this track.
+  Evidence (2026-10-18): `webapp/e2e` (`npm run smoke`, installed Chrome through playwright-core, no
+  browser download) runs against the Compose stack built from main: first-run owner setup with a
+  password, sign-in, workspace, project and file creation, "Open in editor", then two sessions
+  editing and a third joining later. Screenshots in `E2E_SHOTS`. Run on the stack with no identity
+  provider; first run found no blocking defect in sign-in, setup or the workspace screens. Defects it
+  surfaced are listed under TS-004, TS-007 and TS-015.
 - [ ] **TS-004** Two people edit one cloud file live from the workspace: open from the file page,
   see each other's cursors and names, edit, lose the connection and reconnect without losing work,
   export (S6-024; the minimum of S6-022 the flow needs). Verified in two real browser sessions.
+  Progress (2026-10-18, not complete): in real browsers a rectangle drawn in one session appears in
+  the other and an ellipse drawn there appears in the first with the other person's cursor and a
+  coloured avatar; a third session that joins later sees both shapes and both people; after every
+  session closed and the cloud container restarted, a new session still showed both shapes. Not yet
+  checked: losing the connection mid-edit and reconnecting without losing work, export, and names
+  (people show as "Guest 1/2", see TS-007). Defects: the editor shows the file as "Untitled"
+  instead of its workspace name, and opens an extra empty local tab beside it.
 - [ ] **TS-005** Teams and projects work as a team expects: a team owns projects, files inherit
   the team's access, members have roles, an admin adds people and a team lead (S6-052, the
   team-lead part of S6-055), and the screens for it exist.
@@ -95,6 +108,14 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
 - [ ] **TS-011** The team can find its work: recents, search across the workspace's files,
   libraries and settings screens (rest of S6-020).
   Progress (not complete): recents on the home page (this browser), name search across workspaces, projects and files (`/search`, client-side over the lists the caller can read, bounded; no server search yet) and a Settings page for the sign-in methods (`/settings`, owners and admins) in `webapp/saas/src/screens/{search,settings}.tsx`, with DB-free tests (`find.test.tsx`; 149 web tests). Not built: libraries; full-text or server-side search.
+- [ ] **TS-015** The web app looks and feels like a product, not a prototype (owner feedback
+  2026-10-18: "UI is shitty"). A design pass on every workspace screen from real-browser
+  screenshots: one consistent layout grid and spacing scale, a clear header with workspace and
+  person, file cards with a thumbnail or initial instead of bare lists, helpful empty states with
+  one obvious next action, readable typography and contrast in both light and dark, forms that
+  look finished (validation next to the field, loading and success states), responsive down to a
+  tablet, and the file name, collaborator names and avatars carried into the editor. Reviewed with
+  before and after screenshots from `webapp/e2e`.
 - [ ] **TS-GATE** A team of three installs it from the guide on a clean machine, signs in with
   passwords, creates a workspace, two teams and a project, invites two people, and all three edit
   one file at the same time, close and reopen, and restore an earlier version. Recorded run with
@@ -3100,7 +3121,7 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-045: platform admins sign in at /platform/v1 with Argon2id passwords and a mandatory TOTP second factor in their own cookie, with the one-time CLI bootstrap token, lockout, rate limits and audit; OpenAPI published. S6 reaches 17/57. |
 | 2026-10-18 | S6-046: workspace create (owner principal or invitation link), list, read, suspend, restore, archive, deletion request and cancel, plan and platform audit under /platform/v1, each change audited on both sides in one transaction. S6 reaches 18/57. |
 | 2026-10-18 | S6-036: profile (display name, palette colour), password change that revokes other sessions, own-session list and revoke. S6 reaches 19/58. |
-| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-014 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
+| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-015 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
 | 2026-10-18 | S6-047: workspace lifecycle enforced and proven on every surface (members 409, relay, service accounts, share links, host issuers, webhooks, jobs); /me/workspaces lists a person's workspaces with state. S6 reaches 20/58. |
 | 2026-10-18 | Priority track: added TS-012 email delivery (optional SMTP with a durable outbox) and TS-013 admin-set and admin-reset passwords (temporary, change at next sign-in); email delivery removed from the backlog. |
 | 2026-10-18 | Priority track: added TS-014 (accounts, invitations and resets work with or without email; login name identifies a person, email optional, invitations no longer require a verified email). |
@@ -3112,3 +3133,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | TS-011 (part): name search and a Settings page for sign-in methods; libraries remain. 149 web tests. |
 | 2026-10-18 | S6-051 / TS-001 (command): `figcraft-cloud --setup` creates the workspace, its password owner and the platform admin in one command and prints the URL; README section added. TS-001 stays open until the Compose run is exercised. S6 reaches 21/58. |
 | 2026-10-18 | TS-013 and TS-014 (API side, schema 20261018000025): invitations need no email (link-only invitations; the invitee chooses a login name and password; `login_taken` is a named 409), administrators create people with a typed or generated temporary password (shown once) and set new ones for people below them, a temporary password limits the session to changing it (`password_change_required`), sessions of the person end, audited without the value; `/auth/methods` also reports `bootstrap_required` and `mail_configured` (false: email delivery, TS-012, is not built yet). Endpoints are in `accounts-api-v1.json`; the screens are not built, so TS-013 and TS-014 stay open. |
+| 2026-10-18 | TS-003 checked off: real-browser run of setup, sign-in, workspace, project, file and editor with two live sessions and a late joiner (webapp/e2e). TS-004 progress recorded. Added TS-015 (UI quality pass) after owner feedback. |
