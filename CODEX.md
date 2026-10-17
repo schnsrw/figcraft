@@ -143,7 +143,7 @@ the continuation point, a blocker or a major decision changes.
    `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
    ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
    sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
-   STATE: S4 is complete (25/25) and its gate passes (2026-10-17). S5 is 9/25.
+   STATE: S4 is complete (25/25) and its gate passes (2026-10-17). S5 is 10/25.
    S5-002 fixes batch actor attribution: each accepted batch is now stored under its own
    admitted client's principal, verified with two editors in a live room against PostgreSQL/S3.
    S5-024/025 measured the repeat release load against disposable PostgreSQL/S3: 4,800 edits
@@ -164,6 +164,8 @@ the continuation point, a blocker or a major decision changes.
    acquisition, renewal, loss handling and owner routing. S5-003/004 remain open until integration.
    S5-015 is complete: the live PostgreSQL/S3 member-revocation and WebSocket race probes passed
    for tenant, team and document removal, session logout, editor downgrade and revoked links.
+   S5-016 is complete: presence and signals remain ephemeral, with independent 33 ms and
+   20/s throttles in the shared hub; cloud storage journals accepted edits only.
    Testing policy (owner): targeted suites per step, quick scan (fmt, clippy on dependents,
    layers, affected tests) before push; full smoke/`cargo xtask ci` only when GitHub CI is red. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.

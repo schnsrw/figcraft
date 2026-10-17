@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (9/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (10/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 9 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 10 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2240,7 +2240,13 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   tenant, team and document removal, session logout, editor downgrade and share-link revocation
   close only affected clients within one sweep while unaffected clients keep editing. The race
   probe also bounds the in-flight commit window.
-- [ ] **S5-016** Keep cursor, selection, chat and spotlight ephemeral and separately rate-limited.
+- [x] **S5-016** Keep cursor, selection, chat and spotlight ephemeral and separately rate-limited.
+  Evidence: cursor and selection travel in `Presence`, coalesced to the latest value at a 33 ms
+  interval per client. Chat and spotlight travel in `Signal`, with a separate 20/s, burst-40
+  bucket per connection. Neither enters the document journal; the cloud backend persists only
+  accepted edit batches. The shared hub's `presence_is_throttled_and_the_latest_wins` and
+  `signals_reach_only_clients_that_read_them_and_are_rate_limited` loopback tests exercise both
+  limits, and `cursor_chat_and_spotlight_between_apps` covers delivery.
 - [ ] **S5-017** Add bounded room, connection, message, rate and outbound-byte quotas.
 - [ ] **S5-018** Move large image transfer to verified asset references and negotiated capability.
 - [x] **S5-019** Preserve compatibility with current filesystem-server and desktop-hosted sessions.
@@ -2608,3 +2614,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S5 lease prerequisite: corrected cloud startup and Compose preflight to require the checked-in `20261017000006` row-level security migration; the previous `...05` bound left a fully migrated service unready. S5 remains 8/25. |
 | 2026-10-17 | S5-003/004 partial: added tenant-scoped PostgreSQL lease rows, atomic acquisition with a fencing claim, lookup, renewal and compare-and-release. Live relay integration and routing remain open; S5 stays 8/25. |
 | 2026-10-17 | S5-015 audit: confirmed the already wired relay revocation sweeper with live PostgreSQL/S3 member and WebSocket race probes; checked off grant revocation. S5 reaches 9/25. |
+| 2026-10-17 | S5-016 audit: confirmed separate presence and signal throttles in the shared live hub and that only accepted edits reach the cloud journal. S5 reaches 10/25. |
