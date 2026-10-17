@@ -1,7 +1,8 @@
 # Enterprise SAML through an OIDC identity broker
 
-Status: **broker selected and validation procedure written; end-to-end run not yet executed**
-(S4-025 partial). The [remaining steps](#remaining-steps) are listed at the end.
+Status: **validated end to end against Keycloak 26.4.2 on 2026-10-17** (login, logout, broker and
+SAML key rotation, revocation; `crates/cloud-auth/tests/keycloak_saml.rs`). Still open: FigCraft's
+back-channel logout endpoint and the group claim (see [remaining steps](#remaining-steps)).
 
 FigCraft Cloud speaks one login protocol, OpenID Connect (`crates/cloud-auth/src/oidc.rs`, S4-001).
 Enterprise customers whose directory only speaks SAML 2.0 log in through an identity broker that
@@ -46,104 +47,162 @@ What FigCraft requires of any broker (checked by the procedure below):
 One disposable Keycloak container with two realms:
 
 ```
-browser/test client ──OIDC──► realm "figcraft-broker" (OIDC issuer for FigCraft)
-                                   │  identity provider "corp-saml" (SAML SP)
-                                   ▼
-                              realm "corp-idp" (plays the customer's SAML IdP)
-                                   └ SAML client = the broker's SP entity id, user "alice"
+test client (FigCraft OidcProvider + cookie-keeping reqwest "browser")
+   │ OIDC (code + PKCE S256)
+   ▼
+realm "figcraft-broker"  ── OIDC issuer for FigCraft, client "figcraft-cloud" (confidential)
+   │  identity provider "corp-saml" (SAML SP; browser flow redirects straight to it)
+   │  SAML AuthnRequest: redirect binding; SAML Response: POST binding, signed assertion
+   ▼
+realm "corp-idp"         ── plays the customer's SAML IdP; SAML client = the broker's SP
+                            entity id; user "alice" (group "designers")
 ```
 
-FigCraft side: `OidcProvider::discover(OidcConfig { issuer_url:
-"http://127.0.0.1:<port>/realms/figcraft-broker", client_id: "figcraft-cloud", client_secret,
-redirect_url: "http://127.0.0.1:<cb>/api/v1/auth/oidc/callback", allow_insecure_loopback: true, ..
-})`, then `begin_login` / `complete_login` against the dev PostgreSQL. HTTP to loopback is
-allowed only with `allow_insecure_loopback`, which exists for exactly this kind of test.
+FigCraft side: `OidcProvider::discover(OidcConfig { allow_insecure_loopback: true,
+..OidcConfig::new("http://127.0.0.1:<port>/realms/figcraft-broker", "figcraft-cloud",
+Some(secret), "http://127.0.0.1:47123/api/v1/auth/oidc/callback") })`, then `begin_login` /
+`complete_login` against the dev PostgreSQL. Nothing listens on the callback port: the test's
+browser stops at the redirect to it and hands `code` and `state` to `complete_login`. HTTP to
+loopback is allowed only with `allow_insecure_loopback`, which exists for exactly this kind of
+test.
 
-## Procedure
+## Validation run (2026-10-17)
 
-Run only disposable containers with unique names; remove them afterwards. Pin the image by digest
-in `deploy/saas/env.example` (record it in [dependency-images.md](dependency-images.md)) before the
-run becomes evidence.
+Executed end to end on the owner's development machine; every step below passed, on consecutive runs
+against the same container (the test resets the realms it changes, so reruns pass).
 
-1. **Start the broker.**
-   `docker run -d --name figcraft-kc-<rand> -p 127.0.0.1::8080 -e KC_BOOTSTRAP_ADMIN_USERNAME=admin
-   -e KC_BOOTSTRAP_ADMIN_PASSWORD=<random> quay.io/keycloak/keycloak@sha256:<digest> start-dev`
-   and wait for `/health/ready` (management port 9000 inside the container) or the master realm
-   discovery document.
-2. **Create the SAML IdP realm** (`kcadm.sh` inside the container, `config credentials` against
-   `http://localhost:8080` first):
-   - `create realms -s realm=corp-idp -s enabled=true`
-   - `create users -r corp-idp -s username=alice -s email=alice@corp.example -s emailVerified=true
-     -s enabled=true`; `set-password -r corp-idp --username alice --new-password <random>`
-   - a group `designers`, alice a member.
-3. **Create the broker realm and the FigCraft client:**
-   - `create realms -s realm=figcraft-broker -s enabled=true`
-   - `create clients -r figcraft-broker -s clientId=figcraft-cloud -s publicClient=false
-     -s standardFlowEnabled=true -s 'redirectUris=["http://127.0.0.1:<cb>/*"]'
-     -s 'attributes."pkce.code.challenge.method"=S256'`; read the secret with
-     `get clients/<id>/client-secret`.
-4. **Wire SAML between the realms:**
-   - In `corp-idp`, create a SAML client whose client id is the broker SP entity id
-     `http://127.0.0.1:<port>/realms/figcraft-broker`, with the redirect/ACS URL
-     `http://127.0.0.1:<port>/realms/figcraft-broker/broker/corp-saml/endpoint`, signed assertions,
-     `NameID format = persistent`, and a "Group list" mapper emitting attribute `memberOf`.
-   - In `figcraft-broker`, create identity provider `corp-saml` (`providerId=saml`) by importing
-     `http://localhost:8080/realms/corp-idp/protocol/saml/descriptor`; set "Principal type: Subject
-     NameID", "Want assertions signed: on", "Validate signature: on", "Trust email: on", "Sync
-     mode: force"; add an attribute importer for `memberOf` into a user attribute and a client
-     scope mapper that emits it as the `groups` claim; set the realm's browser flow to redirect to
-     `corp-saml` (identity provider redirector, default provider `corp-saml`).
-5. **Login through the broker** (a Rust integration test in `crates/cloud-auth/tests/`, gated on
-   `FIGCRAFT_TEST_KEYCLOAK_URL`): `discover`, `begin_login(pool, Some("/"))` and follow the
-   authorization URL with a cookie-keeping `reqwest` client built with
-   `tls_backend_preconfigured` (never `Client::new()`): broker redirect → `corp-idp` login form
-   (POST username/password) → SAML POST binding auto-submit form (parse the `SAMLResponse` and
-   `RelayState` hidden inputs and POST them to the ACS URL) → broker → redirect to the callback
-   with `code` and `state`. Call `complete_login(pool, code, state, Some(state_cookie))`.
-   Expect: a principal created on first login, `identity_links.issuer` = the broker issuer,
-   `subject` = the broker user id, `verified_metadata.email` = `alice@corp.example` with
-   `email_verified`, `groups` contains `designers`. Log in again: same principal (no duplicate).
-6. **Logout.** End the FigCraft session (`sessions::logout`) and the broker session
-   (`/protocol/openid-connect/logout` with `id_token_hint`). Expect the next `begin_login` to show
-   the `corp-idp` login form again (no silent SSO). Then configure back-channel logout once the
-   FigCraft endpoint exists and check that ending the `corp-idp` session (admin "sign out") revokes
-   the FigCraft session.
-7. **Key rotation.**
-   - Broker signing key: add a new `rsa-generated` key provider with higher priority in
-     `figcraft-broker`, log in again. The ID token's `kid` is unknown to the cached JWKS, so
-     `OidcProvider` re-discovers once (bounded by `key_refresh_min_interval`) and accepts it.
-     Disable the old key and check that a token signed with it (captured before) is refused.
-   - SAML signing key: rotate the `corp-idp` realm key, re-import the descriptor in the broker (or
-     enable metadata refresh), and check that login still works and that an assertion signed with
-     the removed key is refused by the broker (signature validation on).
-8. **Revocation.**
-   - Disable alice in `corp-idp`: a new login fails at the IdP; FigCraft creates no session.
-   - Disable the brokered user in `figcraft-broker`: a new login fails at the broker.
-   - Suspend the FigCraft principal: `complete_login` returns `PrincipalInactive` even though the
-     broker succeeds.
-   - Remove alice from `designers`: on the next login the `groups` claim no longer carries it (the
-     mapping consequences are in [identity-mapping-policy.md](identity-mapping-policy.md)).
-9. **Tear down:** `docker rm -f figcraft-kc-<rand>`; delete the d-prefixed fixture principals.
+| Item | Value |
+|---|---|
+| Broker image | `quay.io/keycloak/keycloak:26.4.2`, `sha256:3617b09bb4b7510a8d8d9b9fc5707399e2d70688dbcc2f8fb013a144829be1b9` (multi-arch index; ran linux/arm64, 720 MB unpacked), Keycloak 26.4.2 on OpenJDK 21.0.9 |
+| Container runtime | Docker Engine 29.8.0, macOS (Darwin 25.3.0) |
+| Mode | `start-dev` (H2 in the container, plain HTTP on a random loopback port) |
+| Test | `crates/cloud-auth/tests/keycloak_saml.rs` (`saml_federation_through_the_keycloak_broker`), about 4 to 10 s per run |
+| Database | the shared dev PostgreSQL (runtime role with row-level security on; admin role only to suspend the principal) |
 
-## What has been validated already
+### 1. Start the broker
 
-- The OIDC half is implemented and tested against a local fake provider: discovery, PKCE, state
-  and nonce binding, ID-token validation with an RS256/ES256 allowlist, unknown-`kid` re-discovery
-  and `(issuer, subject)` mapping (S4-001, `crates/cloud-auth/tests/oidc_flow.rs`).
-- Nothing SAML-specific has been run yet.
+```sh
+docker pull quay.io/keycloak/keycloak:26.4.2
+docker run -d --name figcraft-c4-keycloak -p 127.0.0.1::8080 \
+  -e KC_BOOTSTRAP_ADMIN_USERNAME=admin -e KC_BOOTSTRAP_ADMIN_PASSWORD=<random> \
+  quay.io/keycloak/keycloak:26.4.2 start-dev
+docker port figcraft-c4-keycloak 8080        # → 127.0.0.1:<port>
+```
+
+Ready when `http://127.0.0.1:<port>/realms/master/.well-known/openid-configuration` answers 200
+(about 10 s).
+
+### 2. Configure the realms (admin REST API, no UI)
+
+A setup script (Python standard library only, run from the host) gets an admin token with
+`POST /realms/master/protocol/openid-connect/token` (`grant_type=password`,
+`client_id=admin-cli`) and sends these requests to `/admin/realms` (`KC` =
+`http://127.0.0.1:<port>`):
+
+| Request | Body (essentials) |
+|---|---|
+| `POST /admin/realms` | `{"realm":"corp-idp","enabled":true}` |
+| `POST /corp-idp/groups` | `{"name":"designers"}` |
+| `POST /corp-idp/users` | `{"username":"alice","email":"alice@corp.example","emailVerified":true,"enabled":true,"firstName":"e4-alice","lastName":"Corp"}` |
+| `PUT /corp-idp/users/<id>/reset-password` | `{"type":"password","value":<random>,"temporary":false}` |
+| `PUT /corp-idp/users/<id>/groups/<designers>` | – |
+| `POST /corp-idp/clients` | `clientId` = `KC/realms/figcraft-broker` (the SP entity id), `protocol: saml`, `redirectUris` = `[ACS]` with ACS = `KC/realms/figcraft-broker/broker/corp-saml/endpoint`; attributes `saml_assertion_consumer_url_post=ACS`, `saml.assertion.signature=true`, `saml.server.signature=true`, `saml.signature.algorithm=RSA_SHA256`, `saml.client.signature=false`, `saml_name_id_format=persistent`, `saml.force.name.id.format=true`; protocol mappers `saml-user-property-mapper` for `email`, `firstName`, `lastName` and `saml-group-membership-mapper` → attribute `memberOf` |
+| `GET /corp-idp/keys` | read the active RS256 `certificate` |
+| `POST /admin/realms` | `{"realm":"figcraft-broker","enabled":true}` |
+| `POST /figcraft-broker/clients` | `{"clientId":"figcraft-cloud","publicClient":false,"standardFlowEnabled":true,"directAccessGrantsEnabled":false,"implicitFlowEnabled":false,"redirectUris":["http://127.0.0.1:47123/api/v1/auth/oidc/callback"],"attributes":{"pkce.code.challenge.method":"S256"}}`; then `GET …/clients/<id>/client-secret` |
+| `PUT /figcraft-broker/authentication/config/<review-profile config>` | the built-in "first broker login" flow's `idp-review-profile` execution: `update.profile.on.first.login=off` (the assertion carries the profile; "Create User If Unique" then creates the brokered user) |
+| `POST /figcraft-broker/identity-provider/instances` | `alias: corp-saml`, `providerId: saml`, `trustEmail: true`, `firstBrokerLoginFlowAlias: "first broker login"`, config `entityId=KC/realms/figcraft-broker`, `idpEntityId=KC/realms/corp-idp`, `singleSignOnServiceUrl` and `singleLogoutServiceUrl` = `KC/realms/corp-idp/protocol/saml`, `nameIDPolicyFormat=urn:oasis:names:tc:SAML:2.0:nameid-format:persistent`, `principalType=SUBJECT`, `postBindingResponse=true`, `postBindingAuthnRequest=false`, `wantAssertionsSigned=true`, `validateSignature=true`, `signingCertificate=<corp-idp cert>`, `syncMode=FORCE` |
+| `POST /figcraft-broker/identity-provider/instances/corp-saml/mappers` | `saml-user-attribute-idp-mapper` for `email`, `firstName`, `lastName`, and `memberOf` → user attribute `groups` |
+| `POST /figcraft-broker/authentication/executions/<identity-provider-redirector>/config` | `{"alias":"to-corp-saml","config":{"defaultProvider":"corp-saml"}}` (browser flow goes straight to the SAML IdP) |
+
+The descriptor is not imported with `fromUrl`: inside the container the IdP is
+`localhost:8080`, while the browser reaches it on the published port, so the SSO URL and the
+signing certificate are set explicitly. The script writes the issuer, client secret, alice's
+password and the admin password to a mode-600 JSON file outside the repository.
+
+### 3. Run the test
+
+```sh
+FIGCRAFT_TEST_KEYCLOAK_URL=http://127.0.0.1:<port> \
+FIGCRAFT_TEST_KEYCLOAK_SETUP=<setup.json> \
+FIGCRAFT_TEST_DATABASE_URL_FILE=<runtime url file> \
+FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE=<admin url file> \
+cargo test -p figcraft-cloud-auth --test keycloak_saml -- --nocapture --test-threads=1
+```
+
+Without `FIGCRAFT_TEST_KEYCLOAK_URL` the test prints a skip line and passes, so it costs nothing
+in CI. The test's browser is a `reqwest` client built with `tls_backend_preconfigured` (explicit
+rustls/ring configuration), no automatic redirects, no proxy, bodies capped at 512 KiB, at most
+20 steps per login and never leaving the broker's origin. It keeps cookies per path (both realms
+set same-named cookies under `/realms/<realm>/`; the `Secure` flag is ignored on loopback HTTP),
+submits the `kc-form-login` form with alice's credentials once, and auto-submits any page
+carrying `SAMLRequest`/`SAMLResponse` hidden inputs (the POST binding). No script runs.
+
+### 4. What the test proves
+
+1. **Login.** `begin_login` → broker → SAML AuthnRequest → `corp-idp` password form → signed SAML
+   Response by POST → broker ACS → first broker login creates the user → callback →
+   `complete_login` creates a principal. `identity_links.issuer` is the broker issuer,
+   `subject` is the broker user id, that user's federated identity is `corp-saml` with a
+   persistent NameID (`G-…`), `verified_metadata` has `email = alice@corp.example` with
+   `email_verified = true` (trust email), and the principal is named `e4-alice Corp`.
+2. **SSO and no duplicates.** A second login in the same browser completes without the IdP and
+   resolves to the same principal (`new_principal = false`).
+3. **Logout.** `sessions::logout` ends a FigCraft session (it no longer resolves). Ending only
+   the broker session (admin sign-out) makes the next login run SAML again but silently on the
+   IdP session; ending the `corp-idp` session too brings back the IdP password form. Same
+   principal each time.
+4. **Broker key rotation.** A new `rsa-generated` key provider with priority 1000 becomes the
+   active RS256 key; its `kid` is not in the JWKS the provider cached at discovery. The next
+   login with the *same* `OidcProvider` succeeds, which needs the unknown-`kid` JWKS refresh
+   (without it the verifier fails with no matching key, as `oidc_flow.rs` shows).
+5. **SAML signing-key rotation.** Rotating the `corp-idp` key makes the broker refuse the next
+   assertion (Keycloak event `IDENTITY_PROVIDER_RESPONSE_ERROR`, `invalid_signature`; no callback,
+   no FigCraft login) until the broker's `signingCertificate` is updated to the new certificate;
+   then login works again for the same principal.
+6. **Revocation.** Alice disabled at `corp-idp`: the IdP shows "Account is disabled", no SAML
+   response, no callback. The brokered user disabled at `figcraft-broker`: the SAML response
+   arrives but the broker refuses (`user_disabled`), no callback. The FigCraft principal
+   suspended: the broker succeeds but `complete_login` returns `PrincipalInactive`.
+
+### 5. Tear down
+
+```sh
+docker rm -f figcraft-c4-keycloak
+docker rmi quay.io/keycloak/keycloak:26.4.2
+```
+
+Fixture principals are named `e4-alice Corp` under the container's issuer
+(`http://127.0.0.1:<port>/realms/figcraft-broker`, unique per container port); they are left
+suspended and are never matched by a later container.
+
+## What has been validated
+
+- The OIDC half against a local fake provider: discovery, PKCE, state and nonce binding,
+  ID-token validation with an RS256/ES256 allowlist, unknown-`kid` re-discovery and
+  `(issuer, subject)` mapping (S4-001, `crates/cloud-auth/tests/oidc_flow.rs`).
+- The brokered SAML path end to end against Keycloak 26.4.2 (above): login, SSO, logout of the
+  FigCraft, broker and IdP sessions, broker and SAML key rotation, revocation at all three
+  layers.
 
 ## Remaining steps
 
-1. Owner decision D-003 (initial OIDC provider for end-to-end testing) should name Keycloak as the
-   broker for this validation, and the image must be digest-pinned and reviewed
-   ([dependency-images.md](dependency-images.md)).
-2. Write the gated integration test of steps 5 to 8 (`crates/cloud-auth/tests/saml_broker.rs`)
-   with a small HTML form parser for the IdP login form and the SAML POST binding (bounded input,
-   no script execution), and a setup script that performs steps 1 to 4 with `kcadm.sh`.
-3. Run it once on a developer machine (the Keycloak image is about 450 MB and was not pulled for
-   this change) and record the result in the tracker.
-4. Add FigCraft's back-channel logout endpoint (OIDC Back-Channel Logout 1.0: verify the logout
-   token's signature, `iss`, `aud`, `events` and `sid`/`sub`, then revoke the matching sessions)
-   and validate step 6's back-channel part.
-5. Wire the group claim into the mapping of [identity-mapping-policy.md](identity-mapping-policy.md)
-   once its decisions are confirmed.
+1. **Back-channel logout.** FigCraft has no OIDC Back-Channel Logout 1.0 endpoint yet (verify the
+   logout token's signature, `iss`, `aud`, `events` and `sid`/`sub`, then revoke the matching
+   sessions). Until it exists, ending the IdP or broker session does not end an existing FigCraft
+   session; it only forces the IdP login on the next FigCraft login. The test ends the FigCraft
+   session with `sessions::logout` separately.
+2. **Group claims.** The broker imports `memberOf` into a `groups` user attribute, but no client
+   scope emits a `groups` claim and `complete_login` keeps only `email`, `email_verified`,
+   `name` and `preferred_username`. Wire it with the mapping of
+   [identity-mapping-policy.md](identity-mapping-policy.md).
+3. **Overlapping keys.** The run checks that a new broker key is picked up; it does not capture
+   an ID token signed by the old key and check that it is refused after the old key is disabled
+   (needs the raw token, which `complete_login` does not expose). The SAML rotation is a hard
+   cut-over in this run; production should list both certificates (comma-separated
+   `signingCertificate`) or use metadata refresh during the overlap.
+4. **Image pinning.** Record the digest above in `deploy/saas/env.example` and
+   [dependency-images.md](dependency-images.md), and keep the setup script with the deploy
+   files, before this run is repeated in CI.
+5. **SP-initiated SLO through the end-session endpoint** (`id_token_hint`) instead of admin
+   sign-out, once FigCraft keeps the ID token for that purpose.
