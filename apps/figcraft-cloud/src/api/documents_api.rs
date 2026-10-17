@@ -291,7 +291,7 @@ pub(crate) fn check(access: Option<ResourceAccess>, kind: Kind, action: Action) 
     authorize_resource(access, |access| allows(access, kind, kind.view()) || allows(access, kind, action), |access| allows(access, kind, action))
 }
 
-async fn begin<'a>(state: &'a AppState, caller: &Authenticated) -> Result<TenantTransaction<'a>, ApiError> {
+pub(crate) async fn begin<'a>(state: &'a AppState, caller: &Authenticated) -> Result<TenantTransaction<'a>, ApiError> {
     if caller.session.kind == CredentialKind::ShareLink {
         return Err(ApiError::forbidden());
     }
@@ -300,7 +300,7 @@ async fn begin<'a>(state: &'a AppState, caller: &Authenticated) -> Result<Tenant
     Ok(transaction)
 }
 
-async fn commit(transaction: TenantTransaction<'_>) -> Result<(), ApiError> {
+pub(crate) async fn commit(transaction: TenantTransaction<'_>) -> Result<(), ApiError> {
     transaction.commit().await.map_err(|_| ApiError::unavailable())
 }
 
@@ -384,7 +384,7 @@ const fn rank(role: Role) -> u8 {
     }
 }
 
-async fn document_access(
+pub(crate) async fn document_access(
     transaction: &mut TenantTransaction<'_>,
     caller: &Authenticated,
     id: &str,

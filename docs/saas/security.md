@@ -178,6 +178,7 @@ hold both).
 
 ## Collaboration controls
 
+- History (S6-039, S6-040): every committed batch records the principal and how access was held (member, team, share link). The history API (`/documents/{id}/history/*`) needs `document.view` (a person who cannot see the document gets 404, a share-link session 403), returns who and when, never the content of a batch, and scans at most 2000 events per page. Checkpoints (system snapshots) are listed apart from the activity and from people's named versions.
 - A peer is shown with the display name and colour of the account that was admitted (S6-043), or with the share link's label; what the client puts in its hello is ignored for signed-in members. A profile that cannot be read refuses the join rather than falling back to the client's claim.
 - Realtime tickets are short-lived and bound to one document and role.
 - The relay ignores tenant, role or principal fields asserted by normal client messages.

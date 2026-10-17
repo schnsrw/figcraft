@@ -92,7 +92,8 @@ fn app(state: AppState) -> Router {
         .merge(super::resource_routes())
         .merge(super::super::me_routes::self_service_routes())
         .merge(super::super::admin_users_routes::resource_routes())
-        .merge(super::super::tenants_api::routes());
+        .merge(super::super::tenants_api::routes())
+        .merge(super::super::history_api::history_routes());
     let api = api_router_with(state, auth, resources);
     crate::health::app(CloudRole::Api, true, Some(api), ContextSettings::new(CloudRole::Api, 64, Duration::from_secs(20), 1 << 20))
 }
@@ -1418,5 +1419,177 @@ async fn generated_passwords_are_shown_once_and_set_by_administrators_below_them
     let owner_set =
         as_owner(&app, &w, Method::POST, &format!("/api/v1/tenants/{tenant}/users/{admin_id}/password"), Some(json!({"generate": true}))).await?;
     assert_eq!(owner_set.status, StatusCode::OK);
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------ S6-040
+
+struct Filed {
+    document: figcraft_cloud_domain::CloudDocumentId,
+    workspace: figcraft_cloud_domain::WorkspaceId,
+}
+
+/// A workspace, project and document in `w`'s tenant, owned by the tenant owner.
+async fn filed(w: &World) -> Result<Filed, Error> {
+    use figcraft_cloud_domain::{CloudDocumentId, ProjectId, WorkspaceId};
+    use figcraft_cloud_storage::metadata::{create_document, create_project, create_workspace};
+    let (workspace, project, document): (WorkspaceId, ProjectId, CloudDocumentId) = (e7("c2").parse()?, e7("c3").parse()?, e7("c4").parse()?);
+    let mut t = begin_tenant_transaction(&w.pool, w.tenant).await.map_err(|e| format!("{e:?}"))?;
+    create_workspace(&mut t, workspace, "e7 ws", None).await.map_err(|e| format!("{e:?}"))?;
+    create_project(&mut t, project, workspace, "e7 project", None).await.map_err(|e| format!("{e:?}"))?;
+    create_document(&mut t, document, workspace, project, "e7 doc").await.map_err(|e| format!("{e:?}"))?;
+    t.commit().await?;
+    Ok(Filed { document, workspace })
+}
+
+/// Commit one batch as `actor` through `via`, `ago` seconds in the past.
+async fn commit_event(
+    w: &World,
+    f: &Filed,
+    actor: PrincipalId,
+    via: Option<figcraft_cloud_storage::attribution::Via>,
+    ago: i64,
+) -> Result<i64, Error> {
+    use figcraft_cloud_storage::events::{append_events_via, claim_sequencer};
+    use figcraft_collab::{Accepted, Change, NodeId};
+    let mut t = begin_tenant_transaction(&w.pool, w.tenant).await.map_err(|e| format!("{e:?}"))?;
+    let claim = claim_sequencer(&mut t, f.document).await.map_err(|e| format!("{e:?}"))?;
+    let seq = claim.current_seq + 1;
+    let batch = Accepted {
+        seq: u64::try_from(seq)?,
+        author: 1,
+        batch_id: u64::try_from(seq)?,
+        changes: vec![Change::Delete { id: NodeId(u64::try_from(seq)? * 10) }],
+    };
+    append_events_via(&mut t, f.document, claim.fencing_token, actor, via, &[batch]).await.map_err(|e| format!("{e:?}"))?;
+    t.commit().await?;
+    sqlx::query("UPDATE document_events SET created_at = now() - make_interval(secs => $3::bigint) WHERE tenant_id = $1::uuid AND document_id = $2::uuid AND seq = $4")
+        .bind(w.tenant.to_string())
+        .bind(f.document.to_string())
+        .bind(ago)
+        .bind(seq)
+        .execute(&w.admin)
+        .await?;
+    Ok(seq)
+}
+
+#[tokio::test]
+async fn history_groups_activity_by_person_and_access_and_keeps_checkpoints_apart() -> TestResult {
+    use figcraft_cloud_storage::attribution::Via;
+    use figcraft_cloud_storage::memberships::set_workspace_member;
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let f = filed(&w).await?;
+    let (ben_login, ben) = account(&w, &app).await?;
+    let ben: PrincipalId = ben.parse()?;
+    let (viewer_login, viewer) = account(&w, &app).await?;
+    let viewer: PrincipalId = viewer.parse()?;
+    let (outsider_login, _) = account(&w, &app).await?;
+    {
+        let mut t = begin_tenant_transaction(&w.pool, w.tenant).await.map_err(|e| format!("{e:?}"))?;
+        set_workspace_member(&mut t, f.workspace, viewer, figcraft_cloud_domain::Role::Viewer).await.map_err(|e| format!("{e:?}"))?;
+        t.commit().await?;
+    }
+    sqlx::query("UPDATE teams SET name = 'Design' WHERE id = $1::uuid").bind(w.team.to_string()).execute(&w.admin).await?;
+    let _ = (ben_login, viewer_login.clone());
+
+    // ada = the owner (directly), ben through the Design team, then a labelled share link.
+    let link = {
+        let mut t = begin_tenant_transaction(&w.pool, w.tenant).await.map_err(|e| format!("{e:?}"))?;
+        let link = figcraft_cloud_storage::share_links::create_share_link(
+            &mut t,
+            f.document,
+            figcraft_cloud_storage::share_links::ShareRole::Editor,
+            Some("Design review"),
+            w.owner,
+            None,
+        )
+        .await
+        .map_err(|e| format!("{e:?}"))?;
+        t.commit().await?;
+        link
+    };
+    commit_event(&w, &f, w.owner, Some(Via::Member), 2000).await?; // 1
+    commit_event(&w, &f, w.owner, Some(Via::Member), 1990).await?; // 2
+    commit_event(&w, &f, ben, Some(Via::Team(w.team)), 1500).await?; // 3
+    commit_event(&w, &f, ben, Some(Via::Team(w.team)), 1490).await?; // 4
+    commit_event(&w, &f, w.owner, Some(Via::Member), 600).await?; // 5 (a long pause after 2)
+    commit_event(&w, &f, w.owner, Some(Via::ShareLink(link.id)), 100).await?; // 6: same person, other access
+    commit_event(&w, &f, w.owner, None, 50).await?; // 7: unknown access
+
+    let base = format!("/api/v1/documents/{}/history", f.document);
+    let tenant = w.tenant.to_string();
+    let owner = w.owner_cookie().await?;
+    let get = |cookie: String, path: String| {
+        let (app, tenant) = (app.clone(), tenant.clone());
+        async move { call(&app, Method::GET, &path, &[("cookie", &cookie), ("x-figcraft-tenant", &tenant)], None).await }
+    };
+    let reply = get(owner.clone(), format!("{base}/activity")).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    let items = reply.body["items"].as_array().ok_or("items")?;
+    let shape: Vec<(i64, i64, String)> = items
+        .iter()
+        .map(|i| (i["from_seq"].as_i64().unwrap_or(-1), i["to_seq"].as_i64().unwrap_or(-1), i["label"].as_str().unwrap_or("").to_string()))
+        .collect();
+    assert_eq!(shape.len(), 5, "{shape:?}");
+    assert_eq!((shape[0].0, shape[0].2.as_str()), (7, "e7 owner"), "unknown access reads as the person alone");
+    assert_eq!((shape[1].0, shape[1].2.as_str()), (6, "e7 owner, through a share link (Design review)"));
+    assert_eq!((shape[2].0, shape[2].1), (5, 5));
+    assert_eq!((shape[3].0, shape[3].1, shape[3].2.as_str()), (3, 4, "Login Person, through the Design team"));
+    assert_eq!((shape[4].0, shape[4].1), (1, 2));
+    assert_eq!(items[3]["batches"], 2);
+    assert_eq!(items[3]["via"]["kind"], "team");
+    assert_eq!(items[3]["via"]["name"], "Design");
+    assert_eq!(items[3]["person"]["principal_id"], ben.to_string());
+    assert!(items[3]["person"]["color"].as_str().is_some_and(|c| c.starts_with('#')));
+    assert!(items[3]["started_at"].as_i64() <= items[3]["ended_at"].as_i64());
+
+    // Paging: one run per page walks the same list without gaps or repeats.
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..10 {
+        let path = match &cursor {
+            Some(cursor) => format!("{base}/activity?limit=1&cursor={cursor}"),
+            None => format!("{base}/activity?limit=1"),
+        };
+        let page = get(owner.clone(), path).await;
+        assert_eq!(page.status, StatusCode::OK);
+        for item in page.body["items"].as_array().ok_or("items")? {
+            seen.push((item["from_seq"].as_i64().unwrap_or(-1), item["to_seq"].as_i64().unwrap_or(-1)));
+        }
+        cursor = page.body["next_cursor"].as_str().map(str::to_string);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, shape.iter().map(|s| (s.0, s.1)).collect::<Vec<_>>());
+    assert_eq!(get(owner.clone(), format!("{base}/activity?cursor=garbage")).await.status, StatusCode::BAD_REQUEST);
+
+    // Checkpoints are a different list, and the summary names the last editor.
+    let reply = get(owner.clone(), format!("{base}/checkpoints")).await;
+    assert_eq!((reply.status, reply.body["items"].as_array().map(Vec::len)), (StatusCode::OK, Some(0)));
+    let reply = get(owner.clone(), format!("{base}/summary")).await;
+    assert_eq!(reply.body["current_seq"], 7);
+    assert_eq!(reply.body["last_edit"]["seq"], 7);
+
+    // Who may read it: a document viewer, not an outsider, not another workspace, not a stranger.
+    let viewer_cookie = sign_in(&app, &w, &viewer_login, GOOD).await?;
+    assert_eq!(get(viewer_cookie, format!("{base}/activity")).await.status, StatusCode::OK);
+    let outsider_cookie = sign_in(&app, &w, &outsider_login, GOOD).await?;
+    assert_eq!(get(outsider_cookie, format!("{base}/activity")).await.status, StatusCode::NOT_FOUND);
+    let elsewhere = world().await?.ok_or("world")?;
+    let foreign = elsewhere.owner_cookie().await?;
+    let foreign_app = self::app(state(elsewhere.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let reply = call(
+        &foreign_app,
+        Method::GET,
+        &format!("{base}/activity"),
+        &[("cookie", &foreign), ("x-figcraft-tenant", &elsewhere.tenant.to_string())],
+        None,
+    )
+    .await;
+    assert_eq!(reply.status, StatusCode::NOT_FOUND);
+    assert_eq!(call(&app, Method::GET, &format!("{base}/activity"), &[], None).await.status, StatusCode::UNAUTHORIZED);
+    assert_eq!(get(owner, "/api/v1/documents/not-an-id/history/activity".to_string()).await.status, StatusCode::NOT_FOUND);
     Ok(())
 }

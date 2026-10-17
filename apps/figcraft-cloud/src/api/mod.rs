@@ -31,6 +31,7 @@ pub(crate) mod context;
 pub(crate) mod cursor;
 pub(crate) mod documents_api;
 pub(crate) mod error;
+pub(crate) mod history_api;
 pub(crate) mod host_api;
 pub(crate) mod host_events;
 pub(crate) mod images_api;
@@ -291,6 +292,7 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(me_routes::self_service_routes())
         .merge(me_api::me_routes())
         .merge(admin_users_routes::resource_routes())
+        .merge(history_api::history_routes())
         .merge(documents_api::routes())
         .merge(images_api::router())
         .merge(host_api::router());

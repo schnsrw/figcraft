@@ -20,6 +20,7 @@ pub mod events;
 pub mod exports;
 pub mod external_mappings;
 pub mod garbage_collection;
+pub mod history;
 pub mod host_mappings;
 pub mod host_systems;
 pub mod idempotency;
