@@ -69,6 +69,11 @@ pub(crate) struct Authenticated {
     pub(crate) tenant: TenantContext,
     pub(crate) session: SessionInfo,
     pub(crate) grant: Grant,
+    /// Whether the request's method can change state (anything but GET, HEAD, OPTIONS). Set by
+    /// the extractor from the request, whatever the authenticator put here; mutating requests
+    /// hold their access for the whole transaction
+    /// ([`super::authenticator::hold_caller_access`]).
+    pub(crate) mutating: bool,
 }
 
 impl Authenticated {
@@ -162,7 +167,8 @@ impl FromRequestParts<AppState> for Authenticated {
             headers: &parts.headers,
             client_ip: client_ip::resolve(peer, &parts.headers, &state.config().trusted_proxies),
         };
-        let authenticated = state.authenticator().authenticate(&request).await.map_err(ApiError::from)?;
+        let mut authenticated = state.authenticator().authenticate(&request).await.map_err(ApiError::from)?;
+        authenticated.mutating = super::authenticator::is_unsafe(&parts.method);
         parts.extensions.insert(authenticated.clone());
         Ok(authenticated)
     }

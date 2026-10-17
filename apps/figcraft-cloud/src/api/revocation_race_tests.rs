@@ -12,14 +12,17 @@
 //! * Requests that *start* after the revocation's commit returned are always refused: the
 //!   authenticator re-resolves the session and the tenant membership on every request (tested
 //!   in both a sequential and a concurrent hammer form; these pass).
-//! * A request that was authenticated and authorized *before* the revocation committed, and has
-//!   not committed yet, must either hold the revocation off until it commits or see it and be
-//!   refused. This is forced deterministically: a gate transaction holds the document row, so the
-//!   rename's UPDATE blocks (seen through `pg_blocking_pids`) after its authorization reads; the
-//!   revocation is started on a connection of its own, and the test waits until it has either
-//!   committed or is itself blocked on a lock; then the gate is released. These tests are
-//!   `#[ignore]`d: they fail today, because the handler's transaction takes no lock on the
-//!   session row or the tenant membership it authorized with (see the ignore reason).
+//! * A request that was authenticated *before* the revocation committed, and has not committed
+//!   yet, either sees the revocation and is refused, or holds it off until it commits: every
+//!   mutating handler re-validates the caller's principal, session and tenant membership `FOR
+//!   SHARE` inside its own transaction (`authenticator::hold_caller_access`). Both orders are
+//!   forced deterministically, with no sleep as synchronisation. Revocation first: a test-only
+//!   pause (`authenticator::guard_pause`) stops the request after it is authenticated and has
+//!   opened its transaction, before the guard; the revocation commits; the request goes on and
+//!   must be refused with the document unchanged. Request first: a gate transaction holds the
+//!   document row so the rename's UPDATE blocks after the guard (seen through
+//!   `pg_blocking_pids`); the revocation, on a connection of its own, must then be seen waiting
+//!   on a lock (never finished) until the gate is released, and the rename commits first.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -40,7 +43,7 @@ use serde_json::{Value, json};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tower::ServiceExt as _;
 
-use super::authenticator::{IdentityConfig, TENANT_HEADER};
+use super::authenticator::{IdentityConfig, TENANT_HEADER, guard_pause};
 use super::context::ContextSettings;
 use super::{ApiConfig, AppState, api_router};
 use crate::config::CloudRole;
@@ -96,6 +99,7 @@ struct World {
     tenant: TenantId,
     member: PrincipalId,
     document: CloudDocumentId,
+    session: Uuid,
     token: String,
 }
 
@@ -126,8 +130,8 @@ async fn world(pool: &PgPool) -> TestResult<World> {
     create_document(&mut t, document, workspace, project, "e3 original").await.map_err(|error| format!("{error:?}"))?;
     set_workspace_member(&mut t, workspace, member, Role::Editor).await.map_err(|error| format!("{error:?}"))?;
     t.commit().await?;
-    let token = create_session(pool, member, SessionLimits::default()).await.map_err(|error| format!("{error:?}"))?.token;
-    Ok(World { tenant, member, document, token })
+    let session = create_session(pool, member, SessionLimits::default()).await.map_err(|error| format!("{error:?}"))?;
+    Ok(World { tenant, member, document, session: session.id, token: session.token })
 }
 
 /// Rename the document as the member; the status and the error code, if any.
@@ -278,85 +282,118 @@ async fn wait_blocked_behind(pool: &PgPool, gate_pid: i32) -> TestResult {
     }
 }
 
-/// See the module docs: a request paused after its authorization, before its commit, while the
-/// revocation commits or is held off.
-async fn paused_request_race(revocation: Revocation) -> TestResult {
+#[derive(Clone, Copy, Debug)]
+enum Order {
+    /// The request is authenticated, opens its transaction and stops before the guard; the
+    /// revocation commits; the request goes on and must be refused, changing nothing.
+    RevocationCommitsFirst,
+    /// The request passes the guard and stops on its UPDATE (a gate holds the document row); the
+    /// revocation must then wait on the rows the guard holds, so the request commits first and
+    /// stands, and the revocation commits after it.
+    RequestHoldsFirst,
+}
+
+/// Whether `pid` is waiting on a lock.
+async fn waiting_on_lock(pool: &PgPool, pid: i32) -> TestResult<bool> {
+    let waiting: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock'").bind(pid).fetch_one(pool).await?;
+    Ok(waiting == 1)
+}
+
+/// See the module docs: a request authenticated before the revocation and paused before its
+/// commit, in a forced order.
+async fn paused_request_race(revocation: Revocation, order: Order) -> TestResult {
     let Some(url) = database_url() else {
         return Ok(());
     };
     let pool = PgPoolOptions::new().max_connections(8).acquire_timeout(BOUND).connect(&url).await?;
     let app = app(&pool);
     let world = Arc::new(world(&pool).await?);
-
-    // The gate holds the document row: the rename's UPDATE will wait on it.
-    let mut gate = begin_tenant_transaction(&pool, world.tenant).await.map_err(|error| format!("{error:?}"))?;
-    let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(gate.connection()).await?;
-    sqlx::query("SELECT 1 FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE")
-        .bind(world.tenant.to_string())
-        .bind(world.document.to_string())
-        .execute(gate.connection())
-        .await?;
-    let requesting = {
-        let (app, world) = (app.clone(), Arc::clone(&world));
-        tokio::spawn(async move { rename(&app, &world, "paused").await })
-    };
-    wait_blocked_behind(&pool, gate_pid).await?;
-
-    // The revocation, on its own connection: it either commits now or is held off by a lock.
     let (revoker, revoker_pid) = racer_pool(&url).await?;
-    let revoking = {
-        let world = Arc::clone(&world);
-        tokio::spawn(async move { revoke(&revoker, world.tenant, world.member, &world.token, revocation).await })
-    };
-    let deadline = Instant::now() + BOUND;
-    let revoke_committed_first = loop {
-        if revoking.is_finished() {
-            break true;
+    match order {
+        Order::RevocationCommitsFirst => {
+            let pause = guard_pause::arm(&world.session.to_string());
+            let requesting = {
+                let (app, world) = (app.clone(), Arc::clone(&world));
+                tokio::spawn(async move { rename(&app, &world, "paused").await })
+            };
+            // Authenticated, transaction open, guard not yet run.
+            tokio::time::timeout(BOUND, pause.reached.notified()).await?;
+            revoke(&revoker, world.tenant, world.member, &world.token, revocation).await?;
+            pause.release.notify_one();
+            let (status, code) = tokio::time::timeout(BOUND, requesting).await??;
+            let name = document_name(&pool, &world).await?;
+            assert!(
+                refused(status) && name == "e3 original",
+                "{revocation:?}: the revocation committed first, yet the paused request answered {status} {code} and the document is named {name:?}"
+            );
         }
-        let waiting: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_stat_activity WHERE pid = $1 AND wait_event_type = 'Lock'")
-            .bind(revoker_pid)
-            .fetch_one(&pool)
-            .await?;
-        if waiting == 1 {
-            break false;
+        Order::RequestHoldsFirst => {
+            // The gate holds the document row: the rename's UPDATE waits on it, after the guard.
+            let mut gate = begin_tenant_transaction(&pool, world.tenant).await.map_err(|error| format!("{error:?}"))?;
+            let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()").fetch_one(gate.connection()).await?;
+            sqlx::query("SELECT 1 FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid FOR UPDATE")
+                .bind(world.tenant.to_string())
+                .bind(world.document.to_string())
+                .execute(gate.connection())
+                .await?;
+            let requesting = {
+                let (app, world) = (app.clone(), Arc::clone(&world));
+                tokio::spawn(async move { rename(&app, &world, "paused").await })
+            };
+            wait_blocked_behind(&pool, gate_pid).await?;
+            let revoking = {
+                let world = Arc::clone(&world);
+                tokio::spawn(async move { revoke(&revoker, world.tenant, world.member, &world.token, revocation).await })
+            };
+            // The revocation must be held off by the request's guard, never commit around it.
+            let deadline = Instant::now() + BOUND;
+            while !waiting_on_lock(&pool, revoker_pid).await? {
+                assert!(!revoking.is_finished(), "{revocation:?}: the revocation committed while a guarded request was in flight");
+                if Instant::now() > deadline {
+                    return Err("the revocation neither committed nor blocked".into());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(!revoking.is_finished(), "{revocation:?}");
+            gate.rollback().await?;
+            let (status, code) = tokio::time::timeout(BOUND, requesting).await??;
+            tokio::time::timeout(BOUND, revoking).await???;
+            let name = document_name(&pool, &world).await?;
+            assert_eq!((status, name.as_str()), (StatusCode::OK, "paused"), "{revocation:?}: {code}");
         }
-        if Instant::now() > deadline {
-            return Err("the revocation neither committed nor blocked".into());
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    };
-    gate.rollback().await?;
-    let (status, code) = tokio::time::timeout(BOUND, requesting).await??;
-    tokio::time::timeout(BOUND, revoking).await???;
-    let name = document_name(&pool, &world).await?;
-    if revoke_committed_first {
-        assert!(
-            refused(status) && name == "e3 original",
-            "{revocation:?}: the revocation committed first, yet the paused request answered {status} {code} and the document is named {name:?}"
-        );
-    } else {
-        // The request held the revocation off, so it committed first and stands.
-        assert_eq!((status, name.as_str()), (StatusCode::OK, "paused"), "{revocation:?}");
     }
     // Either way the next request is refused.
-    assert!(refused(rename(&app, &world, "later").await.0), "{revocation:?}");
+    assert!(refused(rename(&app, &world, "later").await.0), "{revocation:?} {order:?}");
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "known race: a request authorized before a logout commits its mutation after it (the handler transaction does not lock the session row)"]
-async fn a_request_paused_before_commit_never_commits_after_a_logout() -> TestResult {
-    paused_request_race(Revocation::Logout).await
+async fn a_request_paused_before_its_guard_is_refused_after_a_logout_commits() -> TestResult {
+    paused_request_race(Revocation::Logout, Order::RevocationCommitsFirst).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "known race: a request authorized before revoke_all_for_principal commits its mutation after it (the handler transaction does not lock the session row)"]
-async fn a_request_paused_before_commit_never_commits_after_revoke_all() -> TestResult {
-    paused_request_race(Revocation::RevokeAll).await
+async fn a_request_paused_before_its_guard_is_refused_after_revoke_all_commits() -> TestResult {
+    paused_request_race(Revocation::RevokeAll, Order::RevocationCommitsFirst).await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "known race: a request authorized before the caller's tenant removal commits its mutation after it (the handler reads tenant_members without FOR SHARE)"]
-async fn a_request_paused_before_commit_never_commits_after_tenant_member_removal() -> TestResult {
-    paused_request_race(Revocation::TenantMemberRemoved).await
+async fn a_request_paused_before_its_guard_is_refused_after_tenant_member_removal_commits() -> TestResult {
+    paused_request_race(Revocation::TenantMemberRemoved, Order::RevocationCommitsFirst).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guarded_request_holds_a_logout_off_until_it_commits() -> TestResult {
+    paused_request_race(Revocation::Logout, Order::RequestHoldsFirst).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guarded_request_holds_revoke_all_off_until_it_commits() -> TestResult {
+    paused_request_race(Revocation::RevokeAll, Order::RequestHoldsFirst).await
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_guarded_request_holds_tenant_member_removal_off_until_it_commits() -> TestResult {
+    paused_request_race(Revocation::TenantMemberRemoved, Order::RequestHoldsFirst).await
 }
