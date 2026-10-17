@@ -1,6 +1,12 @@
 # Relay orchestration decision (S5)
 
-**Status:** Proposed. Waiting for the product owner. **Date:** 2026-10-17. **Scope:** S5-003, S5-004,
+> **Decided (product owner, 2026-10-17): build our own orchestration, with room leases in
+> PostgreSQL beside the existing fencing tokens.** The research below compared options and
+> recommended Redis-backed leases; the owner chose PostgreSQL leases instead to avoid a new runtime
+> dependency for ownership and keep self-hosting to one Compose stack. Neither Plane nor Rivet is
+> adopted. Where this document says "Redis lease", read "PostgreSQL lease row" for S5-003/S5-004.
+
+**Status:** Decided (own PostgreSQL leases; see the note above). **Date:** 2026-10-17. **Scope:** S5-003, S5-004,
 S5-006 and S5-012 in [`tracker.md`](tracker.md). This doc compares how room ownership could be
 orchestrated across relay replicas. It does not reopen the consistency model in
 [`architecture.md`](architecture.md#collaboration-consistency-model).
