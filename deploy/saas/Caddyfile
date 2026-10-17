@@ -9,6 +9,13 @@
 		reverse_proxy cloud:8081
 	}
 
+	# The browser editor (static, from the web image). `/edit/#join=<invite link>` joins a
+	# cloud document through the collaboration relay.
+	redir /edit /edit/ 308
+	handle /edit/* {
+		reverse_proxy web:8080
+	}
+
 	handle /healthz {
 		respond "ok" 200
 	}

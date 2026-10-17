@@ -12,3 +12,4 @@ webapp/saas/dist
 webapp/packages/editor-bridge/dist
 deploy/saas/.env
 deploy/saas/secrets
+.claude

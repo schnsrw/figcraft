@@ -14,7 +14,14 @@
 //!   join from other machines.
 //!
 //! URL query flag: `?webgl` forces the WebGL2 backend instead of WebGPU.
+//!
+//! URL fragment: `#join=<url-encoded invite link>` joins that live session on startup (how a
+//! FigCraft Cloud share link opens the editor at `/edit/`); the fragment is then cleared so the
+//! link's secret doesn't stay in the address bar, history or bookmarks.
 
+// The fragment parser is pure (tested on the host); only the browser shell calls it.
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod hash;
 #[cfg(target_arch = "wasm32")]
 mod web;
 
