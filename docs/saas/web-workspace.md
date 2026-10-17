@@ -66,6 +66,16 @@ list of own sessions with sign-out. Test ids: `addperson-open/-name/-login/-role
 `onetime-link`/`onetime-link-url`, `reset-password/-confirm/-submit/-done`, `profile-name/-save`,
 `password-current/-new/-confirm/-submit`, `sessions-revoke-others`.
 
+## Finding things and settings
+
+**Search** (`/search?q=…`) finds workspaces, projects and files by name among those the caller can
+open. There is no server-side search yet, so the page reads the lists the caller can already see
+(workspaces, their projects, their files) and filters by a case-insensitive substring, bounded to
+25 workspaces, 60 projects and 100 results, and says when it stopped early. **Settings**
+(`/settings`, owners and admins) chooses the sign-in methods the workspace offers: passwords,
+organisation sign-in and open registration (`GET/PUT /tenants/{t}/account-settings`); at least one
+method must stay on. Recents are on the home page. Libraries are not built.
+
 ## Permissions in the UI
 
 The server decides every action. The UI only avoids offering what would be refused:

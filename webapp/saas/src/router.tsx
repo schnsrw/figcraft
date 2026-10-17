@@ -40,6 +40,8 @@ export type Route =
   | { name: "setup" }
   | { name: "account" }
   | { name: "reset" }
+  | { name: "search" }
+  | { name: "settings" }
   | { name: "not_found" };
 
 export function isUuid(value: string): boolean {
@@ -59,6 +61,8 @@ export function parseRoute(pathname: string): Route {
   if (first === "setup" && parts.length === 1) return { name: "setup" };
   if (first === "account" && parts.length === 1) return { name: "account" };
   if (first === "reset" && parts.length === 1) return { name: "reset" };
+  if (first === "search" && parts.length === 1) return { name: "search" };
+  if (first === "settings" && parts.length === 1) return { name: "settings" };
   if (
     first === "workspace" &&
     workspaceId !== undefined &&
@@ -95,6 +99,10 @@ export function formatRoute(route: Route): string {
       return "/account";
     case "reset":
       return "/reset";
+    case "search":
+      return "/search";
+    case "settings":
+      return "/settings";
     case "not_found":
       return "/";
   }

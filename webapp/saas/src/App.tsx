@@ -72,7 +72,12 @@ function Shell({ branding }: { branding: Branding }) {
         {state.kind === "ready" && (
           <nav className="topnav" aria-label="Main">
             <Link to="/">Files</Link>
+            <Link to="/search">Search</Link>
             <Link to="/people">People</Link>
+            {(state.tenant.role === "tenant_owner" ||
+              state.tenant.role === "tenant_admin") && (
+              <Link to="/settings">Settings</Link>
+            )}
             <Link to="/account">Account</Link>
           </nav>
         )}
@@ -189,6 +194,8 @@ const TITLES: Record<string, string> = {
   setup: "Set up",
   account: "Your account",
   reset: "Choose a password",
+  search: "Search",
+  settings: "Settings",
   not_found: "Page not found",
 };
 

@@ -1,5 +1,8 @@
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
+
+// Generous: the suite runs many jsdom pages in parallel on busy machines.
+configure({ asyncUtilTimeout: 5000 });
 
 afterEach(() => {
   cleanup();

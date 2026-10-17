@@ -94,6 +94,7 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
   object store, and one restore drill run and recorded.
 - [ ] **TS-011** The team can find its work: recents, search across the workspace's files,
   libraries and settings screens (rest of S6-020).
+  Progress (not complete): recents on the home page (this browser), name search across workspaces, projects and files (`/search`, client-side over the lists the caller can read, bounded; no server search yet) and a Settings page for the sign-in methods (`/settings`, owners and admins) in `webapp/saas/src/screens/{search,settings}.tsx`, with DB-free tests (`find.test.tsx`; 149 web tests). Not built: libraries; full-text or server-side search.
 - [ ] **TS-GATE** A team of three installs it from the guide on a clean machine, signs in with
   passwords, creates a workspace, two teams and a project, invites two people, and all three edit
   one file at the same time, close and reopen, and restore an earlier version. Recorded run with
@@ -3085,3 +3086,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-037: administrator-created accounts with one-time setup links, disable/enable that ends live sessions, single-use reset links and session revocation (schema 20261018000024). S6 reaches 21/58. |
 | 2026-10-18 | TS-006 (1/2): the account screen (profile, colour, change password, own sessions). 126 web tests. |
 | 2026-10-18 | TS-006: admin screens on People (add person with setup link, reset link, disable/enable, sign out everywhere), the /reset password page and the Account page. 139 web tests. |
+| 2026-10-18 | TS-011 (part): name search and a Settings page for sign-in methods; libraries remain. 149 web tests. |
