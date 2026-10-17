@@ -126,3 +126,30 @@ The migration job receives the migrator URL through `DATABASE_URL_FILE` and appl
 versioned SQL under a PostgreSQL advisory lock, and emits only fixed, non-secret diagnostics. Normal
 role startup never applies migrations. The S2-005 event, snapshot, job, idempotency and audit
 schema is present, but repositories and durable collaboration behavior remain future S2 tasks.
+
+## First run for a team that hosts it (TS-001, S6-051)
+
+After `docker compose up` has migrated the database and the `cloud` service is healthy, one command
+creates the first workspace, its owner (a password account, no identity provider) and the platform
+admin who installed the system. Run it in the `cloud` service so it uses the same configuration and
+secrets (`FIGCRAFT_PUBLIC_URL` is the address printed at the end):
+
+```bash
+printf '%s\n' "$OWNER_PASSWORD" | docker compose --env-file deploy/saas/env.example \
+  -f deploy/saas/compose.yaml run --rm -T cloud --setup \
+  --workspace-name "Acme Design" --owner-login ada@acme.example --owner-name "Ada Lovelace" \
+  --password-file -
+```
+
+- The password is never an argument. It is read from `--password-file` (`-` is standard input) and
+  must meet the account password policy (length, not a common password). Leave the option out and a
+  strong password is generated and printed once on standard output.
+- It prints the URL to open, the workspace and the owner's sign-in. Nothing secret goes to a log or
+  the audit trail; the platform admin is created with the same password hash and enrols the
+  authenticator app at their first sign-in at `/platform/v1` (the operator API). Use
+  `--no-platform-admin` to skip it, `--platform-login` for a different login, `--slug` for the
+  workspace address.
+- It creates only what is missing and says so when nothing is: running it twice is safe. A
+  workspace that already has an owner is never touched.
+- In single-tenant mode the workspace takes the configured `FIGCRAFT_SINGLE_TENANT_ID`.
+

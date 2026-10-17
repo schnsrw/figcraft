@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (21/58) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (22/58) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 21 / 58 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 22 / 58 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2778,8 +2778,21 @@ holds projects. The platform API calls the company `workspace` in its paths and 
   `platform:provision` creates, suspends and restores workspaces for its customers through the same
   `/platform/v1` endpoints with a narrower scope set and per-host quotas; it never sees another
   host's workspaces. Depends on S6-046.
-- [ ] **S6-051** Self-hosted mode: one command creates the platform admin, the first workspace and
+- [x] **S6-051** Self-hosted mode: one command creates the platform admin, the first workspace and
   its owner; documented in `deploy/saas/README.md`. Depends on S6-045, S6-046.
+  Evidence: `figcraft-cloud --setup --workspace-name .. --owner-login .. [--owner-name ..]
+  [--password-file path|-] [--slug ..] [--platform-login ..] [--no-platform-admin]`
+  (`apps/figcraft-cloud/src/setup.rs`, `crates/cloud-storage/src/self_host.rs`). Creates what is
+  missing (workspace, owner password account with the owner membership, platform admin), is safe to
+  run twice (`AlreadySetUp`), completes an ownerless workspace row left by an earlier bootstrap, takes the
+  password from a file or standard input or generates and prints one once, prints the URL and the
+  sign-in and logs and audits nothing secret. Unit tests without a database: argument parsing (required
+  options, repeats, a password is never an argument, conflicts), the one-line bounded password file,
+  slug derivation and the generated password shape. Live tests (skip without a database)
+  `crates/cloud-storage/tests/self_host.rs` (3) and a recorded run of the real binary: the workspace,
+  owner and platform admin were created, the URL and sign-in were printed, and a second run was
+  refused. Not done: the Compose invocation in the README was not executed here (no Docker in this
+  session); it is the same binary and covered by the TS-003 smoke.
 
 #### Block B: Hierarchy rules
 
@@ -3087,3 +3100,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | TS-006 (1/2): the account screen (profile, colour, change password, own sessions). 126 web tests. |
 | 2026-10-18 | TS-006: admin screens on People (add person with setup link, reset link, disable/enable, sign out everywhere), the /reset password page and the Account page. 139 web tests. |
 | 2026-10-18 | TS-011 (part): name search and a Settings page for sign-in methods; libraries remain. 149 web tests. |
+| 2026-10-18 | S6-051 / TS-001 (command): `figcraft-cloud --setup` creates the workspace, its password owner and the platform admin in one command and prints the URL; README section added. TS-001 stays open until the Compose run is exercised. S6 reaches 21/58. |

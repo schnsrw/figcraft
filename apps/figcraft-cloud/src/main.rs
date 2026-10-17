@@ -6,6 +6,7 @@ mod health;
 mod logging;
 mod platform_api;
 mod relay;
+mod setup;
 
 use config::{CloudConfig, CloudRole, Secret};
 use figcraft_cloud_domain::CloudDocumentId;
@@ -26,6 +27,7 @@ enum Arguments {
     ProvisionDatabaseRoles,
     PrintBootstrapToken,
     PrintPlatformBootstrapToken,
+    Setup(setup::SetupArgs),
     CreateShareLink { document: Option<CloudDocumentId>, role: ShareRole },
     Role(Option<CloudRole>),
 }
@@ -73,6 +75,9 @@ fn parse_arguments(args: impl IntoIterator<Item = OsString>) -> Result<Arguments
             } else {
                 Err("--print-bootstrap-token cannot be combined with other arguments")
             };
+        }
+        if argument == "--setup" {
+            return if role.is_none() { setup::parse(args).map(Arguments::Setup) } else { Err("--setup cannot be combined with --role") };
         }
         if argument == "--print-platform-bootstrap-token" {
             return if role.is_none() && args.next().is_none() {
@@ -262,7 +267,7 @@ fn run_print_platform_bootstrap_token() -> ExitCode {
 
 fn usage() {
     println!(
-        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n       figcraft-cloud --print-bootstrap-token\n       figcraft-cloud --print-platform-bootstrap-token\n       figcraft-cloud --create-share-link [--document <uuid>] [--role editor|viewer]\n\nDefaults to --role all."
+        "Usage: figcraft-cloud [--role <all|api|relay|worker>]\n       figcraft-cloud --check-ready\n       figcraft-cloud --migrate\n       figcraft-cloud --init-object-store\n       figcraft-cloud --provision-db-roles\n       figcraft-cloud --print-bootstrap-token\n       figcraft-cloud --print-platform-bootstrap-token\n       figcraft-cloud --setup --workspace-name <name> --owner-login <login> [--owner-name <name>] [--password-file <path|->] [--slug <address>] [--platform-login <login>] [--no-platform-admin]\n       figcraft-cloud --create-share-link [--document <uuid>] [--role editor|viewer]\n\nDefaults to --role all."
     );
 }
 
@@ -440,6 +445,7 @@ fn main() -> ExitCode {
         Ok(Arguments::ProvisionDatabaseRoles) => run_role_provisioning(),
         Ok(Arguments::PrintBootstrapToken) => run_print_bootstrap_token(),
         Ok(Arguments::PrintPlatformBootstrapToken) => run_print_platform_bootstrap_token(),
+        Ok(Arguments::Setup(args)) => setup::run(&args),
         Ok(Arguments::CreateShareLink { document, role }) => run_create_share_link(document, role),
         Ok(Arguments::Role(cli_role)) => {
             // The long-running roles log to stderr, filtered by RUST_LOG (the CLI commands don't).

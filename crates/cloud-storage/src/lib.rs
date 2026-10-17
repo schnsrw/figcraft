@@ -48,6 +48,7 @@ pub mod revocation;
 pub mod room_clients;
 pub mod room_leases;
 pub mod secret_box;
+pub mod self_host;
 pub mod service_accounts;
 pub mod sessions;
 pub mod share_links;
