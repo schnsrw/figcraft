@@ -143,13 +143,13 @@ the continuation point, a blocker or a major decision changes.
    `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
    ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
    sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
-   S4 is in progress (19/25): API foundation, OIDC login routes, sessions, bootstrap gate,
+   S4 is in progress (20/25): API foundation, OIDC login routes, sessions, bootstrap gate,
    service accounts, deny-by-default authz, tenants/teams/invitations, document APIs with HMAC
    cursors, row-level security on every tenant table (pre-tenant lookups through SECURITY DEFINER
    functions), membership revocation, support access and job recheck are done. Remaining:
    S4-019 (handlers must call `revocation::apply_revocation` after member removal/suspension;
-   switch `documents_api` lists to `api/cursor.rs`), S4-021..023 at API level, S4-024 (owner must
-   confirm the decision points in `docs/saas/identity-mapping-policy.md`), S4-025 (Keycloak SAML
+   switch `documents_api` lists to `api/cursor.rs`), S4-021..023 at API level, S4-024 is accepted
+   (owner confirmed all defaults in `docs/saas/identity-mapping-policy.md`), S4-025 (Keycloak SAML
    run per `docs/saas/saml-federation.md`), then the S4 gate. Also: a CLI that prints the bootstrap
    token, browser relay admission by short-lived realtime tickets instead of share links, and
    `snapshots::set_current_snapshot` should report NotFound for another tenant's document. Before

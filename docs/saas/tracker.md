@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 in progress (19/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 in progress (20/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -22,7 +22,7 @@ the same commit as the completed task.
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
-| S4 Identity, tenancy and authorization | in progress | 19 / 25 | Isolation and role suite passes |
+| S4 Identity, tenancy and authorization | in progress | 20 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
@@ -1822,7 +1822,7 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   rotation-first order exposes a real use-after-revoke (see issues; that test is #[ignore] until it
   is fixed), and because the HTTP, job and WebSocket layers are not covered: the API routes and
   S4-013 job rechecks are not on main.
-- [ ] **S4-024** Define external identity, organization, domain and group-claim-to-team mapping
+- [x] **S4-024** Define external identity, organization, domain and group-claim-to-team mapping
   policy.
   Partial (2026-10-17): docs/saas/identity-mapping-policy.md is defined but awaits owner
   confirmation. It sets out: - Identity is (issuer, subject) only, and claims never grant directly.
@@ -1833,6 +1833,14 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   permissions, memberships tagged with their source, and reconciliation at login and SCIM with
   session closure. - It has a conflict table and deprovisioning rules. - Seven owner decisions, D1
   to D7, are marked with their defaults.
+  Evidence: `docs/saas/identity-mapping-policy.md` defines how issuer and subject, organizations,
+  verified email domains and group claims map to principals, tenants and teams, with deprovisioning
+  triggers. The product owner accepted all seven decisions on 2026-10-17: no self-service account
+  linking (support-mediated merge), operator-reviewed identity providers, operator approval for a
+  tenant's first directory binding, domain auto-join offered but off by default and viewer-only, no
+  group mapping above viewer, no tenant membership created by group mappings alone, and federated
+  sessions idle after 30 minutes with a 12-hour absolute limit. Directory bindings, group mappings,
+  reconciliation and SCIM are implementation work scheduled after S4.
 - [ ] **S4-025** Validate enterprise SAML federation through the selected OIDC identity broker,
   including login, logout, key rotation and revocation.
   Partial (2026-10-17): docs/saas/saml-federation.md selects Keycloak (Apache-2.0) as the reference

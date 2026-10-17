@@ -1,6 +1,6 @@
 # External identity mapping policy
 
-Status: **defined, pending owner confirmation** (S4-024). Every decision the owner must confirm is
+Status: **accepted** (S4-024). The product owner confirmed every default below on 2026-10-17. Every decision the owner must confirm is
 marked **[OWNER DECISION Dn]** and listed again in [Decisions to confirm](#decisions-to-confirm).
 Until a decision is confirmed, the default written next to it is what the code does or will do.
 
@@ -154,7 +154,7 @@ before commit (S4-013) and fails closed.
 
 ## Decisions to confirm
 
-| ID | Question | Default until confirmed |
+| ID | Question | Confirmed decision (2026-10-17) |
 |---|---|---|
 | D1 | Offer self-service account linking across providers? | No; support-mediated merge only. |
 | D2 | May tenant admins self-serve their own OIDC/SAML issuers? | No; operator adds issuers after review. |
