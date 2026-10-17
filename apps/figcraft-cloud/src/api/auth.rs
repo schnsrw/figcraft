@@ -22,6 +22,7 @@ use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
 use figcraft_cloud_domain::{CloudDocumentId, ErrorCode, PrincipalId, TenantContext};
+use figcraft_cloud_storage::host_systems::HostRole;
 use figcraft_cloud_storage::service_accounts::Scope;
 use figcraft_cloud_storage::share_links::ShareRole;
 
@@ -60,6 +61,9 @@ pub(crate) enum Grant {
     /// A share session: this one document, at most this role. Its principal is the link's
     /// creator (attribution only); the authenticator refuses it on every other route.
     Share { document_id: CloudDocumentId, role: ShareRole, expires_at: i64 },
+    /// An embedded session (S6-010): a real tenant member opened through a host product's token,
+    /// held to that one document, at most that role, and only the routes the editor needs.
+    Embed { document_id: CloudDocumentId, role: HostRole },
 }
 
 /// An authenticated caller in one tenant.
@@ -85,6 +89,7 @@ impl Authenticated {
             Grant::Member => true,
             Grant::ServiceAccount { scopes } => scopes.contains(&scope),
             Grant::Share { role, .. } => scope == Scope::DocumentsRead || (scope == Scope::DocumentsWrite && *role == ShareRole::Editor),
+            Grant::Embed { role, .. } => scope == Scope::DocumentsRead || (scope == Scope::DocumentsWrite && *role == HostRole::Editor),
         };
         if allowed { Ok(()) } else { Err(ApiError::forbidden()) }
     }
@@ -93,7 +98,7 @@ impl Authenticated {
     /// see any other document); members and service accounts pass to the normal checks.
     pub(crate) fn require_document(&self, document_id: CloudDocumentId) -> Result<(), ApiError> {
         match &self.grant {
-            Grant::Share { document_id: own, .. } if *own != document_id => Err(ApiError::not_found()),
+            Grant::Share { document_id: own, .. } | Grant::Embed { document_id: own, .. } if *own != document_id => Err(ApiError::not_found()),
             _ => Ok(()),
         }
     }

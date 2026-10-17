@@ -256,6 +256,31 @@ is safe to return to clients and audit records. `Budgets::DEFAULT`, which plans 
 - Avoid storing durable bearer tokens in local storage.
 - Apply secure WebAssembly and worker source policies without permitting arbitrary script hosts.
 
+### Embedded sessions (S6-010)
+
+An embed-token exchange opens an *embedded session*, not an ordinary browser session:
+
+- It is bound, on its `browser_sessions` row, to the host system, tenant, document and role the
+  token granted (`embed_*` columns, all set or all null). The binding cannot change and survives
+  rotation.
+- It lives in its own cookie, `__Host-figcraft_embed` (`Secure; HttpOnly; SameSite=None;
+  Partitioned`, because the editor runs in a frame on the host's page). The ordinary session cookie
+  never accepts an embedded session and the embed cookie never accepts an ordinary one, so a
+  visitor's own sign-in and the frame's session never replace each other.
+- Every request is held to the bound tenant and document and to three routes: read the document,
+  mint a realtime ticket and fetch the collaboration invite. Members, sharing, rename, archive,
+  export, other documents and every account-level route answer `403`. Writes still need the
+  same-origin check (the frame page is our origin; a cross-site page cannot write with the cookie).
+- The role is capped at the token's role: the member's own role (document, project, workspace
+  and tenant) is lowered to it and explicit tenant permissions are dropped for the request.
+  Realtime tickets and relay admission carry the capped edit decision.
+- Both lifetimes are at most 8 hours; the host issues a new token to continue.
+- Disabling the host, removing the document mapping or removing the principal mapping revokes the
+  matching live embedded sessions in the same transaction (`revoke_reason = host_revoked`). The
+  relay's ordinary session check then closes their open rooms. Re-enabling a host does not revive
+  a revoked session. Removing the person from the tenant is caught by the same membership checks as
+  for any session.
+
 ## Network controls
 
 - TLS terminates at the trusted edge; internal production traffic uses private networks and TLS

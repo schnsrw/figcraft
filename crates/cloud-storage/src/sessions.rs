@@ -17,9 +17,11 @@
 //! principal, not a tenant, so these functions read and write through the pool.
 
 use base64::Engine as _;
-use figcraft_cloud_domain::{PrincipalId, Uuid};
+use figcraft_cloud_domain::{PrincipalId, TenantId, Uuid};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
+
+use crate::host_systems::HostRole;
 
 /// Random bytes in a session token.
 pub const TOKEN_BYTES: usize = 32;
@@ -67,6 +69,9 @@ pub enum RevokeReason {
     PrincipalSuspended,
     Operator,
     Expired,
+    /// The host product that opened an embedded session ended it, was disabled, or removed the
+    /// mapping the session rested on (S6-010).
+    HostRevoked,
 }
 
 impl RevokeReason {
@@ -79,12 +84,13 @@ impl RevokeReason {
             Self::PrincipalSuspended => "principal_suspended",
             Self::Operator => "operator",
             Self::Expired => "expired",
+            Self::HostRevoked => "host_revoked",
         }
     }
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
-        [Self::Logout, Self::Rotated, Self::MembershipRevoked, Self::PrincipalSuspended, Self::Operator, Self::Expired]
+        [Self::Logout, Self::Rotated, Self::MembershipRevoked, Self::PrincipalSuspended, Self::Operator, Self::Expired, Self::HostRevoked]
             .into_iter()
             .find(|reason| reason.as_str() == value)
     }
@@ -137,8 +143,23 @@ impl std::fmt::Debug for CreatedSession {
     }
 }
 
+/// What an embedded session is bound to: the host that opened it, the one document it may reach
+/// and the most it may do there (S6-010). The binding lives on the session row, survives rotation
+/// and cannot be changed.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EmbedBinding {
+    pub tenant_id: TenantId,
+    pub system_id: String,
+    pub document_id: Uuid,
+    pub role: HostRole,
+}
+
+/// Longest an embedded session lives, whatever the deployment's browser-session policy says (the
+/// host issues a new token to continue): 8 hours.
+pub const MAX_EMBED_SESSION_SECS: i64 = 8 * 60 * 60;
+
 /// What a live token resolves to.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResolvedSession {
     pub id: Uuid,
     pub principal_id: PrincipalId,
@@ -146,6 +167,8 @@ pub struct ResolvedSession {
     pub age_secs: i64,
     /// Seconds until the absolute expiry.
     pub absolute_remaining_secs: i64,
+    /// Set for a session opened by an embed-token exchange.
+    pub embed: Option<EmbedBinding>,
 }
 
 /// The SHA-256 stored for `token`.
@@ -175,13 +198,14 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(difference) == 0
 }
 
-type SessionRow = (String, String, i64, i64, bool);
+type SessionRow = (String, String, i64, i64, bool, Option<String>, Option<String>, Option<String>, Option<String>);
 
 const LIVE_SESSION_SQL: &str = concat!(
     "SELECT s.id::text, s.principal_id::text, ",
     "extract(epoch FROM now() - s.created_at)::bigint, ",
     "extract(epoch FROM s.absolute_expires_at - now())::bigint, ",
-    "s.last_seen_at <= now() - make_interval(secs => $2::bigint) ",
+    "s.last_seen_at <= now() - make_interval(secs => $2::bigint), ",
+    "s.embed_tenant_id::text, s.embed_system_id, s.embed_document_id::text, s.embed_role ",
     "FROM browser_sessions s JOIN principals p ON p.id = s.principal_id ",
     "WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.idle_expires_at > now() ",
     "AND s.absolute_expires_at > now() AND p.state = 'active'"
@@ -213,14 +237,106 @@ pub async fn create_session(pool: &PgPool, principal_id: PrincipalId, limits: Se
     Ok(CreatedSession { id, token, absolute_remaining_secs: limits.absolute_secs })
 }
 
+/// Create a session for `principal_id` that is bound to `binding` (S6-010): it may only reach the
+/// bound document of the bound tenant, at most at the bound role, and ends when the host revokes
+/// it. Both lifetimes are capped at [`MAX_EMBED_SESSION_SECS`].
+pub async fn create_embedded_session(
+    pool: &PgPool,
+    principal_id: PrincipalId,
+    binding: &EmbedBinding,
+    limits: SessionLimits,
+) -> Result<CreatedSession, SessionError> {
+    if !limits.is_valid() || binding.system_id.is_empty() || binding.system_id.len() > 128 {
+        return Err(SessionError::InvalidInput);
+    }
+    let absolute = limits.absolute_secs.min(MAX_EMBED_SESSION_SECS);
+    let idle = limits.idle_secs.min(absolute);
+    let token = random_token().ok_or(SessionError::Random)?;
+    let id = Uuid::new_v4();
+    let inserted = sqlx::query(concat!(
+        "INSERT INTO browser_sessions (id, principal_id, token_hash, idle_expires_at, absolute_expires_at, ",
+        "embed_tenant_id, embed_system_id, embed_document_id, embed_role) ",
+        "SELECT $1::uuid, p.id, $3, now() + make_interval(secs => $4::bigint), now() + make_interval(secs => $5::bigint), ",
+        "$6::uuid, $7, $8::uuid, $9 FROM principals p WHERE p.id = $2::uuid AND p.state = 'active'"
+    ))
+    .bind(id.to_string())
+    .bind(principal_id.to_string())
+    .bind(session_token_hash(&token).to_vec())
+    .bind(idle)
+    .bind(absolute)
+    .bind(binding.tenant_id.to_string())
+    .bind(&binding.system_id)
+    .bind(binding.document_id.to_string())
+    .bind(binding.role.as_str())
+    .execute(pool)
+    .await
+    .map_err(|_| SessionError::Database)?;
+    if inserted.rows_affected() != 1 {
+        return Err(SessionError::InactivePrincipal);
+    }
+    Ok(CreatedSession { id, token, absolute_remaining_secs: absolute })
+}
+
+/// Which embedded sessions of a host to end.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EmbedScope<'a> {
+    /// Every session the host opened.
+    Host,
+    /// Sessions the host opened on one document.
+    Document(Uuid),
+    /// Sessions the host opened for one principal.
+    Principal(&'a Uuid),
+}
+
+/// End the live embedded sessions of host `system_id` in `tenant` that match `scope`, in the
+/// caller's transaction (so the revocation commits with the change that caused it). The relay
+/// notices through its ordinary session check. Returns how many sessions ended.
+pub async fn revoke_embedded_sessions(
+    connection: &mut PgConnection,
+    tenant: TenantId,
+    system_id: &str,
+    scope: EmbedScope<'_>,
+) -> Result<u64, SessionError> {
+    let (document, principal) = match scope {
+        EmbedScope::Host => (None, None),
+        EmbedScope::Document(document) => (Some(document.to_string()), None),
+        EmbedScope::Principal(principal) => (None, Some(principal.to_string())),
+    };
+    let result = sqlx::query(concat!(
+        "UPDATE browser_sessions SET revoked_at = now(), revoke_reason = 'host_revoked' ",
+        "WHERE embed_tenant_id = $1::uuid AND embed_system_id = $2 AND revoked_at IS NULL ",
+        "AND ($3::uuid IS NULL OR embed_document_id = $3::uuid) AND ($4::uuid IS NULL OR principal_id = $4::uuid)"
+    ))
+    .bind(tenant.to_string())
+    .bind(system_id)
+    .bind(document)
+    .bind(principal)
+    .execute(connection)
+    .await
+    .map_err(|_| SessionError::Database)?;
+    Ok(result.rows_affected())
+}
+
 fn parse_row(row: SessionRow) -> Result<(ResolvedSession, bool), SessionError> {
-    let (id, principal_id, age_secs, absolute_remaining_secs, stale) = row;
+    let (id, principal_id, age_secs, absolute_remaining_secs, stale, embed_tenant, embed_system, embed_document, embed_role) = row;
+    // The columns are all set or all null (a table constraint); anything else is a broken row.
+    let embed = match (embed_tenant, embed_system, embed_document, embed_role) {
+        (None, None, None, None) => None,
+        (Some(tenant), Some(system_id), Some(document), Some(role)) => Some(EmbedBinding {
+            tenant_id: tenant.parse().map_err(|_| SessionError::Database)?,
+            system_id,
+            document_id: document.parse().map_err(|_| SessionError::Database)?,
+            role: HostRole::parse(&role).ok_or(SessionError::Database)?,
+        }),
+        _ => return Err(SessionError::Database),
+    };
     Ok((
         ResolvedSession {
             id: id.parse().map_err(|_| SessionError::Database)?,
             principal_id: principal_id.parse().map_err(|_| SessionError::Database)?,
             age_secs: age_secs.max(0),
             absolute_remaining_secs: absolute_remaining_secs.max(0),
+            embed,
         },
         stale,
     ))
@@ -301,9 +417,11 @@ pub async fn rotate_session(pool: &PgPool, token: &str, limits: SessionLimits) -
         .await
         .map_err(|_| SessionError::Database)?;
     sqlx::query(concat!(
-        "INSERT INTO browser_sessions (id, principal_id, token_hash, rotated_from, idle_expires_at, absolute_expires_at) ",
+        "INSERT INTO browser_sessions (id, principal_id, token_hash, rotated_from, idle_expires_at, absolute_expires_at, ",
+        "embed_tenant_id, embed_system_id, embed_document_id, embed_role) ",
         "SELECT $1::uuid, o.principal_id, $2, o.id, ",
-        "least(o.absolute_expires_at, now() + make_interval(secs => $4::bigint)), o.absolute_expires_at ",
+        "least(o.absolute_expires_at, now() + make_interval(secs => $4::bigint)), o.absolute_expires_at, ",
+        "o.embed_tenant_id, o.embed_system_id, o.embed_document_id, o.embed_role ",
         "FROM browser_sessions o WHERE o.id = $3::uuid"
     ))
     .bind(new_id.to_string())
@@ -416,6 +534,49 @@ mod tests {
         let (a, b) = (random_token().unwrap(), random_token().unwrap());
         assert!(well_formed_token(&a) && well_formed_token(&b));
         assert_ne!(a, b);
+    }
+
+    fn row(embed: [Option<&str>; 4]) -> SessionRow {
+        let [tenant, system, document, role] = embed.map(|value| value.map(str::to_owned));
+        (
+            "e1000000-0000-4000-8000-0000000000a1".to_owned(),
+            "e1000000-0000-4000-8000-0000000000a2".to_owned(),
+            5,
+            600,
+            false,
+            tenant,
+            system,
+            document,
+            role,
+        )
+    }
+
+    #[test]
+    fn a_session_row_is_embedded_only_when_its_whole_binding_is_present() {
+        const T: &str = "e1000000-0000-4000-8000-0000000000b1";
+        const D: &str = "e1000000-0000-4000-8000-0000000000b2";
+        let (plain, _) = parse_row(row([None; 4])).unwrap();
+        assert_eq!(plain.embed, None);
+        let (bound, _) = parse_row(row([Some(T), Some("host-a"), Some(D), Some("viewer")])).unwrap();
+        let embed = bound.embed.unwrap();
+        assert_eq!((embed.system_id.as_str(), embed.role), ("host-a", HostRole::Viewer));
+        assert_eq!((embed.tenant_id.to_string(), embed.document_id.to_string()), (T.to_owned(), D.to_owned()));
+        // A half-set binding, an unknown role or a bad id is a broken row, never a plain session.
+        for broken in [
+            [Some(T), None, None, None],
+            [None, Some("host-a"), None, None],
+            [Some(T), Some("host-a"), Some(D), None],
+            [Some(T), Some("host-a"), Some(D), Some("owner")],
+            [Some("nope"), Some("host-a"), Some(D), Some("editor")],
+        ] {
+            assert_eq!(parse_row(row(broken)).unwrap_err(), SessionError::Database, "{broken:?}");
+        }
+    }
+
+    #[test]
+    fn host_revoked_is_a_known_revoke_reason() {
+        assert_eq!(RevokeReason::parse("host_revoked"), Some(RevokeReason::HostRevoked));
+        assert_eq!(RevokeReason::HostRevoked.as_str(), "host_revoked");
     }
 
     #[test]

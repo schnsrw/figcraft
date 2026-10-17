@@ -413,7 +413,13 @@ async fn the_embed_exchange_trades_a_token_once_for_a_session_and_refuses_everyt
     assert_eq!(ok.status, 200, "{}", ok.body);
     assert_eq!((ok.body["role"].as_str(), ok.body["document_id"].as_str()), (Some("editor"), Some(document.to_string().as_str())));
     let cookie = ok.headers.get(header::SET_COOKIE).and_then(|v| v.to_str().ok()).unwrap_or_default();
-    assert!(cookie.contains("figcraft_session"), "{cookie}");
+    assert!(
+        cookie.starts_with("__Host-figcraft_embed=")
+            && cookie.contains("SameSite=None")
+            && cookie.contains("Partitioned")
+            && cookie.contains("HttpOnly"),
+        "{cookie}"
+    );
     assert!(!ok.body.to_string().contains(&token));
 
     // A viewer token narrows the role.
@@ -491,6 +497,115 @@ async fn the_embed_exchange_trades_a_token_once_for_a_session_and_refuses_everyt
         counts.iter().any(|(outcome, n)| outcome == "succeeded" && *n >= 4) && counts.iter().any(|(outcome, n)| outcome == "denied" && *n >= 3),
         "{counts:?}"
     );
+    Ok(())
+}
+
+/// The `name=value` pair of the first `Set-Cookie` of a reply.
+fn session_cookie(reply: &Reply) -> Fallible<String> {
+    let header = reply.headers.get(header::SET_COOKIE).and_then(|value| value.to_str().ok()).ok_or("no cookie")?;
+    Ok(header.split(';').next().ok_or("empty cookie")?.to_owned())
+}
+
+#[tokio::test]
+async fn embedded_sessions_reach_only_their_document_at_most_their_role_and_end_with_the_host() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let world = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let mut documents = Vec::new();
+    for (index, external) in ["doc-1", "doc-2"].into_iter().enumerate() {
+        let create = json!({"external_id": external, "external_project_id": "p1", "name": external});
+        let made =
+            send(&app, "POST", "/host/systems/host-a/documents", Some(&world.all), &extra(&key(&format!("embed-sess-{index:04}"))), Some(&create))
+                .await?;
+        assert_eq!(made.status, 201);
+        let id = CloudDocumentId::try_from(Uuid::parse_str(made.body["id"].as_str().ok_or("id")?)?).map_err(err)?;
+        let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+        set_document_member(&mut t, id, world.member, Role::Editor).await.map_err(err)?;
+        t.commit().await?;
+        documents.push(id);
+    }
+    let (own, other) = (documents[0], documents[1]);
+    let tenant = world.tenant.to_string();
+    let same_origin = [("origin", ORIGIN)];
+    let exchange = |role: &'static str| {
+        let token = sign(&world, &Uuid::new_v4().simple().to_string(), |c| c["role"] = json!(role));
+        let app = app.clone();
+        async move { send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&json!({"token": token}))).await }
+    };
+
+    // A viewer token over a member who holds editor: the embed is held to viewer.
+    let viewer = exchange("viewer").await?;
+    assert_eq!(viewer.status, 200, "{}", viewer.body);
+    let cookie = session_cookie(&viewer)?;
+    let headers = [("cookie", cookie.as_str()), ("x-figcraft-tenant", tenant.as_str()), ("origin", ORIGIN)];
+    let document = send(&app, "GET", &format!("/documents/{own}"), None, &headers, None).await?;
+    assert_eq!(document.status, 200, "{}", document.body);
+    assert_eq!(document.body["can_edit"], false, "a viewer embed cannot edit");
+    let ticket = send(&app, "POST", &format!("/documents/{own}/realtime-ticket"), None, &headers, None).await?;
+    assert_eq!((ticket.status, ticket.body["access"].as_str()), (200, Some("view")));
+
+    // Everything outside the one document and the editor's few routes is refused.
+    for (method, path) in [
+        ("GET", format!("/documents/{other}")),
+        ("POST", format!("/documents/{other}/realtime-ticket")),
+        ("GET", format!("/documents/{own}/members")),
+        ("GET", format!("/documents/{own}/share-links")),
+        ("POST", format!("/documents/{own}/archive")),
+        ("PATCH", format!("/documents/{own}")),
+        ("GET", "/tenants".to_owned()),
+        ("GET", format!("/tenants/{tenant}")),
+    ] {
+        let body = json!({});
+        let reply = send(&app, method, &path, None, &headers, (method != "GET").then_some(&body)).await?;
+        assert_eq!(reply.status, 403, "{method} {path}: {}", reply.body);
+    }
+    // The session is bound to its tenant, whatever the header says.
+    let elsewhere = TenantId::random().to_string();
+    let wrong_tenant = [("cookie", cookie.as_str()), ("x-figcraft-tenant", elsewhere.as_str())];
+    assert_eq!(send(&app, "GET", &format!("/documents/{own}"), None, &wrong_tenant, None).await?.status, 403);
+
+    // An editor token over the same member may edit.
+    let editor = exchange("editor").await?;
+    let editor_cookie = session_cookie(&editor)?;
+    let editor_headers = [("cookie", editor_cookie.as_str()), ("x-figcraft-tenant", tenant.as_str()), ("origin", ORIGIN)];
+    let ticket = send(&app, "POST", &format!("/documents/{own}/realtime-ticket"), None, &editor_headers, None).await?;
+    assert_eq!((ticket.status, ticket.body["access"].as_str()), (200, Some("edit")));
+
+    // Disabling the host ends every session it opened, at once and in the same transaction.
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    assert!(set_host_enabled(&mut t, "host-a", false).await.map_err(err)?);
+    t.commit().await?;
+    for h in [&headers[..], &editor_headers[..]] {
+        assert_eq!(send(&app, "GET", &format!("/documents/{own}"), None, h, None).await?.status, 401);
+    }
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    assert!(set_host_enabled(&mut t, "host-a", true).await.map_err(err)?);
+    t.commit().await?;
+    // Enabling again does not bring a revoked session back.
+    assert_eq!(send(&app, "GET", &format!("/documents/{own}"), None, &headers, None).await?.status, 401);
+
+    // Removing the document mapping ends the sessions on that document, and only those.
+    let first = exchange("editor").await?;
+    let first_cookie = session_cookie(&first)?;
+    let first_headers = [("cookie", first_cookie.as_str()), ("x-figcraft-tenant", tenant.as_str()), ("origin", ORIGIN)];
+    assert_eq!(send(&app, "GET", &format!("/documents/{own}"), None, &first_headers, None).await?.status, 200);
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    assert!(figcraft_cloud_storage::host_mappings::unmap_external_resource(&mut t, "host-a", MappingKind::Document, "doc-1").await.map_err(err)?);
+    t.commit().await?;
+    assert_eq!(send(&app, "GET", &format!("/documents/{own}"), None, &first_headers, None).await?.status, 401);
+
+    // Removing the principal mapping ends that person's sessions.
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    map_external_resource(&mut t, "host-a", MappingKind::Document, "doc-1", own.as_uuid()).await.map_err(err)?;
+    t.commit().await?;
+    let second = exchange("viewer").await?;
+    let second_cookie = session_cookie(&second)?;
+    let second_headers = [("cookie", second_cookie.as_str()), ("x-figcraft-tenant", tenant.as_str()), ("origin", ORIGIN)];
+    assert_eq!(send(&app, "GET", &format!("/documents/{own}"), None, &second_headers, None).await?.status, 200);
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    assert!(figcraft_cloud_storage::host_mappings::unmap_external_resource(&mut t, "host-a", MappingKind::Principal, "u1").await.map_err(err)?);
+    t.commit().await?;
+    assert_eq!(send(&app, "GET", &format!("/documents/{own}"), None, &second_headers, None).await?.status, 401);
     Ok(())
 }
 
@@ -879,7 +994,7 @@ async fn the_embed_exchange_is_rate_limited_per_issuer() -> Fallible<()> {
     }
     assert_eq!(limited, 7, "a burst of 5 is allowed, the other 7 of 12 are throttled");
     // The production limit is a real burst, not a trickle.
-    assert!(super::host_api::EMBED_LIMIT.burst >= 60);
+    const { assert!(super::host_api::EMBED_LIMIT.burst >= 60) };
     Ok(())
 }
 

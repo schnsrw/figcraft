@@ -746,8 +746,9 @@ struct ExchangeBody {
 /// a browser session and the document it opens. Same-origin only (the editor page itself makes the
 /// call, never the host page), rate limited per address by the auth router and per issuer here.
 /// Every refusal is the same `401`; a valid token outside the host's boundary does not say which
-/// part failed. The token is never logged. The granted role is reported, not stored on the
-/// session: the session itself is a normal browser session (see the tracker for that limit).
+/// part failed. The token is never logged. The session is an embedded session (S6-010): bound to this
+/// host, this tenant, this document and the granted role, ended when the host is disabled or
+/// the mapping is removed.
 async fn exchange(State(state): State<AppState>, headers: HeaderMap, ApiJson(body): ApiJson<ExchangeBody>) -> Result<Response, ApiError> {
     let identity = state.identity().ok_or(ApiError::unavailable())?;
     if !identity.same_origin(&headers) {
@@ -769,12 +770,18 @@ async fn exchange(State(state): State<AppState>, headers: HeaderMap, ApiJson(bod
         Err(EmbedError::Unavailable) => return Err(ApiError::unavailable()),
     };
     let principal = PrincipalId::try_from(verified.principal_id).map_err(|_| ApiError::new(ErrorCode::Internal))?;
-    let created = sessions::create_session(state.pool(), principal, identity.limits()).await.map_err(|error| match error {
+    let binding = sessions::EmbedBinding {
+        tenant_id: verified.tenant_id,
+        system_id: verified.system_id.clone(),
+        document_id: verified.document_id,
+        role: verified.role,
+    };
+    let created = sessions::create_embedded_session(state.pool(), principal, &binding, identity.limits()).await.map_err(|error| match error {
         sessions::SessionError::Database | sessions::SessionError::Random => ApiError::unavailable(),
         sessions::SessionError::InactivePrincipal => ApiError::new(ErrorCode::ResourceInactive),
         _ => ApiError::unauthenticated(),
     })?;
-    let cookie = identity.policy().set_cookie(&created.token, created.absolute_remaining_secs).ok_or(ApiError::new(ErrorCode::Internal))?;
+    let cookie = identity.policy().set_embed_cookie(&created.token, created.absolute_remaining_secs).ok_or(ApiError::new(ErrorCode::Internal))?;
     let mut response = json_response(
         StatusCode::OK,
         &json!({

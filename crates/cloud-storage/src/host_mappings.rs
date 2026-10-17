@@ -213,16 +213,35 @@ pub async fn unmap_external_resource(
     kind: MappingKind,
     external_id: &str,
 ) -> Result<bool, HostMappingError> {
-    let result =
-        sqlx::query("DELETE FROM external_mappings WHERE tenant_id = $1::uuid AND system_id = $2 AND resource_kind = $3 AND external_id = $4")
-            .bind(transaction.tenant_id().to_string())
-            .bind(system_id)
-            .bind(kind.as_str())
-            .bind(external_id)
-            .execute(transaction.connection())
+    let removed: Option<(String,)> = sqlx::query_as(
+        "DELETE FROM external_mappings WHERE tenant_id = $1::uuid AND system_id = $2 AND resource_kind = $3 AND external_id = $4 \
+         RETURNING internal_id::text",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(system_id)
+    .bind(kind.as_str())
+    .bind(external_id)
+    .fetch_optional(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    let Some((internal,)) = removed else {
+        return Ok(false);
+    };
+    // What the host no longer maps it can no longer have open: end the embedded sessions that
+    // rested on the mapping, in this transaction (S6-010). Other kinds hold no sessions.
+    let internal: Uuid = internal.parse().map_err(|_| HostMappingError::Database)?;
+    let tenant = transaction.tenant_id();
+    let scope = match kind {
+        MappingKind::Document => Some(crate::sessions::EmbedScope::Document(internal)),
+        MappingKind::Principal => Some(crate::sessions::EmbedScope::Principal(&internal)),
+        _ => None,
+    };
+    if let Some(scope) = scope {
+        crate::sessions::revoke_embedded_sessions(transaction.connection(), tenant, system_id, scope)
             .await
-            .map_err(database_error)?;
-    Ok(result.rows_affected() == 1)
+            .map_err(|_| HostMappingError::Database)?;
+    }
+    Ok(true)
 }
 
 /// The document's latest event sequence in this tenant (`None` when it does not exist).

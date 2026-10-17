@@ -12,6 +12,9 @@ use std::time::Duration;
 
 /// Cookie name.
 pub const COOKIE_NAME: &str = "__Host-figcraft_session";
+/// Cookie name of an embedded session (S6-010). Separate from [`COOKIE_NAME`] so a visitor's own
+/// first-party session and the one a host product's frame opens never replace each other.
+pub const EMBED_COOKIE_NAME: &str = "__Host-figcraft_embed";
 /// Default idle timeout.
 pub const DEFAULT_IDLE: Duration = Duration::from_secs(8 * 60 * 60);
 /// Default absolute lifetime.
@@ -130,6 +133,25 @@ impl SessionPolicy {
         let max_age = u64::try_from(max_age_secs).unwrap_or(0).min(self.absolute.as_secs());
         Some(format!("{COOKIE_NAME}={token}; Max-Age={max_age}; Path=/; Secure; HttpOnly; SameSite=Lax"))
     }
+
+    /// The `Set-Cookie` value for an embedded session (S6-010). The editor runs in a frame on a
+    /// host product's page, so the cookie must be sent in a cross-site frame: `SameSite=None`,
+    /// and `Partitioned` so browsers keep it per embedding site. Everything else matches
+    /// [`Self::set_cookie`]; cross-site writes are still refused by the origin check.
+    #[must_use]
+    pub fn set_embed_cookie(&self, token: &str, max_age_secs: i64) -> Option<String> {
+        if !well_formed_token(token) {
+            return None;
+        }
+        let max_age = u64::try_from(max_age_secs).unwrap_or(0).min(self.absolute.as_secs());
+        Some(format!("{EMBED_COOKIE_NAME}={token}; Max-Age={max_age}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned"))
+    }
+}
+
+/// The `Set-Cookie` value that deletes the embedded-session cookie.
+#[must_use]
+pub fn clear_embed_cookie() -> String {
+    format!("{EMBED_COOKIE_NAME}=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=None; Partitioned")
 }
 
 /// The `Set-Cookie` value that clears the session cookie (logout).
@@ -170,6 +192,17 @@ mod tests {
     use super::*;
 
     const TOKEN: &str = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJ0123-_6";
+
+    #[test]
+    fn the_embed_cookie_is_partitioned_cross_site_and_never_the_ordinary_cookie() {
+        let cookie = SessionPolicy::default().set_embed_cookie(TOKEN, 100).unwrap();
+        assert_eq!(cookie, format!("__Host-figcraft_embed={TOKEN}; Max-Age=100; Path=/; Secure; HttpOnly; SameSite=None; Partitioned"));
+        assert!(!cookie.contains("Domain"));
+        assert_ne!(EMBED_COOKIE_NAME, COOKIE_NAME);
+        assert!(SessionPolicy::default().set_embed_cookie(TOKEN, i64::MAX).unwrap().contains("Max-Age=604800;"));
+        assert!(SessionPolicy::default().set_embed_cookie("bad\r\nSet-Cookie: x=y", 1).is_none());
+        assert_eq!(clear_embed_cookie(), "__Host-figcraft_embed=; Max-Age=0; Path=/; Secure; HttpOnly; SameSite=None; Partitioned");
+    }
 
     #[test]
     fn defaults_are_eight_hours_idle_and_seven_days_absolute() {

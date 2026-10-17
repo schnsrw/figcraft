@@ -36,7 +36,7 @@ use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, header};
 use base64::Engine as _;
-use figcraft_cloud_auth::session_policy::{COOKIE_NAME, SessionPolicy};
+use figcraft_cloud_auth::session_policy::{COOKIE_NAME, EMBED_COOKIE_NAME, SessionPolicy};
 use figcraft_cloud_domain::{CloudDocumentId, DeploymentMode, Permission, PrincipalId, Role, TenantContext, TenantId, Uuid};
 use figcraft_cloud_storage::access_guard::{self, AccessGuardError, HeldCredential, MembershipRequirement};
 use figcraft_cloud_storage::effective_roles::{TenantAccess, resolve_tenant_access};
@@ -347,6 +347,28 @@ pub(crate) fn selected_tenant(identity: &IdentityConfig, path: &str, headers: &H
     }
 }
 
+/// The routes an embedded session may call on its own document: read it, mint a realtime ticket
+/// and fetch the collaboration invite. Everything else (members, sharing, rename, archive,
+/// export, other documents, account routes) is refused.
+pub(crate) fn embed_route_allowed(method: &Method, path: &str, document: CloudDocumentId) -> bool {
+    let mut segments = path.split('/').filter(|segment| !segment.is_empty()).take(8).peekable();
+    // The router may or may not have stripped the API prefix.
+    if segments.peek() == Some(&"api") {
+        segments.next();
+        if segments.next() != Some("v1") {
+            return false;
+        }
+    }
+    if segments.next() != Some("documents") {
+        return false;
+    }
+    let (Some(id), rest) = (segments.next(), segments.next()) else { return false };
+    if id != document.to_string() || segments.next().is_some() {
+        return false;
+    }
+    matches!((method, rest), (&Method::GET, None) | (&Method::POST, Some("realtime-ticket")) | (&Method::GET, Some("collab-link")))
+}
+
 /// The segment after the first `/{collection}/` in `path`, if any.
 fn path_resource<'a>(path: &'a str, collection: &str) -> Option<&'a str> {
     let mut segments = path.split('/').take(32);
@@ -393,14 +415,28 @@ impl CredentialAuthenticator {
     pub(crate) async fn identify(&self, method: &Method, headers: &HeaderMap) -> Result<Caller, AuthRejection> {
         if let Some(token) = cookie(headers, COOKIE_NAME) {
             match sessions::resolve_session(&self.pool, token, self.identity.limits()).await {
-                Ok(session) => {
+                // An embedded session is only valid in its own cookie.
+                Ok(session) if session.embed.is_none() => {
+                    if is_unsafe(method) && !self.identity.same_origin(headers) {
+                        return Err(AuthRejection::Forbidden);
+                    }
+                    return Ok(Caller::Browser(session));
+                }
+                Ok(_) | Err(SessionError::Refused | SessionError::InvalidInput) => {}
+                Err(SessionError::Database) => return Err(AuthRejection::Unavailable),
+                Err(_) => {}
+            }
+        }
+        if let Some(token) = cookie(headers, EMBED_COOKIE_NAME) {
+            match sessions::resolve_session(&self.pool, token, self.identity.limits()).await {
+                Ok(session) if session.embed.is_some() => {
                     if is_unsafe(method) && !self.identity.same_origin(headers) {
                         return Err(AuthRejection::Forbidden);
                     }
                     return Ok(Caller::Browser(session));
                 }
                 Err(SessionError::Database) => return Err(AuthRejection::Unavailable),
-                Err(_) => {}
+                _ => {}
             }
         }
         if let Some(authorization) = headers.get(header::AUTHORIZATION) {
@@ -445,13 +481,25 @@ impl CredentialAuthenticator {
         let selected = selected_tenant(&self.identity, request.path, request.headers)?;
         match caller {
             Caller::Browser(session) => {
+                let grant = match &session.embed {
+                    None => Grant::Member,
+                    Some(embed) => {
+                        // An embedded session is held to its tenant, its one document and the
+                        // few routes the editor needs (S6-010).
+                        let document = CloudDocumentId::try_from(embed.document_id).map_err(|_| AuthRejection::Forbidden)?;
+                        if selected != Some(embed.tenant_id) || !embed_route_allowed(request.method, request.path, document) {
+                            return Err(AuthRejection::Forbidden);
+                        }
+                        Grant::Embed { document_id: document, role: embed.role }
+                    }
+                };
                 let tenant = selected.ok_or(AuthRejection::Forbidden)?;
                 let context = self.member(tenant, session.principal_id).await?;
                 Ok(Authenticated {
                     principal: session.principal_id,
                     tenant: context,
                     session: SessionInfo { kind: CredentialKind::BrowserSession, id: session.id.to_string() },
-                    grant: Grant::Member,
+                    grant,
                     mutating: false,
                 })
             }
@@ -593,6 +641,8 @@ impl FromRequestParts<AppState> for SignedIn {
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, Self::Rejection> {
         let authenticator = state.credential_authenticator().ok_or(ApiError::unauthenticated())?;
         match authenticator.identify(&parts.method, &parts.headers).await.map_err(ApiError::from)? {
+            // An embedded session reaches its document only, never the account-level routes.
+            Caller::Browser(session) if session.embed.is_some() => Err(ApiError::forbidden()),
             Caller::Browser(session) => Ok(Self {
                 principal: session.principal_id,
                 session: SessionInfo { kind: CredentialKind::BrowserSession, id: session.id.to_string() },
@@ -699,6 +749,32 @@ mod tests {
         assert_eq!(other.open_share_cookie(&value), None);
         for junk in ["", ".", "v1", "a.b.c.d.e.f.g", &"x".repeat(10_000)] {
             assert_eq!(identity.open_share_cookie(junk), None);
+        }
+    }
+
+    #[test]
+    fn embedded_sessions_reach_only_their_documents_editor_routes() {
+        let own = CloudDocumentId::random();
+        let other = CloudDocumentId::random();
+        let ok = |method: &Method, path: String| embed_route_allowed(method, &path, own);
+        assert!(ok(&Method::GET, format!("/api/v1/documents/{own}")));
+        assert!(ok(&Method::POST, format!("/api/v1/documents/{own}/realtime-ticket")));
+        assert!(ok(&Method::GET, format!("/api/v1/documents/{own}/collab-link")));
+        for (method, path) in [
+            (Method::GET, format!("/api/v1/documents/{other}")),
+            (Method::GET, format!("/api/v1/documents/{own}/members")),
+            (Method::POST, format!("/api/v1/documents/{own}/archive")),
+            (Method::PATCH, format!("/api/v1/documents/{own}")),
+            (Method::DELETE, format!("/api/v1/documents/{own}")),
+            (Method::GET, format!("/api/v1/documents/{own}/realtime-ticket")),
+            (Method::POST, format!("/api/v1/documents/{own}/realtime-ticket/extra")),
+            (Method::GET, format!("/api/v1/documents/{own}/share-links")),
+            (Method::GET, "/api/v1/documents".to_owned()),
+            (Method::GET, "/api/v1/tenants".to_owned()),
+            (Method::GET, format!("/api/v1/projects/{own}")),
+            (Method::GET, format!("/api/v1/documents/{own}%2e%2e")),
+        ] {
+            assert!(!ok(&method, path.clone()), "{method} {path}");
         }
     }
 

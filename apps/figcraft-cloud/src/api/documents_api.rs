@@ -52,6 +52,7 @@ use figcraft_cloud_storage::audit::{RepositoryError as AuditError, record_audit_
 use figcraft_cloud_storage::effective_roles::{
     ResourceAccess, TenantAccess, resolve_document_access, resolve_project_access, resolve_tenant_access, resolve_workspace_access,
 };
+use figcraft_cloud_storage::host_systems::HostRole;
 use figcraft_cloud_storage::memberships::{
     MembershipError, list_workspace_team_grants, parse_role, remove_document_member, remove_document_team_grant, remove_workspace_member, role_str,
     set_document_member, set_document_team_grant, set_workspace_member,
@@ -71,7 +72,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::AppState;
-use super::auth::{Authenticated, CredentialKind};
+use super::auth::{Authenticated, CredentialKind, Grant};
 use super::authenticator::hold_caller_access;
 use super::cursor::{CursorScope, ListQuery, PageRequest, Position, invalid_cursor};
 use super::error::{ApiError, ApiJson, authorize_resource};
@@ -353,6 +354,36 @@ async fn project_access(transaction: &mut TenantTransaction<'_>, caller: &Authen
     Ok(id)
 }
 
+/// An embedded session never holds more than the role its host's token granted (S6-010): the
+/// member's own role is lowered to that cap, whatever the member could do outside the embed.
+fn cap_embedded(caller: &Authenticated, mut access: ResourceAccess) -> ResourceAccess {
+    if let Grant::Embed { role, .. } = &caller.grant {
+        let cap = match role {
+            HostRole::Viewer => Role::Viewer,
+            HostRole::Commenter => Role::Commenter,
+            HostRole::Editor => Role::Editor,
+        };
+        access.role = access.role.map(|own| if rank(own) > rank(cap) { cap } else { own });
+        // Tenant-level roles also grant resource actions; the embed must not use them.
+        access.tenant.tenant_role = access.tenant.tenant_role.map(|own| if rank(own) > rank(cap) { cap } else { own });
+        access.tenant.permissions.clear();
+    }
+    access
+}
+
+/// Strength of a role, higher is stronger.
+const fn rank(role: Role) -> u8 {
+    match role {
+        Role::TenantOwner => 6,
+        Role::TenantAdmin => 5,
+        Role::TeamManager => 4,
+        Role::WorkspaceAdmin => 3,
+        Role::Editor => 2,
+        Role::Commenter => 1,
+        Role::Viewer => 0,
+    }
+}
+
 async fn document_access(
     transaction: &mut TenantTransaction<'_>,
     caller: &Authenticated,
@@ -361,6 +392,7 @@ async fn document_access(
 ) -> Result<(CloudDocumentId, ResourceAccess), ApiError> {
     let id: CloudDocumentId = id.parse().map_err(|_| ApiError::not_found())?;
     let access = resolve_document_access(transaction, caller.principal, id).await.map_err(membership_error)?;
+    let access = access.map(|access| cap_embedded(caller, access));
     Ok((id, check(access, Kind::Document, action)?))
 }
 

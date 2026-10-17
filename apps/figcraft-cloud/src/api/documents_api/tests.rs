@@ -839,3 +839,47 @@ async fn realtime_tickets_carry_the_callers_access_for_that_document_only() -> T
     assert_eq!(status, StatusCode::FORBIDDEN);
     Ok(())
 }
+
+/// S6-010: an embedded session never holds more than its token's role, whatever the member is.
+#[test]
+fn an_embedded_session_is_capped_at_its_tokens_role_and_loses_explicit_permissions() {
+    use super::{allows, cap_embedded};
+    use crate::api::auth::Grant;
+    use figcraft_cloud_storage::host_systems::HostRole;
+    use figcraft_cloud_storage::memberships::MemberPermission;
+
+    let mut embedded = caller(TENANT, EDITOR);
+    let strong = || {
+        let mut strong = access(ResourceState::Active, Some(Role::WorkspaceAdmin));
+        strong.tenant = TenantAccess { permissions: vec![MemberPermission::Billing], ..tenant_access(Some(Role::TenantOwner)) };
+        strong
+    };
+    // An ordinary member is untouched.
+    let untouched = cap_embedded(&embedded, strong());
+    assert_eq!((untouched.role, untouched.tenant.tenant_role), (Some(Role::WorkspaceAdmin), Some(Role::TenantOwner)));
+    assert_eq!(untouched.tenant.permissions.len(), 1);
+
+    let cases = [
+        (HostRole::Viewer, Role::Viewer, false, false),
+        (HostRole::Commenter, Role::Commenter, false, false),
+        // Editors may share by policy; an embedded session never reaches the share routes at all
+        // (the authenticator's route allowlist), so the cap only has to keep it from going higher.
+        (HostRole::Editor, Role::Editor, true, true),
+    ];
+    for (host, expected, can_edit, can_share) in cases {
+        embedded.grant = Grant::Embed { document_id: CloudDocumentId::random(), role: host };
+        let capped = cap_embedded(&embedded, strong());
+        assert_eq!((capped.role, capped.tenant.tenant_role), (Some(expected), Some(expected)), "{host:?}");
+        assert!(capped.tenant.permissions.is_empty(), "{host:?}");
+        assert_eq!(allows(&capped, Kind::Document, Action::DocumentEdit), can_edit, "{host:?}");
+        assert_eq!(allows(&capped, Kind::Document, Action::DocumentShare), can_share, "{host:?}");
+        assert!(allows(&capped, Kind::Document, Action::DocumentView), "{host:?}");
+    }
+
+    // A member who holds less than the cap keeps what they hold; no access stays no access.
+    embedded.grant = Grant::Embed { document_id: CloudDocumentId::random(), role: HostRole::Editor };
+    let weak = cap_embedded(&embedded, access(ResourceState::Active, Some(Role::Viewer)));
+    assert_eq!(weak.role, Some(Role::Viewer));
+    let none = cap_embedded(&embedded, access(ResourceState::Active, None));
+    assert_eq!(none.role, None);
+}

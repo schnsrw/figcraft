@@ -319,6 +319,13 @@ pub async fn set_host_enabled(transaction: &mut TenantTransaction<'_>, system_id
         .execute(transaction.connection())
         .await
         .map_err(database_error)?;
+    // A disabled host's embedded sessions end with it, in the same transaction (S6-010).
+    if !enabled && result.rows_affected() == 1 {
+        let tenant = transaction.tenant_id();
+        crate::sessions::revoke_embedded_sessions(transaction.connection(), tenant, system_id, crate::sessions::EmbedScope::Host)
+            .await
+            .map_err(|_| HostSystemError::Database)?;
+    }
     Ok(result.rows_affected() == 1)
 }
 

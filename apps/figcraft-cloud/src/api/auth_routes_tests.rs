@@ -136,6 +136,7 @@ async fn whoami(caller: Authenticated) -> Json<Value> {
         Grant::Member => ("member", Vec::new(), None),
         Grant::ServiceAccount { scopes } => ("service_account", scopes.iter().map(|scope| scope.as_str()).collect(), None),
         Grant::Share { document_id, .. } => ("share", Vec::new(), Some(document_id.to_string())),
+        Grant::Embed { document_id, .. } => ("embed", Vec::new(), Some(document_id.to_string())),
     };
     Json(json!({
         "principal": caller.principal.to_string(),

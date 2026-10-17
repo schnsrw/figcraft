@@ -151,6 +151,9 @@ pub async fn authorize_session_in_tenant(
         SessionError::Database => RevocationError::Database,
         _ => RevocationError::Refused,
     })?;
+    if session.embed.as_ref().is_some_and(|embed| embed.tenant_id != tenant) {
+        return Err(RevocationError::Refused);
+    }
     let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| RevocationError::Database)?;
     let access = resolve_tenant_access(&mut transaction, session.principal_id).await.map_err(|_| RevocationError::Database)?;
     transaction.rollback().await.map_err(|_| RevocationError::Database)?;
@@ -210,7 +213,14 @@ pub async fn admit_member(
     let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| RevocationError::Database)?;
     let access = resolve_document_access(&mut transaction, session.principal_id, document).await.map_err(|_| RevocationError::Database)?;
     transaction.rollback().await.map_err(|_| RevocationError::Database)?;
-    let edit = access.as_ref().and_then(realtime_access).ok_or(RevocationError::Refused)?;
+    let mut edit = access.as_ref().and_then(realtime_access).ok_or(RevocationError::Refused)?;
+    // An embedded session reaches only the document and role its host's token granted (S6-010).
+    if let Some(embed) = &session.embed {
+        if embed.tenant_id != tenant || embed.document_id.to_string() != document.to_string() {
+            return Err(RevocationError::Refused);
+        }
+        edit = edit && embed.role == crate::host_systems::HostRole::Editor;
+    }
     Ok(MemberAdmission { tenant, document, principal: session.principal_id, session: session.id, edit })
 }
 

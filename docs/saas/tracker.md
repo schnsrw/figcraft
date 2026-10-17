@@ -2470,6 +2470,7 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 - [ ] **S6-008** Define and implement ready, dirty, save, export, close and fatal-state messages.
 - [ ] **S6-009** Configure CSP, frame ancestors, cookies and CORS per registered host.
 - [ ] **S6-010** Close embedded sessions when the host mapping or membership is revoked.
+  Progress (2026-10-18, not complete): embedded sessions exist. Migration `20261018000022_embedded_sessions.sql` adds `embed_*` columns and the `host_revoked` reason to `browser_sessions` (schema pin bumped); the exchange now opens a session bound to host, tenant, document and role in its own cookie `__Host-figcraft_embed` (`SameSite=None; Partitioned`, 8 h at most). The authenticator holds it to its document and three routes (read, realtime ticket, collab link), `documents_api::cap_embedded` caps the role and drops explicit permissions, relay member admission refuses another tenant or document and caps edit, and disabling a host or removing a document or principal mapping revokes the matching sessions in the same transaction. Unit tests (no database): route allowlist, role cap, session-row binding parsing, cookie format, revoke reason. Written but not yet run: the live test `embedded_sessions_reach_only_their_document_at_most_their_role_and_end_with_the_host` in `host_api_tests.rs` (needs the dev database). Not done: that live evidence, a relay-level test that an open room closes on host disable, logout/close route for embed sessions, S6-009 headers.
 
 ### API and webhooks
 

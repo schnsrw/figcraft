@@ -15,7 +15,7 @@ use std::ffi::OsString;
 use std::process::ExitCode;
 
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 20261017000007;
-const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 20261018000021;
+const MAX_SUPPORTED_SCHEMA_VERSION: i64 = 20261018000022;
 
 #[derive(Debug, Eq, PartialEq)]
 enum Arguments {
