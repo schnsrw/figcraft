@@ -110,7 +110,7 @@ pub(crate) fn display_name(name: &str) -> Option<&str> {
     ((1..=MAX_NAME_CHARS).contains(&count) && !name.chars().any(char::is_control)).then_some(name)
 }
 
-fn valid_region(region: &str) -> bool {
+pub(crate) fn valid_region(region: &str) -> bool {
     !region.is_empty() && region.len() <= MAX_REGION_CHARS && region.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 

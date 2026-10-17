@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (13/57) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (14/57) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 13 / 57 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 14 / 57 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2588,11 +2588,26 @@ holds projects. The platform API calls the company `workspace` in its paths and 
 
 #### Block A: Platform layer
 
-- [ ] **S6-044** Platform realm storage: platform admins live in their own tables (not principals,
+- [x] **S6-044** Platform realm storage: platform admins live in their own tables (not principals,
   not tenant members), platform sessions, a platform audit log and the workspace-lifecycle data,
   protected by forced row-level security that opens only inside a platform transaction (a workspace
   transaction can never read or write them) plus a SECURITY DEFINER read of workspace metadata only
   (never content). Depends on S4-014.
+  Evidence: migration `20261018000020_platform_realm.sql` (schema pin bumped in the same commit):
+  `platform_admins`, `platform_sessions`, `platform_bootstrap`, append-only `platform_audit_events`
+  (runtime role has SELECT and INSERT only) with forced RLS on `figcraft.platform_scope`, definer
+  functions `figcraft_platform_workspaces` and `figcraft_platform_workspace` (metadata columns and an
+  active-member count; they refuse callers outside a platform transaction), plus
+  `workspace_owner_invitations` (tenant RLS) used by S6-046. `crates/cloud-storage/src/platform.rs`
+  (`begin_platform_transaction`, audit append and keyset listing, workspace listing and read).
+  Live tests `crates/cloud-storage/tests/platform_realm.rs` (3): a workspace transaction and a bare
+  pool see zero platform rows and cannot write them nor call the definer functions; a platform
+  transaction sees zero rows of `tenants`, `workspaces` and `documents` yet lists and reads
+  workspace metadata with paging and state and slug filters; the audit log pages newest first with
+  filters and refuses UPDATE and DELETE. `row_level_security.rs` now excludes `platform_*` from the
+  tenant-table inventory. Design and limits in `security.md` ("Platform realm"). Not done: one
+  database role serves both realms (the separation is RLS plus a single code path, documented); a
+  second role is S8 hardening.
 - [ ] **S6-045** Platform admin identity: first admin bootstrapped from the CLI with a one-time token
   (like `--print-bootstrap-token`), password through the Argon2id module of S6-033, mandatory
   TOTP-ready second factor, separate session cookie name, path and shorter lifetime, separate rate
@@ -2908,3 +2923,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-021 and part of S6-020: the browser workspace. Typed API client and session states, stable routes with deep links through sign-in, first-run (setup token) and sign-in problem screens, workspace home with files, people, invitations and a share dialog; additive `can` summaries on workspace, project and document reads. First TypeScript tests with jsdom and Testing Library (96). S6-020 stays open (libraries, search, notifications, settings). |
 | 2026-10-18 | S6-032: local credentials table (tenant-scoped, forced RLS, unique login per tenant, PHC hash with parameters, lockout counters) and its repository (schema 20261018000014). S6 reaches 12/57. |
 | 2026-10-18 | S6-033: Argon2id password hashing module, policy and bounded hashing service (decision record password-hashing-decision.md). S6 reaches 13/57. |
+| 2026-10-18 | S6-044: platform realm tables with their own row-level-security scope, append-only platform audit log and metadata-only workspace reads (schema 20261018000020). S6 reaches 14/57. |

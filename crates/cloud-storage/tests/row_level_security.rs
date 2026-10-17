@@ -77,11 +77,13 @@ async fn pool() -> Result<Option<PgPool>, Box<dyn std::error::Error>> {
     Ok(Some(pool))
 }
 
-/// Every table carrying forced row-level security, from the catalog.
+/// Every tenant-owned table carrying forced row-level security, from the catalog. The platform
+/// realm's tables (`platform_*`, S6-044) have their own scope and their own test
+/// (`platform_realm.rs`); `platform_audit_events.tenant_id` only names the workspace an event is about.
 async fn protected_tables(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar(
         "SELECT c.relname::text FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') \
-         AND c.relrowsecurity AND c.relforcerowsecurity ORDER BY 1",
+         AND c.relrowsecurity AND c.relforcerowsecurity AND c.relname NOT LIKE 'platform\\_%' ORDER BY 1",
     )
     .fetch_all(pool)
     .await
@@ -100,7 +102,7 @@ async fn tenant_tables_hide_every_row_outside_a_tenant_transaction_and_other_ten
     // Every tenant-owned table: a tenant_id column, plus tenants itself.
     let expected: Vec<String> = sqlx::query_scalar(
         "SELECT c.relname::text FROM pg_class c WHERE c.relnamespace = 'public'::regnamespace AND c.relkind IN ('r', 'p') \
-         AND c.relname <> 'tenant_context_probe' \
+         AND c.relname <> 'tenant_context_probe' AND c.relname NOT LIKE 'platform\\_%' \
          AND (c.relname = 'tenants' OR EXISTS (SELECT 1 FROM pg_attribute a WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)) \
          ORDER BY 1",
     )

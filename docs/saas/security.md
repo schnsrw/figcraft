@@ -37,6 +37,39 @@
 - Test every resource route with a valid identifier from another tenant.
 - Separate operator capabilities from tenant administrator roles.
 
+## Platform realm (S6-044)
+
+The deployment has four levels: platform, workspace (the `tenants` table), team, project. The
+platform level is a separate realm, not a super-tenant.
+
+- **Platform admins are not workspace users.** They live in `platform_admins` (own login, Argon2id
+  password hash, sealed TOTP secret, lockout counters), have no `principals` row and no membership
+  in any workspace, and sign in only at `/platform/v1`. Their sessions (`platform_sessions`) use a
+  different cookie name and path, shorter lifetimes (15 minutes idle, 4 hours absolute) and
+  separate rate limits. A workspace session cannot authenticate a platform request and a platform
+  session cannot authenticate a workspace request (tested both ways).
+- **Platform tables are unreachable from a workspace transaction.** `platform_admins`,
+  `platform_sessions`, `platform_bootstrap` and `platform_audit_events` have no tenant column and
+  carry forced row-level security that opens only while `figcraft.platform_scope` is `on` in the
+  transaction. Only `begin_platform_transaction` sets it, and it never sets the tenant context, so
+  a platform transaction reads zero rows of any workspace table. `platform_audit_events` is
+  append-only for the runtime role (no UPDATE or DELETE grant).
+- **The platform sees workspace metadata only.** Listing and reading workspaces go through two
+  SECURITY DEFINER functions that refuse callers outside a platform transaction and return the
+  `tenants` metadata columns plus an active-member count. Suspending, restoring and archiving run
+  through the workspace's own audited lifecycle functions. The platform cannot read documents,
+  files, names of members, comments or workspace audit content.
+- **What this does not defend against.** One database role serves both realms; the separation is
+  row-level security plus a single code path. Code that runs in the cloud process and sets the
+  platform scope itself would bypass it, so the setting is written in exactly one function and
+  reviewed as such. A second database role with grants only on the platform tables is the stronger
+  option and is recorded as future hardening (S8).
+- **Bootstrap.** The first admin is created with a one-time token printed by the CLI
+  (`--print-platform-bootstrap-token`), valid for a short time, hashed at rest, spent atomically.
+  After that, admins are created by existing admins.
+- **Every platform action is audited** in `platform_audit_events` (actor, action, workspace,
+  outcome, request id), including refused sign-ins, with no secrets in the metadata.
+
 ## Authentication controls
 
 - OIDC signature, issuer, audience, nonce, state and time claims are mandatory.
