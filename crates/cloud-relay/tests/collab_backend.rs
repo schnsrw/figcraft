@@ -1,7 +1,9 @@
 //! The cloud collaboration backend end to end against the dev PostgreSQL and S3 (fixture prefix
 //! b1; skipped without FIGCRAFT_TEST_DATABASE_URL_FILE and FIGCRAFT_TEST_S3_DIR): share-link
 //! admission, a client joining through the real hub over loopback, durability before
-//! confirmation, recovery after a restart, and a fenced commit closing the document unconfirmed.
+//! confirmation, recovery after a restart, and a fenced commit closing the document unconfirmed;
+//! and (fixture prefix c6, S4-017) a revoked link or archived document disconnecting a live client
+//! within a bounded time, with a new hello refused.
 //!
 //! The tests are synchronous: the backend owns its own runtime, and fixtures use another one.
 #![allow(clippy::unwrap_used, clippy::panic)]
@@ -10,29 +12,50 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::Duration;
 
 use figcraft_cloud_domain::{CloudDocumentId, ProjectId, TenantId, WorkspaceId};
-use figcraft_cloud_relay::collab_backend::{CloudBackend, CloudBackendConfig, REFUSED};
+use figcraft_cloud_relay::collab_backend::{CloudBackend, CloudBackendConfig, REFUSED, RevocationSweeper};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::events::{claim_sequencer, read_events};
-use figcraft_cloud_storage::metadata::create_document;
+use figcraft_cloud_storage::metadata::{archive_document, create_document};
 use figcraft_cloud_storage::objects::ObjectStoreSettings;
 use figcraft_cloud_storage::share_links::{ShareRole, create_share_link, revoke_share_link};
 use figcraft_collab::message::{self, Access, CatchUp, ClientMsg, ServerMsg};
 use figcraft_collab::{Change, Client, Json, NodeId, Prop};
 use figcraft_collab_net::NetLimits;
-use figcraft_collab_net::hub::{Backend, Hosting};
+use figcraft_collab_net::hub::{Backend, Hosting, STOPPED};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use tungstenite::protocol::WebSocket;
 use tungstenite::{Bytes, Message};
 
-const TENANT: &str = "b1000000-0000-4000-8000-000000000021";
-const ACTOR: &str = "b1000000-0000-4000-8000-000000000029";
-const WORKSPACE: &str = "b1100000-0000-4000-8000-000000000021";
-const PROJECT: &str = "b1200000-0000-4000-8000-000000000021";
+/// One test group's fixture rows (each group keeps to its own UUID prefix).
+struct Ids {
+    tenant: &'static str,
+    actor: &'static str,
+    workspace: &'static str,
+    project: &'static str,
+    slug: &'static str,
+}
+
+const B1: Ids = Ids {
+    tenant: "b1000000-0000-4000-8000-000000000021",
+    actor: "b1000000-0000-4000-8000-000000000029",
+    workspace: "b1100000-0000-4000-8000-000000000021",
+    project: "b1200000-0000-4000-8000-000000000021",
+    slug: "b1-relay",
+};
+/// S4-017 revocation (fixture prefix c6).
+const C6: Ids = Ids {
+    tenant: "c6000000-0000-4000-8000-000000000031",
+    actor: "c6000000-0000-4000-8000-000000000039",
+    workspace: "c6100000-0000-4000-8000-000000000031",
+    project: "c6200000-0000-4000-8000-000000000031",
+    slug: "c6-relay",
+};
 const WAIT: Duration = Duration::from_secs(20);
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 struct Fixture {
+    ids: &'static Ids,
     runtime: tokio::runtime::Runtime,
     pool: PgPool,
     database_url: String,
@@ -41,6 +64,10 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Result<Option<Self>, Box<dyn std::error::Error>> {
+        Self::with(&B1)
+    }
+
+    fn with(ids: &'static Ids) -> Result<Option<Self>, Box<dyn std::error::Error>> {
         let (Ok(database_url_file), Ok(s3_directory)) = (std::env::var("FIGCRAFT_TEST_DATABASE_URL_FILE"), std::env::var("FIGCRAFT_TEST_S3_DIR"))
         else {
             eprintln!("FIGCRAFT_TEST_DATABASE_URL_FILE or FIGCRAFT_TEST_S3_DIR is unset; cloud collaboration backend probe skipped");
@@ -61,33 +88,39 @@ impl Fixture {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let pool = runtime.block_on(async {
             let pool = PgPoolOptions::new().max_connections(2).connect(&database_url).await?;
-            let mut transaction = begin_tenant_transaction(&pool, TENANT.parse()?).await.map_err(|error| format!("{error:?}"))?;
+            let mut transaction = begin_tenant_transaction(&pool, ids.tenant.parse()?).await.map_err(|error| format!("{error:?}"))?;
             let statements = [
-                "INSERT INTO principals (id, kind, display_name) VALUES ($2::uuid, 'user', 'b1 relay probe') ON CONFLICT DO NOTHING",
-                "INSERT INTO tenants (id, slug, name, plan_id, home_region) VALUES ($1::uuid, 'b1-relay', 'b1 relay', 'test', 'local') ON CONFLICT DO NOTHING",
-                "INSERT INTO workspaces (id, tenant_id, name) VALUES ($3::uuid, $1::uuid, 'b1 relay') ON CONFLICT DO NOTHING",
-                "INSERT INTO projects (id, tenant_id, workspace_id, name) VALUES ($4::uuid, $1::uuid, $3::uuid, 'b1 relay') ON CONFLICT DO NOTHING",
+                "INSERT INTO principals (id, kind, display_name) VALUES ($2::uuid, 'user', 'relay probe') ON CONFLICT DO NOTHING",
+                "INSERT INTO tenants (id, slug, name, plan_id, home_region) VALUES ($1::uuid, $5, 'relay probe', 'test', 'local') ON CONFLICT DO NOTHING",
+                "INSERT INTO workspaces (id, tenant_id, name) VALUES ($3::uuid, $1::uuid, 'relay probe') ON CONFLICT DO NOTHING",
+                "INSERT INTO projects (id, tenant_id, workspace_id, name) VALUES ($4::uuid, $1::uuid, $3::uuid, 'relay probe') ON CONFLICT DO NOTHING",
             ];
             for statement in statements {
-                sqlx::query(statement).bind(TENANT).bind(ACTOR).bind(WORKSPACE).bind(PROJECT).execute(transaction.connection()).await?;
+                sqlx::query(statement)
+                    .bind(ids.tenant)
+                    .bind(ids.actor)
+                    .bind(ids.workspace)
+                    .bind(ids.project)
+                    .bind(ids.slug)
+                    .execute(transaction.connection()).await?;
             }
             transaction.commit().await?;
             Ok::<_, Box<dyn std::error::Error>>(pool)
         })?;
-        Ok(Some(Self { runtime, pool, database_url, objects }))
+        Ok(Some(Self { ids, runtime, pool, database_url, objects }))
     }
 
-    fn tenant() -> TenantId {
-        TENANT.parse().unwrap()
+    fn tenant(&self) -> TenantId {
+        self.ids.tenant.parse().unwrap()
     }
 
     fn document(&self) -> CloudDocumentId {
         self.runtime.block_on(async {
-            let mut transaction = begin_tenant_transaction(&self.pool, Self::tenant()).await.unwrap();
+            let mut transaction = begin_tenant_transaction(&self.pool, self.tenant()).await.unwrap();
             let id = CloudDocumentId::random();
-            let workspace: WorkspaceId = WORKSPACE.parse().unwrap();
-            let project: ProjectId = PROJECT.parse().unwrap();
-            create_document(&mut transaction, id, workspace, project, "b1 relay doc").await.unwrap();
+            let workspace: WorkspaceId = self.ids.workspace.parse().unwrap();
+            let project: ProjectId = self.ids.project.parse().unwrap();
+            create_document(&mut transaction, id, workspace, project, "relay probe doc").await.unwrap();
             transaction.commit().await.unwrap();
             id
         })
@@ -96,17 +129,31 @@ impl Fixture {
     /// A link to `document`: its id and secret.
     fn link(&self, document: CloudDocumentId, role: ShareRole, expires_in: Option<u64>) -> (figcraft_cloud_domain::Uuid, String) {
         self.runtime.block_on(async {
-            let mut transaction = begin_tenant_transaction(&self.pool, Self::tenant()).await.unwrap();
-            let link = create_share_link(&mut transaction, document, role, None, ACTOR.parse().unwrap(), expires_in).await.unwrap();
+            let mut transaction = begin_tenant_transaction(&self.pool, self.tenant()).await.unwrap();
+            let link = create_share_link(&mut transaction, document, role, None, self.ids.actor.parse().unwrap(), expires_in).await.unwrap();
             transaction.commit().await.unwrap();
             (link.id, link.secret)
         })
     }
 
-    fn backend(&self) -> CloudBackend {
+    fn config(&self) -> CloudBackendConfig {
         let mut config = CloudBackendConfig::new(self.database_url.clone(), self.objects.clone());
         config.max_connections = 2;
-        CloudBackend::connect(&config).unwrap()
+        config
+    }
+
+    fn backend(&self) -> CloudBackend {
+        CloudBackend::connect(&self.config()).unwrap()
+    }
+
+    /// A hub with a revocation sweeper re-checking its links every `interval`.
+    fn serve_swept(&self, interval: Duration) -> (Hosting, RevocationSweeper) {
+        let backend = self.backend();
+        let watch = backend.revocation_watch();
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let hosting = Hosting::serve(listener, backend, NetLimits { hello_timeout: Duration::from_secs(5), ..NetLimits::default() }).unwrap();
+        let sweeper = RevocationSweeper::start(&self.config(), watch, hosting.addr(), interval).unwrap();
+        (hosting, sweeper)
     }
 
     fn serve(&self) -> Hosting {
@@ -117,7 +164,7 @@ impl Fixture {
     /// The committed sequence and the events' sequences.
     fn events(&self, document: CloudDocumentId) -> (i64, Vec<i64>) {
         self.runtime.block_on(async {
-            let mut transaction = begin_tenant_transaction(&self.pool, Self::tenant()).await.unwrap();
+            let mut transaction = begin_tenant_transaction(&self.pool, self.tenant()).await.unwrap();
             let page = read_events(&mut transaction, document, 0, 100, 1 << 20).await.unwrap();
             transaction.rollback().await.unwrap();
             (page.current_seq, page.events.iter().map(|event| event.seq).collect())
@@ -221,7 +268,7 @@ fn share_links_admit_with_their_role_and_refuse_everything_else_alike() -> TestR
     let (revoked_id, revoked) = fixture.link(document, ShareRole::Editor, None);
     let (expired_id, expired) = fixture.link(document, ShareRole::Editor, Some(3600));
     fixture.runtime.block_on(async {
-        let mut transaction = begin_tenant_transaction(&fixture.pool, Fixture::tenant()).await.unwrap();
+        let mut transaction = begin_tenant_transaction(&fixture.pool, fixture.tenant()).await.unwrap();
         assert!(revoke_share_link(&mut transaction, revoked_id).await.unwrap());
         transaction.commit().await.unwrap();
         sqlx::query("UPDATE share_links SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' WHERE id = $1::uuid")
@@ -313,7 +360,7 @@ fn a_fenced_commit_closes_the_document_without_confirming() -> TestResult {
 
     // Another sequencer takes the document over: this relay's token is stale from now on.
     fixture.runtime.block_on(async {
-        let mut transaction = begin_tenant_transaction(&fixture.pool, Fixture::tenant()).await.unwrap();
+        let mut transaction = begin_tenant_transaction(&fixture.pool, fixture.tenant()).await.unwrap();
         claim_sequencer(&mut transaction, document).await.unwrap();
         transaction.commit().await.unwrap();
     });
@@ -335,6 +382,69 @@ fn a_fenced_commit_closes_the_document_without_confirming() -> TestResult {
     let mut hosting = fixture.serve();
     let mut stranger = Raw::join(hosting.addr(), &file, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
     assert_eq!(stranger.refusal().as_deref(), Some(REFUSED));
+    hosting.stop();
+    Ok(())
+}
+
+/// Read until the connection closes: whether the hub closed it saying the link this client joined
+/// with stopped working.
+fn stopped(raw: &mut Raw) -> bool {
+    loop {
+        match raw.0.read() {
+            Ok(Message::Close(frame)) => return frame.is_some_and(|frame| frame.reason.as_str() == STOPPED),
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+}
+
+#[test]
+fn a_revoked_link_disconnects_its_live_clients_and_refuses_new_hellos() -> TestResult {
+    let Some(fixture) = Fixture::with(&C6)? else {
+        return Ok(());
+    };
+    let document = fixture.document();
+    let file = document.to_string();
+    let (revoked_id, revoked) = fixture.link(document, ShareRole::Editor, None);
+    let (_, kept) = fixture.link(document, ShareRole::Viewer, None);
+
+    let (mut hosting, sweeper) = fixture.serve_swept(Duration::from_millis(100));
+    let mut ada = Raw::join(hosting.addr(), &file, &revoked);
+    let (me, seq, access, page, _) = ada.welcome();
+    assert_eq!(access, Access::Edit);
+    let mut bob = Raw::join(hosting.addr(), &file, &kept);
+    let _ = bob.welcome();
+    // Live links are left alone across several sweeps.
+    std::thread::sleep(Duration::from_millis(400));
+    ada.rename(seq, 1, page, "Still editing");
+    assert!(ada.confirmation(me, 1).is_some());
+
+    fixture.runtime.block_on(async {
+        let mut transaction = begin_tenant_transaction(&fixture.pool, fixture.tenant()).await.unwrap();
+        assert!(revoke_share_link(&mut transaction, revoked_id).await.unwrap());
+        transaction.commit().await.unwrap();
+    });
+    let revoked_at = std::time::Instant::now();
+    assert!(stopped(&mut ada), "the revoked link's client is told sharing stopped");
+    assert!(revoked_at.elapsed() < Duration::from_secs(5), "disconnected within a bounded time: {:?}", revoked_at.elapsed());
+
+    // A new hello with the revoked link is refused like any other; the kept link still joins.
+    let mut again = Raw::join(hosting.addr(), &file, &revoked);
+    assert_eq!(again.refusal().as_deref(), Some(REFUSED));
+    let mut carol = Raw::join(hosting.addr(), &file, &kept);
+    assert_eq!(carol.welcome().2, Access::View);
+
+    // Archiving the document closes the remaining sessions the same way.
+    fixture.runtime.block_on(async {
+        let mut transaction = begin_tenant_transaction(&fixture.pool, fixture.tenant()).await.unwrap();
+        assert!(archive_document(&mut transaction, document).await.unwrap().is_some());
+        transaction.commit().await.unwrap();
+    });
+    assert!(stopped(&mut bob), "an archived document's clients are disconnected");
+    assert!(stopped(&mut carol), "an archived document's clients are disconnected");
+    let mut late = Raw::join(hosting.addr(), &file, &kept);
+    assert_eq!(late.refusal().as_deref(), Some(REFUSED));
+    drop(sweeper);
     hosting.stop();
     Ok(())
 }
