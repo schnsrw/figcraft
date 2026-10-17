@@ -1,8 +1,12 @@
 # FigCraft SaaS deployment
 
 This directory contains the cloud image, static web image and single-node Compose topology. The
-topology is a development scaffold, **not a healthy SaaS deployment**: PostgreSQL, Redis and
-SeaweedFS can run locally, but cloud API, relay and worker services have not been implemented.
+topology runs the whole stack on one machine: the gateway, the web image (the SaaS web app and the
+browser editor), the cloud service (API, collaboration relay and webhook worker in one process),
+PostgreSQL, Redis and SeaweedFS. It is an **early-alpha, single-node** self-hosting setup, not a
+production deployment: no production TLS, no high availability, no bundled identity provider, and
+the browser workspace (sign-in, file lists, team management) is not built yet (milestone S6). What
+works today and what does not is tracked in [`docs/saas/tracker.md`](../../docs/saas/tracker.md).
 The dependency review is in
 [`docs/saas/dependency-images.md`](../../docs/saas/dependency-images.md).
 Build the cloud image from the repository root with:
@@ -15,8 +19,9 @@ The image uses a Rust builder stage and a non-root distroless runtime. Run it wi
 filesystem (`--read-only`) and mount secret files read-only. The transport server listens on port
 8081. `/api/v1/healthz` returns a transport probe for `api` and `all`; `/ws/v1/health` validates a
 WebSocket upgrade for `relay` and `all`, then closes normally. `/readyz` requires the listener and
-the supported database schema version to be ready. These probes do not verify authentication,
-document operations or durable collaboration; those product services remain future milestones. The
+the supported database schema version to be ready. These probes check only the listener and the schema
+version; authentication, documents and collaboration are exercised by the test suites listed in the
+tracker, not by the probes. The
 edge `/healthz` is only gateway liveness.
 
 `web.Dockerfile` builds the existing npm workspace with Node 22.18.0, then copies the static build

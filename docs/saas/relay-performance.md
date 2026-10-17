@@ -206,6 +206,30 @@ The cold open itself took 4.26 s before and 4.22 s after: the restore is no fast
 longer blocks anything else. Commits during the open are slower (p50 4.8 ms instead of 2.5 ms)
 because the restore is using the same machine and database.
 
+### S5 gate run: the full harness on a quiet machine (2026-10-18)
+
+One run of every phase against the dev PostgreSQL 18 and SeaweedFS S3 (20 editors on 5 documents
+for 120 s at 2 batches/s each, 2 slow readers, a 20-editor reconnect storm, a 20,000-frame
+document, an isolation run and recovery with 3 runs per scenario), release build, after all S5
+work except large-image transfer. Nothing lost: 4,800 of 4,800 batches confirmed, no failed
+editor, no refused batch, storm failures 0, recovery refusals 0.
+
+| measure | result |
+|---|---|
+| steady commit latency (send to confirmation) | p50 5.9 ms, p95 6.8 ms, p99 7.4 ms, max 43 ms |
+| reconnect storm (20 editors at once) | all back and committed in 82 ms |
+| rename commit on the 20,000-frame document | p50 1.2 ms, p95 3.3 ms |
+| cold open of 20,000 frames (hello to welcome) | 4,221 ms |
+| another room's commits during that cold open | 143 commits, p95 5.3 ms, max 6.9 ms |
+| recovery: 20,000 frames, 0 / 500 events after the snapshot | p95 4,177 ms / 4,233 ms |
+| slow readers (2) | evicted without delaying others; queued bytes 0 |
+
+Recovery is CPU-bound: an earlier run on a machine at a load average of 14 to 20 (concurrent
+builds) took 6 to 13 s and three cold opens hit the 15 s storage timeout. The same scenarios on
+the code from before this milestone's work, alternated with the current code on a quiet machine,
+took 4.14 to 4.29 s with no refusals, both ways, so that was contention, not a regression.
+Give relay replicas enough CPU that a cold open of the largest room does not compete for it.
+
 ## Against the targets
 
 Targets come from `docs/saas/product-requirements.md` ("Non-functional requirements"). The
