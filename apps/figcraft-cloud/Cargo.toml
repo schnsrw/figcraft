@@ -19,11 +19,14 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "signal"] }
 axum = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true }
+# S5-012: the drain test starts the real binary and joins its relay as a client.
+figcraft-collab = { workspace = true }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [lints]
 workspace = true

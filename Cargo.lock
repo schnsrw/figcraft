@@ -1820,6 +1820,7 @@ dependencies = [
  "figcraft-cloud-domain",
  "figcraft-cloud-relay",
  "figcraft-cloud-storage",
+ "figcraft-collab",
  "figcraft-collab-net",
  "ring",
  "serde",
@@ -1828,6 +1829,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tower",
+ "tungstenite 0.30.0",
 ]
 
 [[package]]
@@ -6173,6 +6175,7 @@ dependencies = [
  "libc",
  "mio",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",

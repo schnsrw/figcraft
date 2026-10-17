@@ -434,6 +434,17 @@ impl From<String> for OpenFailure {
     }
 }
 
+/// Drains a hub from any thread ([`Hosting::drain_handle`]).
+#[derive(Clone)]
+pub struct DrainHandle(Sender<HubIn>);
+
+impl DrainHandle {
+    /// See [`Hosting::drain`]. A hub that has stopped ignores it.
+    pub fn drain(&self) {
+        let _ = self.0.send(HubIn::Drain);
+    }
+}
+
 /// How a backend tells the hub that background work finished (see [`Backend::begin_open`]).
 #[derive(Clone)]
 pub struct Wake(Sender<HubIn>);
@@ -588,6 +599,12 @@ impl Hosting {
     /// gateway to notice, then stop.
     pub fn drain(&self) {
         let _ = self.hub.send(HubIn::Drain);
+    }
+
+    /// A handle that can [`drain`](Self::drain) this hub from another thread (a signal handler).
+    #[must_use]
+    pub fn drain_handle(&self) -> DrainHandle {
+        DrainHandle(self.hub.clone())
     }
 
     /// Bytes waiting to be sent to clients, all connections together.

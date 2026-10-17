@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (17/25) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (18/25) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 17 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 18 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2253,7 +2253,20 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   alone (`a_room_whose_lease_was_taken_away_closes_and_confirms_nothing_more`). Between the loss
   and its detection the fence is what rejects writes.
 - [ ] **S5-011** Implement idle room close and snapshot scheduling.
-- [ ] **S5-012** Implement graceful drain and client reconnect signal for rolling releases.
+- [x] **S5-012** Implement graceful drain and client reconnect signal for rolling releases.
+  Evidence (2026-10-18): the cloud process previously had no signal handling (`docker stop` killed
+  it, skipping the hub's graceful stop). It now handles SIGTERM and SIGINT: `/readyz` turns 503
+  `draining` (`/healthz` stays 200), `Hosting::drain` makes the hub close every new non-operator
+  connection at once with the restarting close code (a client retries; a refusal would be final),
+  sessions already open carry on for `FIGCRAFT_DRAIN_SECONDS` (default 5, max 120), then the
+  relay stops: final commits, snapshots, room lease release, and every remaining client is closed
+  with the restarting code so it reconnects and resumes from its last confirmed sequence; the
+  process exits 0. Tests: `apps/figcraft-cloud/tests/drain.rs` starts the real binary against the
+  dev PostgreSQL/S3, joins a client, sends SIGTERM and checks readiness, the turned-away hello,
+  the surviving session, the lease held during the drain and released after, the restarting close
+  and the clean exit; hub tests (`drain_tests`), the readiness unit test and the config bounds.
+  Compose gets `stop_grace_period: 30s`. Limit: a process killed without SIGTERM skips all of this
+  and its rooms wait for their leases to expire (15 s).
 - [x] **S5-013** Implement quarantine when no verified snapshot/event chain can restore a room.
   Evidence: Implemented in the S3 follow-ups: `figcraft-cloud-storage::quarantine` marks documents
   whose history cannot be restored (log gap, corrupt log, unverifiable snapshot chain, failed
@@ -2666,3 +2679,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S5 prerequisite: room restore moved off the relay hub thread (additive `Backend::begin_open`/`opened`/`attach` hooks, patch FP-008). Measured: another room's worst commit during a 20k-frame cold open fell from 4,246 ms to 6.1 ms. No S5 task changes state; S5 stays 11/25. |
 | 2026-10-18 | S5-003, 004, 010, 020, 021: the relay takes, renews, loses and releases PostgreSQL room leases (opt-in with `FIGCRAFT_RELAY_ADVERTISE_URL`); two live replicas on one database each own their rooms and refuse the other's, a simultaneous hello race leaves one owner, and a taken-over room closes without confirming more. Owner routing (S5-006) and drain (S5-012) remain. S5 reaches 16/25. |
 | 2026-10-18 | S5-006: a replica passes a client on to the room's owner (relay-to-relay proxy over the lease's endpoint) instead of refusing it; no client, protocol or gateway change. Revocation, two-replica and race tests pass live. S5 reaches 17/25. |
+| 2026-10-18 | S5-012: SIGTERM/SIGINT drain for rolling releases (not ready, new relay connections turned away with the restarting code, grace period, then commit, snapshot, lease release and a restarting close for connected clients); verified against the real process. S5 reaches 18/25. |

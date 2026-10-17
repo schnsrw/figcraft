@@ -7,6 +7,8 @@
 
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -51,9 +53,49 @@ const fn serves_relay(role: CloudRole) -> bool {
     matches!(role, CloudRole::All | CloudRole::Relay)
 }
 
-/// Serve port 8081 until the listener fails. `ready` is the dependency check made at startup;
-/// `/api/v1` answers `503` while it is false.
-pub(super) fn serve(config: &CloudConfig, ready: bool) -> io::Result<()> {
+/// What a stopping process does first (S5-012). On SIGTERM or SIGINT it stops being ready (the
+/// gateway's health check then stops sending it connections), runs `hook` (the relay turns new
+/// connections away so their clients retry elsewhere), and stays up for `period` so that
+/// propagates; only then does the HTTP server stop, and after it the caller stops the relay
+/// (commits, snapshots, releases room leases and tells connected clients to reconnect).
+pub(super) struct Drain {
+    pub period: Duration,
+    pub hook: Box<dyn Fn() + Send + Sync>,
+}
+
+impl Drain {
+    async fn begin(&self, draining: &AtomicBool) {
+        eprintln!("figcraft-cloud: stopping: not ready, turning new connections away for {:?}", self.period);
+        draining.store(true, Ordering::SeqCst);
+        (self.hook)();
+        tokio::time::sleep(self.period).await;
+        eprintln!("figcraft-cloud: drain period over; stopping");
+    }
+}
+
+/// Resolves on SIGTERM (what `docker stop` and orchestrators send) or SIGINT.
+async fn termination() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut term) => {
+                tokio::select! {
+                    _ = tokio::signal::ctrl_c() => {}
+                    _ = term.recv() => {}
+                }
+                return;
+            }
+            Err(error) => eprintln!("figcraft-cloud: SIGTERM can't be handled ({error}); only SIGINT will drain"),
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Serve port 8081 until the listener fails or the process is told to stop (then after its
+/// [`Drain`]). `ready` is the dependency check made at startup; `/api/v1` answers `503` while it
+/// is false.
+pub(super) fn serve(config: &CloudConfig, ready: bool, drain: Drain) -> io::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
         let api_config = ApiConfig { deployment: config.deployment, trusted_proxies: config.trusted_proxies.clone(), ..ApiConfig::default() };
@@ -63,14 +105,20 @@ pub(super) fn serve(config: &CloudConfig, ready: bool) -> io::Result<()> {
             eprintln!("figcraft-cloud: the API could not be configured; /api/v1 will answer 503");
         }
         let settings = ContextSettings::new(config.role, MAX_IN_FLIGHT, REQUEST_DEADLINE, u64::try_from(max_body).unwrap_or(u64::MAX));
-        let app = app(config.role, ready, api, settings);
+        let draining = Arc::new(AtomicBool::new(false));
+        let app = app_draining(config.role, ready, api, settings, draining.clone());
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(HEALTH_ADDR)).await?;
         eprintln!(
             "figcraft-cloud: HTTP server listening on {} for role '{}' (dependencies_ready={ready})",
             SocketAddr::from(HEALTH_ADDR),
             config.role.as_str()
         );
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .with_graceful_shutdown(async move {
+                termination().await;
+                drain.begin(&draining).await;
+            })
+            .await
     })
 }
 
@@ -123,11 +171,17 @@ async fn api_state(config: &CloudConfig, api_config: ApiConfig) -> Option<AppSta
 
 /// The whole router for `role`. `api` is the `/api/v1` router when the API is configured; API
 /// roles without it answer `503` under `/api/v1` (the transport probe still answers).
+#[cfg(test)]
 pub(crate) fn app(role: CloudRole, ready: bool, api: Option<Router>, settings: ContextSettings) -> Router {
+    app_draining(role, ready, api, settings, Arc::new(AtomicBool::new(false)))
+}
+
+/// [`app`], whose `/readyz` also turns `503` once `draining` is set.
+pub(crate) fn app_draining(role: CloudRole, ready: bool, api: Option<Router>, settings: ContextSettings, draining: Arc<AtomicBool>) -> Router {
     let mut router = Router::new()
         .route("/healthz", get(move || async move { json(StatusCode::OK, format!("{{\"status\":\"alive\",\"role\":\"{}\"}}", role.as_str())) }))
         .route("/startupz", get(move || async move { json(StatusCode::OK, format!("{{\"status\":\"started\",\"role\":\"{}\"}}", role.as_str())) }))
-        .route("/readyz", get(move || async move { readiness(role, ready) }));
+        .route("/readyz", get(move || async move { readiness(role, ready, draining.load(Ordering::SeqCst)) }));
     if serves_api(role) {
         router = router.route("/api/v1/healthz", get(|| async { json(StatusCode::OK, "{\"status\":\"transport_ready\"}".to_string()) }));
         router = router.merge(api.unwrap_or_else(api::unavailable_router));
@@ -141,8 +195,10 @@ pub(crate) fn app(role: CloudRole, ready: bool, api: Option<Router>, settings: C
         .layer(from_fn_with_state(settings, context::middleware))
 }
 
-fn readiness(role: CloudRole, ready: bool) -> Response {
-    if ready {
+fn readiness(role: CloudRole, ready: bool, draining: bool) -> Response {
+    if draining {
+        json(StatusCode::SERVICE_UNAVAILABLE, format!("{{\"status\":\"draining\",\"role\":\"{}\"}}", role.as_str()))
+    } else if ready {
         json(StatusCode::OK, format!("{{\"status\":\"transport_ready\",\"role\":\"{}\"}}", role.as_str()))
     } else {
         json(StatusCode::SERVICE_UNAVAILABLE, format!("{{\"status\":\"not_ready\",\"role\":\"{}\"}}", role.as_str()))
@@ -225,6 +281,25 @@ mod tests {
             );
             assert_eq!(get(role, true, "/readyz").await, (StatusCode::OK, format!("{{\"status\":\"transport_ready\",\"role\":\"{name}\"}}")));
         }
+    }
+
+    #[tokio::test]
+    async fn readiness_turns_to_draining_once_the_process_is_told_to_stop() {
+        let draining = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let settings = || ContextSettings::new(CloudRole::Relay, 16, Duration::from_secs(5), 1024);
+        let router = super::app_draining(CloudRole::Relay, true, None, settings(), draining.clone());
+        let probe = |router: Router| async move {
+            let response = router.oneshot(Request::get("/readyz").body(Body::empty()).unwrap()).await.unwrap();
+            let status = response.status();
+            (status, String::from_utf8(to_bytes(response.into_body(), 1 << 16).await.unwrap().to_vec()).unwrap())
+        };
+        assert_eq!(probe(router.clone()).await, (StatusCode::OK, "{\"status\":\"transport_ready\",\"role\":\"relay\"}".to_string()));
+        draining.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(probe(router).await, (StatusCode::SERVICE_UNAVAILABLE, "{\"status\":\"draining\",\"role\":\"relay\"}".to_string()));
+        // Liveness stays up while draining: the orchestrator must not kill a process that is stopping well.
+        let router = super::app_draining(CloudRole::Relay, true, None, settings(), draining);
+        let alive = router.oneshot(Request::get("/healthz").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(alive.status(), StatusCode::OK);
     }
 
     #[tokio::test]

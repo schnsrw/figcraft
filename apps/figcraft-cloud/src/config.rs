@@ -42,6 +42,8 @@ pub(super) struct CloudConfig {
     public_url: Option<String>,
     /// `FIGCRAFT_RELAY_ADVERTISE_URL`: where other relays and the gateway reach this replica.
     relay_advertise_url: Option<String>,
+    /// `FIGCRAFT_DRAIN_SECONDS`: how long a stopping process stays up, not ready, before it stops.
+    drain_seconds: u64,
     oidc_issuer: Option<String>,
     /// `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URL` (S4 auth wiring): login is enabled only when
     /// these and `OIDC_ISSUER` are all set.
@@ -67,6 +69,7 @@ impl Default for CloudConfig {
             environment: Environment::Development,
             public_url: None,
             relay_advertise_url: None,
+            drain_seconds: DEFAULT_DRAIN_SECONDS,
             oidc_issuer: None,
             oidc_client_id: None,
             oidc_redirect_url: None,
@@ -160,6 +163,12 @@ impl CloudConfig {
                     };
                 }
                 "FIGCRAFT_PUBLIC_URL" => config.public_url = Some(value.to_string()),
+                "FIGCRAFT_DRAIN_SECONDS" => {
+                    config.drain_seconds = match value.parse::<u64>() {
+                        Ok(seconds) if seconds <= MAX_DRAIN_SECONDS => seconds,
+                        _ => return Err("FIGCRAFT_DRAIN_SECONDS must be a whole number of seconds from 0 to 120"),
+                    };
+                }
                 "FIGCRAFT_RELAY_ADVERTISE_URL" => {
                     if !is_relay_advertise_url(value) {
                         return Err("FIGCRAFT_RELAY_ADVERTISE_URL must be a ws:// or wss:// URL without credentials, query or fragment");
@@ -204,6 +213,11 @@ impl CloudConfig {
     /// `FIGCRAFT_PUBLIC_URL`, when configured.
     pub(super) fn public_url(&self) -> Option<&str> {
         self.public_url.as_deref()
+    }
+
+    /// How long a stopping process drains: not ready, turning new connections away, before it stops.
+    pub(super) fn drain_period(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.drain_seconds)
     }
 
     /// `FIGCRAFT_RELAY_ADVERTISE_URL`, when configured: it turns on room leases for this relay.
@@ -305,6 +319,11 @@ fn secret_setting(key: &str) -> Option<(&'static str, bool)> {
     }
 }
 
+/// How long a stopping process drains by default: a few health-check intervals' worth is the
+/// operator's to set; this is enough for a gateway that checks every second or two.
+const DEFAULT_DRAIN_SECONDS: u64 = 5;
+const MAX_DRAIN_SECONDS: u64 = 120;
+
 /// A room lease's endpoint: a `ws://` or `wss://` URL with a host, no credentials, query or fragment.
 fn is_relay_advertise_url(value: &str) -> bool {
     let Some(rest) = value.strip_prefix("wss://").or_else(|| value.strip_prefix("ws://")) else { return false };
@@ -325,6 +344,7 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_DEPLOYMENT",
         "FIGCRAFT_PUBLIC_URL",
         "FIGCRAFT_RELAY_ADVERTISE_URL",
+        "FIGCRAFT_DRAIN_SECONDS",
         "FIGCRAFT_SINGLE_TENANT_ID",
         "FIGCRAFT_TRUSTED_PROXY_CIDRS",
         "DATABASE_URL",
@@ -384,6 +404,18 @@ mod tests {
             "ws://re lay/x",
         ] {
             assert!(ok(bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn the_drain_period_defaults_to_five_seconds_and_is_bounded() {
+        use std::time::Duration;
+        assert_eq!(CloudConfig::default().drain_period(), Duration::from_secs(5));
+        let period = |v| CloudConfig::parse([("FIGCRAFT_DRAIN_SECONDS", v)]).map(|c| c.drain_period());
+        assert_eq!(period("0"), Ok(Duration::ZERO));
+        assert_eq!(period("120"), Ok(Duration::from_secs(120)));
+        for bad in ["121", "-1", "5s", "1.5", "many"] {
+            assert!(period(bad).is_err(), "{bad} must be refused");
         }
     }
 

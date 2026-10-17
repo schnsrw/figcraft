@@ -122,6 +122,9 @@ services:
         condition: service_completed_successfully
       role-grants:
         condition: service_completed_successfully
+    # SIGTERM drains (FIGCRAFT_DRAIN_SECONDS, default 5 s: not ready, new relay connections turned
+    # away), then stops the relay (final commits, snapshots, lease release), so allow it time.
+    stop_grace_period: 30s
     healthcheck:
       test: ["CMD", "/usr/local/bin/figcraft-cloud", "--check-ready"]
       interval: 10s

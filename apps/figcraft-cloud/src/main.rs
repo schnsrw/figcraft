@@ -401,7 +401,7 @@ fn main() -> ExitCode {
             }
             let ready = schema_ready && objects_ready;
             // Every role serves the collaboration relay for now (the core slice runs one process).
-            let _relay = if ready {
+            let relay = if ready {
                 match relay::start(&config) {
                     Ok(relay) => {
                         eprintln!("figcraft-cloud: collaboration relay listening on {}", relay.hosting.addr());
@@ -416,8 +416,25 @@ fn main() -> ExitCode {
                 eprintln!("figcraft-cloud: collaboration relay not started: dependencies are not ready");
                 None
             };
-            match health::serve(&config, ready) {
-                Ok(()) => ExitCode::SUCCESS,
+            let drain_handle = relay.as_ref().map(|relay| relay.hosting.drain_handle());
+            let drain = health::Drain {
+                period: config.drain_period(),
+                hook: Box::new(move || {
+                    if let Some(handle) = &drain_handle {
+                        handle.drain();
+                    }
+                }),
+            };
+            match health::serve(&config, ready, drain) {
+                Ok(()) => {
+                    // Told to stop: now the relay commits what's open, snapshots, releases its room
+                    // leases and tells connected clients to reconnect elsewhere.
+                    if let Some(mut relay) = relay {
+                        eprintln!("figcraft-cloud: stopping the collaboration relay");
+                        relay.hosting.stop();
+                    }
+                    ExitCode::SUCCESS
+                }
                 Err(_) => {
                     eprintln!("figcraft-cloud: unable to start the health endpoint server");
                     ExitCode::FAILURE

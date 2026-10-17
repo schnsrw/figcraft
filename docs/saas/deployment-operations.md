@@ -77,6 +77,8 @@ FIGCRAFT_SINGLE_TENANT_ID=00000000-0000-0000-0000-000000000001
 # per replica). Turns on room leases: one replica serves each room, the others pass clients on to it.
 # Leave unset for a single relay.
 FIGCRAFT_RELAY_ADVERTISE_URL=ws://relay-1.internal:8082/ws/v1/collab
+# Seconds a stopping process stays up, not ready, before it stops (0 to 120, default 5).
+FIGCRAFT_DRAIN_SECONDS=5
 
 DATABASE_URL_FILE=/run/secrets/database_url
 REDIS_URL_FILE=/run/secrets/redis_url
@@ -98,6 +100,19 @@ EMBED_ISSUER_CONFIG_FILE=/etc/figcraft/embed-issuers.toml
 RUST_LOG=info
 OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 ```
+
+Draining and rolling releases: on SIGTERM or SIGINT (what `docker stop` and orchestrators send) the
+process stops being ready (`/readyz` answers 503 `draining`; `/healthz` stays 200 so it is not
+killed), the relay closes every new connection at once with the restarting close code (clients
+retry, and the gateway sends them to a ready replica), and sessions already open carry on for
+`FIGCRAFT_DRAIN_SECONDS` so the gateway's health check can notice. Then the relay stops: it commits
+what is open, stores snapshots, releases its room leases and closes the remaining connections with
+the restarting code, so those clients reconnect (to another replica, which takes the rooms over
+at once instead of waiting for the leases to expire) and resume from their last confirmed
+sequence; the process exits 0. Set the gateway's health-check interval below the drain period
+and the orchestrator's stop timeout above it plus the time to commit and snapshot the open rooms
+(Compose: `stop_grace_period: 30s`). A process killed without a SIGTERM skips all of this; its
+rooms are then unavailable until their leases expire (15 s).
 
 Room leases (several relay replicas): with `FIGCRAFT_RELAY_ADVERTISE_URL` set, a replica takes a
 PostgreSQL lease on a document's room before restoring it and renews it every 5 s (lifetime 15 s).
