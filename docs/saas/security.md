@@ -163,6 +163,11 @@ is safe to return to clients and audit records. `Budgets::DEFAULT`, which plans 
   and long-running cloud roles use separate non-superuser credentials; runtime cannot change
   schema or mutate migration history.
 - Secret values never appear in configuration diagnostics.
+- Webhook signing secrets are generated server-side, shown to the host once, and stored only as
+  AES-256-GCM blobs under a subkey derived from `SESSION_SIGNING_KEY` (bound to tenant and
+  endpoint as associated data). Without that key the webhook API answers `503`. Rotating
+  `SESSION_SIGNING_KEY` makes stored webhook secrets unreadable until each endpoint's secret is
+  rotated; a dedicated key with re-sealing is future work.
 - Use separate database, Redis, object-store, AI and webhook credentials by role where supported.
 - Rotate signing keys with an overlap window identified by key ID.
 - Rotate database and object credentials without rebuilding images.

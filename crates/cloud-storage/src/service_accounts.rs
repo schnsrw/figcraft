@@ -43,10 +43,11 @@ pub enum Scope {
     DocumentsWrite,
     ExportsCreate,
     JobsRead,
+    WebhooksManage,
 }
 
 impl Scope {
-    pub const ALL: [Self; 4] = [Self::DocumentsRead, Self::DocumentsWrite, Self::ExportsCreate, Self::JobsRead];
+    pub const ALL: [Self; 5] = [Self::DocumentsRead, Self::DocumentsWrite, Self::ExportsCreate, Self::JobsRead, Self::WebhooksManage];
 
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -55,6 +56,7 @@ impl Scope {
             Self::DocumentsWrite => "documents:write",
             Self::ExportsCreate => "exports:create",
             Self::JobsRead => "jobs:read",
+            Self::WebhooksManage => "webhooks:manage",
         }
     }
 

@@ -74,6 +74,9 @@ pub(crate) struct IdentityConfig {
     public_origin: Option<String>,
     policy: SessionPolicy,
     share_key: hmac::Key,
+    /// Seals secrets at rest (webhook signing secrets); derived from `SESSION_SIGNING_KEY`, so
+    /// `None` without one (a random per-process key could not reopen what it sealed).
+    secret_key: Option<figcraft_cloud_storage::secret_box::SecretKey>,
     bootstrap_done: AtomicBool,
 }
 
@@ -119,8 +122,14 @@ impl IdentityConfig {
             public_origin,
             policy: SessionPolicy::default(),
             share_key,
+            secret_key: signing_key.and_then(|secret| figcraft_cloud_storage::secret_box::SecretKey::derive(secret).ok()),
             bootstrap_done: AtomicBool::new(false),
         })
+    }
+
+    /// The key webhook secrets are sealed with, when `SESSION_SIGNING_KEY` is configured.
+    pub(crate) const fn secret_key(&self) -> Option<&figcraft_cloud_storage::secret_box::SecretKey> {
+        self.secret_key.as_ref()
     }
 
     /// Replace the session policy.

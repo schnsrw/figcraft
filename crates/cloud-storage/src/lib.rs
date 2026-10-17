@@ -39,6 +39,7 @@ pub mod resource_admin;
 pub mod revocation;
 pub mod room_clients;
 pub mod room_leases;
+pub mod secret_box;
 pub mod service_accounts;
 pub mod sessions;
 pub mod share_links;
@@ -48,6 +49,7 @@ pub mod teams;
 pub mod tenants;
 pub mod uploads;
 pub mod validation;
+pub mod webhooks;
 
 /// A SQLx transaction bound to one trusted tenant identifier.
 ///
@@ -204,7 +206,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                     'upload_reservations', 'libraries', 'library_team_grants', 'library_versions', 'library_usages',
                     'plugins', 'plugin_versions', 'exports', 'document_thumbnails', 'retention_holds', 'share_links', 'oidc_login_attempts', 'browser_sessions',
                     'tenant_bootstrap', 'service_accounts', 'service_account_credentials', 'team_invitations',
-                    'member_permissions', 'support_access_grants', 'room_leases', 'room_clients', 'host_systems', 'host_system_keys', 'embed_token_uses'
+                    'member_permissions', 'support_access_grants', 'room_leases', 'room_clients', 'host_systems', 'host_system_keys', 'embed_token_uses', 'webhook_endpoints'
                 ])
             LOOP
                 EXECUTE format('ALTER TABLE public.%I OWNER TO figcraft_migrator', table_name);

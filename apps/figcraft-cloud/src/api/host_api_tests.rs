@@ -53,6 +53,10 @@ async fn pool() -> Fallible<Option<PgPool>> {
 }
 
 fn app(pool: PgPool) -> Fallible<Router> {
+    app_with(pool, Some(b"s6-host-api-signing-key-0123456"))
+}
+
+fn app_with(pool: PgPool, signing_key: Option<&[u8]>) -> Fallible<Router> {
     let objects = figcraft_cloud_storage::objects::ObjectStore::new(&figcraft_cloud_storage::objects::ObjectStoreSettings {
         endpoint: "http://127.0.0.1:9".to_string(),
         region: "us-east-1".to_string(),
@@ -62,8 +66,7 @@ fn app(pool: PgPool) -> Fallible<Router> {
         path_style: true,
     })
     .map_err(err)?;
-    let identity =
-        Arc::new(IdentityConfig::new(DeploymentMode::MultiTenant, None, Some(ORIGIN), Some(b"s6-host-api-signing-key-0123456")).map_err(err)?);
+    let identity = Arc::new(IdentityConfig::new(DeploymentMode::MultiTenant, None, Some(ORIGIN), signing_key).map_err(err)?);
     let config = ApiConfig {
         deployment: DeploymentMode::MultiTenant,
         auth_rate_limit: RateLimitConfig { burst: 1_000_000, refill_every: Duration::from_millis(1), max_keys: 1_000 },
@@ -163,7 +166,7 @@ async fn world(pool: &PgPool) -> Fallible<World> {
     map_external_resource(&mut t, "host-a", MappingKind::Principal, "u1", member.as_uuid()).await.map_err(err)?;
     let mut secrets = Vec::new();
     for (name, scopes) in [
-        ("all", vec![Scope::DocumentsRead, Scope::DocumentsWrite, Scope::ExportsCreate, Scope::JobsRead]),
+        ("all", vec![Scope::DocumentsRead, Scope::DocumentsWrite, Scope::ExportsCreate, Scope::JobsRead, Scope::WebhooksManage]),
         ("read", vec![Scope::DocumentsRead]),
         ("export", vec![Scope::ExportsCreate]),
     ] {
@@ -527,6 +530,128 @@ async fn concurrent_identical_creates_make_exactly_one_document() -> Fallible<()
 }
 
 #[tokio::test]
+async fn webhook_endpoints_are_managed_with_secrets_shown_once_and_stored_encrypted() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let a = world(&pool).await?;
+    let b = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let base = "/host/systems/host-a/webhooks";
+    let create = json!({"url": "https://hooks.example.com/figcraft/a1b2c3", "event_types": ["document.created", "document.archived"]});
+
+    let made = send(&app, "POST", base, Some(&a.all), &[], Some(&create)).await?;
+    assert_eq!(made.status, 201, "{}", made.body);
+    let secret = made.body["secret"].as_str().ok_or("secret")?.to_owned();
+    assert!(secret.starts_with("whsec_") && secret.len() == 49, "{secret}");
+    let id = made.body["id"].as_str().ok_or("id")?.to_owned();
+    assert_eq!(made.body["event_types"], json!(["document.created", "document.archived"]));
+    assert_eq!(made.body["enabled"], true);
+
+    // No read ever returns the secret again.
+    let one = send(&app, "GET", &format!("{base}/{id}"), Some(&a.all), &[], None).await?;
+    let list = send(&app, "GET", base, Some(&a.all), &[], None).await?;
+    assert_eq!((one.status, list.status), (200, 200));
+    assert!(!one.body.to_string().contains(&secret) && !list.body.to_string().contains(&secret));
+    assert!(one.body.get("secret").is_none() && list.body["webhooks"][0].get("secret").is_none());
+    assert_eq!(list.body["webhooks"].as_array().map(Vec::len), Some(1));
+
+    // At rest the secret is sealed: the column does not contain it, and it opens only with the
+    // deployment key and this endpoint's context.
+    let endpoint_id: Uuid = id.parse()?;
+    let mut t = begin_tenant_transaction(&pool, a.tenant).await.map_err(err)?;
+    let sealed: Vec<u8> =
+        sqlx::query_scalar("SELECT secret_sealed FROM webhook_endpoints WHERE id = $1::uuid").bind(&id).fetch_one(t.connection()).await?;
+    assert!(!sealed.windows(secret.len()).any(|window| window == secret.as_bytes()));
+    let key = figcraft_cloud_storage::secret_box::SecretKey::derive(b"s6-host-api-signing-key-0123456").map_err(err)?;
+    assert_eq!(figcraft_cloud_storage::webhooks::signing_secrets(&mut t, &key, endpoint_id).await.map_err(err)?, vec![secret.clone().into_bytes()]);
+    let wrong = figcraft_cloud_storage::secret_box::SecretKey::derive(b"another-signing-key-0123456789").map_err(err)?;
+    assert!(figcraft_cloud_storage::webhooks::signing_secrets(&mut t, &wrong, endpoint_id).await.is_err());
+    t.rollback().await?;
+
+    // Bad URLs (private, plain http, credentials, internal names, metadata service) and bad
+    // subscriptions are refused; nothing is created.
+    for url in [
+        "http://hooks.example.com/x",
+        "https://localhost/x",
+        "https://127.0.0.1/x",
+        "https://169.254.169.254/x",
+        "https://user:pw@hooks.example.com/x",
+        "https://intranet/x",
+        "not a url",
+        "",
+    ] {
+        let reply = send(&app, "POST", base, Some(&a.all), &[], Some(&json!({"url": url}))).await?;
+        assert_eq!(reply.status, 400, "{url}");
+    }
+    for events in [json!(["document.exploded"]), json!(["document.created", "document.created"]), json!(["*"])] {
+        let reply = send(&app, "POST", base, Some(&a.all), &[], Some(&json!({"url": "https://hooks.example.com/x", "event_types": events}))).await?;
+        assert_eq!(reply.status, 400, "{events}");
+    }
+    assert_eq!(send(&app, "POST", base, Some(&a.all), &[], Some(&json!({"url": "https://hooks.example.com/x", "extra": 1}))).await?.status, 400);
+
+    // Update.
+    let patched = send(&app, "PATCH", &format!("{base}/{id}"), Some(&a.all), &[], Some(&json!({"enabled": false, "event_types": []}))).await?;
+    assert_eq!((patched.status, patched.body["enabled"].clone(), patched.body["event_types"].clone()), (200, json!(false), json!([])));
+    assert_eq!(
+        send(&app, "PATCH", &format!("{base}/{id}"), Some(&a.all), &[], Some(&json!({"url": "http://insecure.example.com/"}))).await?.status,
+        400
+    );
+
+    // Rotation: a new secret, the old one still signs during the overlap.
+    let rotated = send(&app, "POST", &format!("{base}/{id}/rotate-secret"), Some(&a.all), &[], None).await?;
+    assert_eq!(rotated.status, 200);
+    let new_secret = rotated.body["secret"].as_str().ok_or("secret")?.to_owned();
+    assert_ne!(new_secret, secret);
+    assert_eq!(rotated.body["previous_secret_active"], true);
+    let mut t = begin_tenant_transaction(&pool, a.tenant).await.map_err(err)?;
+    let both = figcraft_cloud_storage::webhooks::signing_secrets(&mut t, &key, endpoint_id).await.map_err(err)?;
+    assert_eq!(both, vec![new_secret.clone().into_bytes(), secret.clone().into_bytes()]);
+    // Once the overlap has passed only the new secret remains.
+    sqlx::query("UPDATE webhook_endpoints SET previous_expires_at = clock_timestamp() - interval '1 second' WHERE id = $1::uuid")
+        .bind(&id)
+        .execute(t.connection())
+        .await?;
+    assert_eq!(
+        figcraft_cloud_storage::webhooks::signing_secrets(&mut t, &key, endpoint_id).await.map_err(err)?,
+        vec![new_secret.clone().into_bytes()]
+    );
+    t.commit().await?;
+
+    // Audit rows carry ids only: no URL, no secret.
+    let mut t = begin_tenant_transaction(&pool, a.tenant).await.map_err(err)?;
+    let audits: Vec<(String, String)> =
+        sqlx::query_as("SELECT action, metadata::text FROM audit_events WHERE action LIKE 'host.webhook.%' ORDER BY action")
+            .fetch_all(t.connection())
+            .await?;
+    t.rollback().await?;
+    let actions: Vec<&str> = audits.iter().map(|(action, _)| action.as_str()).collect();
+    assert_eq!(actions, vec!["host.webhook.create", "host.webhook.rotate_secret", "host.webhook.update"]);
+    for (_, metadata) in &audits {
+        assert!(!metadata.contains("hooks.example.com") && !metadata.contains("whsec_"), "{metadata}");
+    }
+
+    // Scope, tenant isolation, cap, delete.
+    assert_eq!(send(&app, "POST", base, Some(&a.read_only), &[], Some(&create)).await?.status, 403);
+    assert_eq!(send(&app, "GET", base, Some(&a.read_only), &[], None).await?.status, 403);
+    assert_eq!(send(&app, "GET", &format!("{base}/{id}"), Some(&b.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "DELETE", &format!("{base}/{id}"), Some(&b.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "POST", &format!("{base}/{id}/rotate-secret"), Some(&b.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "GET", &format!("{base}/{}", Uuid::new_v4()), Some(&a.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "GET", &format!("{base}/not-a-uuid"), Some(&a.all), &[], None).await?.status, 404);
+    for _ in 0..9 {
+        assert_eq!(send(&app, "POST", base, Some(&a.all), &[], Some(&create)).await?.status, 201);
+    }
+    let over = send(&app, "POST", base, Some(&a.all), &[], Some(&create)).await?;
+    assert_eq!((over.status, code(&over)), (429, "quota_exceeded"), "{}", over.body);
+    assert_eq!(send(&app, "DELETE", &format!("{base}/{id}"), Some(&a.all), &[], None).await?.status, 204);
+    assert_eq!(send(&app, "GET", &format!("{base}/{id}"), Some(&a.all), &[], None).await?.status, 404);
+
+    // Without a deployment signing key secrets cannot be sealed: the feature is off, not insecure.
+    let keyless = app_with(pool.clone(), None)?;
+    assert_eq!(send(&keyless, "POST", base, Some(&b.all), &[], Some(&create)).await?.status, 503);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_embed_exchange_is_rate_limited_per_issuer() -> Fallible<()> {
     let Some(pool) = pool().await? else { return Ok(()) };
     let world = world(&pool).await?;
@@ -558,9 +683,14 @@ async fn the_route_table_matches_the_router() -> Fallible<()> {
         let reply =
             send(&app, route.method, &path, None, &[("origin", ORIGIN)], (route.method == "POST").then(|| json!({"token": "x"})).as_ref()).await?;
         assert!(!matches!(reply.status, 404 | 405) || route.path.contains("openapi"), "{} {} -> {}", route.method, route.path, reply.status);
-        let wrong = if route.method == "GET" { "DELETE" } else { "PUT" };
-        let reply = send(&app, wrong, &path, None, &[], None).await?;
-        assert!(matches!(reply.status, 404 | 405), "{wrong} {} must not exist", route.path);
+        // Every method the table does not list for this path is not routed.
+        for wrong in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+            if HOST_ROUTES.iter().any(|other| other.path == route.path && other.method == wrong) {
+                continue;
+            }
+            let reply = send(&app, wrong, &path, None, &[], None).await?;
+            assert!(matches!(reply.status, 404 | 405), "{wrong} {} must not exist, got {}", route.path, reply.status);
+        }
     }
     Ok(())
 }

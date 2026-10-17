@@ -33,8 +33,13 @@ use figcraft_cloud_storage::idempotency::{
 };
 use figcraft_cloud_storage::metadata::{DocumentRecord, archive_document, create_document, get_document, restore_document};
 use figcraft_cloud_storage::resource_admin::get_project_by_id;
+use figcraft_cloud_storage::secret_box::SecretKey;
 use figcraft_cloud_storage::service_accounts::Scope;
 use figcraft_cloud_storage::sessions;
+use figcraft_cloud_storage::webhooks::{
+    NewSecret, WebhookEndpoint, WebhookError, create_webhook_endpoint, delete_webhook_endpoint, get_webhook_endpoint, list_webhook_endpoints,
+    rotate_webhook_secret, update_webhook_endpoint,
+};
 use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -74,6 +79,12 @@ pub(crate) const HOST_ROUTES: &[HostRoute] = &[
     route("POST", "/host/systems/{system_id}/documents/{external_id}/restore", "restoreHostDocument", Some("documents:write")),
     route("POST", "/host/systems/{system_id}/documents/{external_id}/exports", "requestHostExport", Some("exports:create")),
     route("GET", "/host/systems/{system_id}/exports/{export_id}", "getHostExport", Some("jobs:read")),
+    route("GET", "/host/systems/{system_id}/webhooks", "listHostWebhooks", Some("webhooks:manage")),
+    route("POST", "/host/systems/{system_id}/webhooks", "createHostWebhook", Some("webhooks:manage")),
+    route("GET", "/host/systems/{system_id}/webhooks/{webhook_id}", "getHostWebhook", Some("webhooks:manage")),
+    route("PATCH", "/host/systems/{system_id}/webhooks/{webhook_id}", "updateHostWebhook", Some("webhooks:manage")),
+    route("DELETE", "/host/systems/{system_id}/webhooks/{webhook_id}", "deleteHostWebhook", Some("webhooks:manage")),
+    route("POST", "/host/systems/{system_id}/webhooks/{webhook_id}/rotate-secret", "rotateHostWebhookSecret", Some("webhooks:manage")),
 ];
 
 /// The host routes this build serves, relative to `/api/v1`.
@@ -89,6 +100,12 @@ pub(crate) fn router() -> Router<AppState> {
         .route("/host/systems/{system_id}/documents/{external_id}/restore", post(restore_document_handler))
         .route("/host/systems/{system_id}/documents/{external_id}/exports", post(request_export_handler))
         .route("/host/systems/{system_id}/exports/{export_id}", get(get_export_handler))
+        .route("/host/systems/{system_id}/webhooks", get(list_webhooks_handler).post(create_webhook_handler))
+        .route(
+            "/host/systems/{system_id}/webhooks/{webhook_id}",
+            get(get_webhook_handler).patch(update_webhook_handler).delete(delete_webhook_handler),
+        )
+        .route("/host/systems/{system_id}/webhooks/{webhook_id}/rotate-secret", post(rotate_webhook_secret_handler))
 }
 
 /// The embed-token exchange, mounted under `/api/v1/auth` so it shares the auth rate limit.
@@ -447,6 +464,152 @@ async fn get_export_handler(
         return Err(ApiError::not_found());
     }
     Ok(json_response(StatusCode::OK, &export_json(&record)))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Webhook endpoints (S6-013)
+
+fn webhook_error(error: WebhookError) -> ApiError {
+    match error {
+        WebhookError::InvalidInput => invalid(),
+        WebhookError::NotFound => ApiError::not_found(),
+        WebhookError::TooMany => ApiError::new(ErrorCode::QuotaExceeded),
+        WebhookError::SecretUnavailable | WebhookError::Database => ApiError::unavailable(),
+    }
+}
+
+/// The key signing secrets are sealed with; without `SESSION_SIGNING_KEY` the feature is off.
+fn secret_key(state: &AppState) -> Result<&SecretKey, ApiError> {
+    state.identity().and_then(|identity| identity.secret_key()).ok_or_else(ApiError::unavailable)
+}
+
+fn webhook_json(endpoint: &WebhookEndpoint) -> Value {
+    json!({
+        "id": endpoint.id.to_string(),
+        "system_id": endpoint.system_id,
+        "url": endpoint.url,
+        "event_types": endpoint.event_types,
+        "enabled": endpoint.enabled,
+        "previous_secret_active": endpoint.previous_secret_active,
+    })
+}
+
+/// A webhook endpoint with the signing secret, which is shown here and never again.
+fn webhook_with_secret(endpoint: &WebhookEndpoint, secret: &NewSecret) -> Value {
+    let mut body = webhook_json(endpoint);
+    body["secret"] = Value::String(secret.expose().to_owned());
+    body
+}
+
+fn webhook_id(id: &str) -> Result<Uuid, ApiError> {
+    id.parse().map_err(|_| ApiError::not_found())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateWebhookBody {
+    url: String,
+    #[serde(default)]
+    event_types: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateWebhookBody {
+    url: Option<String>,
+    event_types: Option<Vec<String>>,
+    enabled: Option<bool>,
+}
+
+async fn create_webhook_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(system_id): Path<String>,
+    ApiJson(body): ApiJson<CreateWebhookBody>,
+) -> Result<Response, ApiError> {
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    let key = secret_key(&state)?;
+    let (endpoint, secret) = create_webhook_endpoint(&mut transaction, key, state.webhook_policy(), &system_id, &body.url, &body.event_types)
+        .await
+        .map_err(webhook_error)?;
+    audit_host(&mut transaction, &caller, "host.webhook.create", "webhook", endpoint.id, &system_id).await?;
+    let view = webhook_with_secret(&endpoint, &secret);
+    commit(transaction).await?;
+    Ok(json_response(StatusCode::CREATED, &view))
+}
+
+async fn list_webhooks_handler(State(state): State<AppState>, caller: Authenticated, Path(system_id): Path<String>) -> Result<Response, ApiError> {
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    let endpoints = list_webhook_endpoints(&mut transaction, &system_id).await.map_err(webhook_error)?;
+    Ok(json_response(StatusCode::OK, &json!({"webhooks": endpoints.iter().map(webhook_json).collect::<Vec<_>>()})))
+}
+
+async fn get_webhook_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let id = webhook_id(&id)?;
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    let endpoint = get_webhook_endpoint(&mut transaction, &system_id, id).await.map_err(webhook_error)?.ok_or(ApiError::not_found())?;
+    Ok(json_response(StatusCode::OK, &webhook_json(&endpoint)))
+}
+
+async fn update_webhook_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, id)): Path<(String, String)>,
+    ApiJson(body): ApiJson<UpdateWebhookBody>,
+) -> Result<Response, ApiError> {
+    let id = webhook_id(&id)?;
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    let endpoint = update_webhook_endpoint(
+        &mut transaction,
+        state.webhook_policy(),
+        &system_id,
+        id,
+        body.url.as_deref(),
+        body.event_types.as_deref(),
+        body.enabled,
+    )
+    .await
+    .map_err(webhook_error)?
+    .ok_or(ApiError::not_found())?;
+    audit_host(&mut transaction, &caller, "host.webhook.update", "webhook", id, &system_id).await?;
+    let view = webhook_json(&endpoint);
+    commit(transaction).await?;
+    Ok(json_response(StatusCode::OK, &view))
+}
+
+async fn delete_webhook_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let id = webhook_id(&id)?;
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    if !delete_webhook_endpoint(&mut transaction, &system_id, id).await.map_err(webhook_error)? {
+        return Err(ApiError::not_found());
+    }
+    audit_host(&mut transaction, &caller, "host.webhook.delete", "webhook", id, &system_id).await?;
+    commit(transaction).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn rotate_webhook_secret_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let id = webhook_id(&id)?;
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    let key = secret_key(&state)?;
+    let secret = rotate_webhook_secret(&mut transaction, key, &system_id, id).await.map_err(webhook_error)?.ok_or(ApiError::not_found())?;
+    let endpoint = get_webhook_endpoint(&mut transaction, &system_id, id).await.map_err(webhook_error)?.ok_or(ApiError::not_found())?;
+    audit_host(&mut transaction, &caller, "host.webhook.rotate_secret", "webhook", id, &system_id).await?;
+    let view = webhook_with_secret(&endpoint, &secret);
+    commit(transaction).await?;
+    Ok(json_response(StatusCode::OK, &view))
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -1901,6 +1901,7 @@ dependencies = [
  "jiff",
  "md-5",
  "reqwest",
+ "ring",
  "roxmltree 0.21.1",
  "rustls",
  "rusty-s3",

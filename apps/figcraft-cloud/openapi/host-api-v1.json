@@ -347,6 +347,264 @@
           }
         }
       }
+    },
+    "/host/systems/{system_id}/webhooks": {
+      "get": {
+        "operationId": "listHostWebhooks",
+        "summary": "List the host's webhook endpoints (never their secrets).",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoints.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookList"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "createHostWebhook",
+        "summary": "Register an endpoint. The signing secret is in this response only.",
+        "description": "The URL must be https with a public destination (loopback, private, link-local and internal names are refused). event_types empty means every event. At most 10 endpoints per host. The secret is stored encrypted and cannot be read back; rotate it to get a new one.",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateWebhook"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookWithSecret"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "429": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/host/systems/{system_id}/webhooks/{webhook_id}": {
+      "get": {
+        "operationId": "getHostWebhook",
+        "summary": "One endpoint.",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          },
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateHostWebhook",
+        "summary": "Change the URL, the subscription or the enabled flag.",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          },
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateWebhook"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The endpoint.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Webhook"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteHostWebhook",
+        "summary": "Delete the endpoint and its delivery history.",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          },
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Deleted."
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/host/systems/{system_id}/webhooks/{webhook_id}/rotate-secret": {
+      "post": {
+        "operationId": "rotateHostWebhookSecret",
+        "summary": "Issue a new signing secret. The previous one keeps signing for 24 hours.",
+        "description": "The new secret is in this response only. During the overlap each delivery carries a signature for both secrets, so a receiver can switch at its own pace.",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          },
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The endpoint with its new secret.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookWithSecret"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -622,6 +880,171 @@
           },
           "system_id": {
             "type": "string"
+          }
+        }
+      },
+      "CreateWebhook": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "event_types": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "document.created",
+                "document.updated",
+                "document.archived",
+                "document.restored",
+                "document.deleted",
+                "export.completed",
+                "export.failed"
+              ]
+            }
+          }
+        }
+      },
+      "UpdateWebhook": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "url": {
+            "type": "string",
+            "maxLength": 2048
+          },
+          "event_types": {
+            "type": "array",
+            "maxItems": 32,
+            "uniqueItems": true,
+            "items": {
+              "enum": [
+                "document.created",
+                "document.updated",
+                "document.archived",
+                "document.restored",
+                "document.deleted",
+                "export.completed",
+                "export.failed"
+              ]
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
+      "Webhook": {
+        "type": "object",
+        "required": [
+          "id",
+          "system_id",
+          "url",
+          "event_types",
+          "enabled",
+          "previous_secret_active"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "system_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "event_types": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "document.created",
+                "document.updated",
+                "document.archived",
+                "document.restored",
+                "document.deleted",
+                "export.completed",
+                "export.failed"
+              ]
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "previous_secret_active": {
+            "type": "boolean",
+            "description": "True while a rotated-out secret still signs."
+          }
+        }
+      },
+      "WebhookWithSecret": {
+        "type": "object",
+        "required": [
+          "id",
+          "system_id",
+          "url",
+          "event_types",
+          "enabled",
+          "previous_secret_active",
+          "secret"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "system_id": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          },
+          "event_types": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "document.created",
+                "document.updated",
+                "document.archived",
+                "document.restored",
+                "document.deleted",
+                "export.completed",
+                "export.failed"
+              ]
+            }
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "previous_secret_active": {
+            "type": "boolean",
+            "description": "True while a rotated-out secret still signs."
+          },
+          "secret": {
+            "type": "string",
+            "description": "whsec_ followed by 43 URL-safe characters. Shown once."
+          }
+        }
+      },
+      "WebhookList": {
+        "type": "object",
+        "required": [
+          "webhooks"
+        ],
+        "properties": {
+          "webhooks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Webhook"
+            }
           }
         }
       }

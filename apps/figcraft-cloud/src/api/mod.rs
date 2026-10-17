@@ -85,6 +85,9 @@ pub(crate) struct AppState {
     auth_limiter: Arc<RateLimiter>,
     /// Embed-token exchanges per issuer (S6-012).
     embed_limiter: Arc<RateLimiter>,
+    /// Where webhook deliveries may go (S6-013); public destinations only unless a test or
+    /// development setup says otherwise.
+    webhook_policy: figcraft_cloud_storage::webhooks::DestinationPolicy,
     /// Identity settings (sessions, CSRF origin, share-session key, bootstrap gate); `None`
     /// leaves `/api/v1/auth` answering `503`.
     identity: Option<Arc<IdentityConfig>>,
@@ -106,6 +109,7 @@ impl AppState {
             authenticator: Arc::new(DenyAll),
             auth_limiter,
             embed_limiter: Arc::new(RateLimiter::new(host_api::EMBED_LIMIT)),
+            webhook_policy: figcraft_cloud_storage::webhooks::DestinationPolicy::PUBLIC_ONLY,
             identity: None,
             oidc: None,
             realtime: None,
@@ -173,6 +177,17 @@ impl AppState {
 
     pub(crate) fn auth_limiter(&self) -> &RateLimiter {
         &self.auth_limiter
+    }
+
+    /// Allow private and loopback webhook destinations (development and tests only).
+    #[must_use]
+    pub(crate) fn with_webhook_policy(mut self, policy: figcraft_cloud_storage::webhooks::DestinationPolicy) -> Self {
+        self.webhook_policy = policy;
+        self
+    }
+
+    pub(crate) const fn webhook_policy(&self) -> figcraft_cloud_storage::webhooks::DestinationPolicy {
+        self.webhook_policy
     }
 
     pub(crate) fn embed_limiter(&self) -> &RateLimiter {
