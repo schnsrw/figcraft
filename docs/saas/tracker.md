@@ -73,6 +73,15 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
   other sessions, is audited (who, whom, when, never the value), is limited to workspace
   owners and admins acting on people below them (not on the owner, not on themselves through this
   route), and obeys the same length and common-password rules as any password.
+- [ ] **TS-014** Everything works with or without email. A person is identified by a login name;
+  an email address is optional on every account and in every flow. Invitations are not bound to
+  an email: an admin can create an invitation link for anyone (optionally noting an email, which
+  then only enables sending it), and accepting one needs a chosen login name and password, not a
+  verified email (today's invitation acceptance requires a verified email, which blocks people
+  without one). Admin-created accounts need only a login name and a password (TS-013). Password
+  reset works through an admin-issued link or admin-set password when no email exists; the
+  person's own "forgot password" by email appears only when mail is configured and an address is
+  on the account. Workspaces with no mail server configured lose nothing except the sending.
 - [ ] **TS-007** People are who they signed in as: collaborator names and colours come from the
   account, and the workspace shows who edited a file last (S6-043 and the simple part of S6-039).
 - [ ] **TS-008** Recover from mistakes: per-file history with named versions and restore as a new
@@ -3064,6 +3073,7 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-045: platform admins sign in at /platform/v1 with Argon2id passwords and a mandatory TOTP second factor in their own cookie, with the one-time CLI bootstrap token, lockout, rate limits and audit; OpenAPI published. S6 reaches 17/57. |
 | 2026-10-18 | S6-046: workspace create (owner principal or invitation link), list, read, suspend, restore, archive, deletion request and cancel, plan and platform audit under /platform/v1, each change audited on both sides in one transaction. S6 reaches 18/57. |
 | 2026-10-18 | S6-036: profile (display name, palette colour), password change that revokes other sessions, own-session list and revoke. S6 reaches 19/58. |
-| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-013 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
+| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-014 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
 | 2026-10-18 | S6-047: workspace lifecycle enforced and proven on every surface (members 409, relay, service accounts, share links, host issuers, webhooks, jobs); /me/workspaces lists a person's workspaces with state. S6 reaches 20/58. |
 | 2026-10-18 | Priority track: added TS-012 email delivery (optional SMTP with a durable outbox) and TS-013 admin-set and admin-reset passwords (temporary, change at next sign-in); email delivery removed from the backlog. |
+| 2026-10-18 | Priority track: added TS-014 (accounts, invitations and resets work with or without email; login name identifies a person, email optional, invitations no longer require a verified email). |
