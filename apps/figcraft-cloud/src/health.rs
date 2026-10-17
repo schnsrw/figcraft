@@ -102,13 +102,20 @@ async fn termination() {
 pub(super) fn serve(config: &CloudConfig, ready: bool, drain: Drain) -> io::Result<()> {
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     runtime.block_on(async {
-        let api_config = ApiConfig { deployment: config.deployment, trusted_proxies: config.trusted_proxies.clone(), ..ApiConfig::default() };
+        let api_config = ApiConfig {
+            deployment: config.deployment,
+            trusted_proxies: config.trusted_proxies.clone(),
+            images: config.image_settings(),
+            ..ApiConfig::default()
+        };
         let max_body = api_config.max_body_bytes;
+        let images = api_config.images;
         let api = if serves_api(config.role) && ready { api_state(config, api_config).await.map(api::api_router) } else { None };
         if serves_api(config.role) && ready && api.is_none() {
             eprintln!("figcraft-cloud: the API could not be configured; /api/v1 will answer 503");
         }
-        let settings = ContextSettings::new(config.role, MAX_IN_FLIGHT, REQUEST_DEADLINE, u64::try_from(max_body).unwrap_or(u64::MAX));
+        let settings = ContextSettings::new(config.role, MAX_IN_FLIGHT, REQUEST_DEADLINE, u64::try_from(max_body).unwrap_or(u64::MAX))
+            .with_uploads(images.upload_body_limit(), images.upload_deadline());
         let draining = Arc::new(AtomicBool::new(false));
         // The worker roles deliver queued webhooks until the process is told to stop.
         let stop_workers = Arc::new(AtomicBool::new(false));

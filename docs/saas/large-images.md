@@ -120,3 +120,38 @@ this section is updated with what each step actually does.
   (the previous behaviour); over 15 MiB the relay refuses it with a reason. Documents rarely
   remove images (the merge and the editor keep them).
 * Not covered: images embedded in the published library, which still move inline.
+
+## What each step built
+
+### Step 3: the HTTP routes (`apps/figcraft-cloud/src/api/images_api.rs`, `openapi/images-api-v1.json`)
+
+* `PUT /api/v1/documents/{document_id}/images/{sha256}` (body: the file) and `GET` the same path.
+  The upload checks the credential first, then the address, then the declared size, then reads the
+  body (bounded again while reading), hashes it (off the async threads above 256 KiB) and compares
+  it with the address; storage then validates it as a PNG, JPEG, WebP or GIF within the pixel
+  budgets (`assets::store_asset_bytes_with_limit`, the existing content-addressed, deduplicating,
+  read-back-verified path), attaches it to the document (`assets::attach_asset`, an
+  `object_references` row of kind document, so garbage collection keeps it) and commits.
+  `201` new bytes, `200` bytes the tenant already held.
+* Credentials: the browser session cookie (same-origin `fetch`), a service account, or the room's
+  own token in `X-Figcraft-Room-Token` (a share-link secret; a realtime ticket works for the minute
+  it lives). A viewer reads but cannot add (403); a document the credential does not reach is 404.
+* A read returns bytes only for an image attached to the requested document, so knowing a hash
+  does not let a reader of one document read another document's images, and another tenant's
+  identical bytes are a different object (`find_document_asset` filters by tenant, hash and
+  attachment).
+* Limits: `FIGCRAFT_IMAGE_MAX_BYTES` (default 100 MiB, up to 256 MiB), refused from `Content-Length`
+  before the body is read; `FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES` (new bytes only; reused bytes are
+  free; 507); `FIGCRAFT_IMAGE_UPLOAD_SECONDS`; at most 8 transfers at once per replica (503 and
+  retry). Only the image `PUT` is exempt from the 1 MiB body cap and 30 s deadline every other
+  route has. The size limit that was 32 MiB for uploads in the storage layer is a parameter now
+  (`prepare_asset_with_limit`), default unchanged for other callers.
+* Not built: resumable or chunked upload (the object-store layer only has single presigned PUTs;
+  each image is one request, held in memory at the API); direct-to-S3 upload from the browser
+  (needs bucket CORS); a conditional GET (clients cache by hash themselves).
+* Evidence (no database): `images_api_tests.rs` runs the real router and middleware with an
+  in-memory gate: a 30 MiB image up and down, role and credential matrix, tenant isolation, per
+  document attachment, hash mismatch, type and size limits, quota, transfer bound, the OpenAPI
+  document; `assets.rs` unit tests for the raised cap and the address parser. The production
+  gate's SQL (`find_document_asset`, `read_document_asset`, `tenant_asset_bytes`) is exercised
+  only against a live database (not run in this task; see the tracker).

@@ -1,0 +1,236 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FigCraft Cloud document images API",
+    "version": "1.0.0",
+    "description": "The bytes of images that documents refer to by reference (large images do not travel inside collaboration batches). An image is addressed by the lower-case hex SHA-256 of its file. Callers prove themselves with the browser session cookie (same-origin fetch), a service-account bearer, or the room's own token in the X-Figcraft-Room-Token header (a share-link secret, or a realtime ticket for the minute it lives). Errors use the common envelope {error:{code,message,request_id}}; image failures add error.reason (image_too_large, unsupported_image, invalid_image, hash_mismatch, storage_quota)."
+  },
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ],
+  "paths": {
+    "/images/openapi.json": {
+      "get": {
+        "operationId": "getImagesOpenApi",
+        "summary": "This document.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/documents/{document_id}/images/{sha256}": {
+      "put": {
+        "operationId": "putDocumentImage",
+        "summary": "Store an image for a document, content-addressed in the caller's tenant.",
+        "description": "The body is the image file (PNG, JPEG, WebP or GIF, any Content-Type; the file is recognised by its content). It must hash to {sha256} and stay within the workspace's image size (FIGCRAFT_IMAGE_MAX_BYTES, 100 MiB by default; 413 above it, decided from Content-Length before the body is read) and pixel budgets. Identical bytes are stored once per tenant; the image is attached to the document so it is kept while the document exists. Needs document.edit (or an editor share link, or a service account with documents:write). At most 8 images move at once on a replica; the rest get 503 and retry.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocumentId"
+          },
+          {
+            "$ref": "#/components/parameters/Sha256"
+          },
+          {
+            "$ref": "#/components/parameters/RoomToken"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "type": "string",
+                "format": "binary"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Stored.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoredImage"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "The tenant already held these bytes; nothing was written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StoredImage"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a SHA-256 address, an empty body, bytes that do not hash to the address (reason hash_mismatch) or a file that is not a valid image within the pixel budgets (reason invalid_image)."
+          },
+          "401": {
+            "description": "No valid credential."
+          },
+          "403": {
+            "description": "The caller may view the document but not edit it."
+          },
+          "404": {
+            "description": "No such document in the caller's tenant, or one the caller cannot see."
+          },
+          "409": {
+            "description": "The document is archived or being deleted."
+          },
+          "413": {
+            "description": "The image is over the size limit."
+          },
+          "415": {
+            "description": "Not a PNG, JPEG, WebP or GIF."
+          },
+          "503": {
+            "description": "Too many transfers in flight, or storage unavailable. Retry."
+          },
+          "507": {
+            "description": "The tenant's image storage quota (FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES) is used."
+          }
+        }
+      },
+      "get": {
+        "operationId": "getDocumentImage",
+        "summary": "Read an image that is attached to the document.",
+        "description": "Needs document.join_realtime (anyone who can open the document). The response is the file with its media type, an ETag of the address and a one-year private immutable cache lifetime: the address names the content. An image the document does not hold reads as 404 even if the tenant holds the same bytes for another document.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/DocumentId"
+          },
+          {
+            "$ref": "#/components/parameters/Sha256"
+          },
+          {
+            "$ref": "#/components/parameters/RoomToken"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image.",
+            "content": {
+              "image/png": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              },
+              "image/gif": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a SHA-256 address."
+          },
+          "401": {
+            "description": "No valid credential."
+          },
+          "404": {
+            "description": "No such document, or no such image in it."
+          },
+          "503": {
+            "description": "Too many transfers in flight, or storage unavailable. Retry."
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "parameters": {
+      "DocumentId": {
+        "name": "document_id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "Sha256": {
+        "name": "sha256",
+        "in": "path",
+        "required": true,
+        "description": "Lower-case hex SHA-256 of the image file.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      },
+      "RoomToken": {
+        "name": "X-Figcraft-Room-Token",
+        "in": "header",
+        "required": false,
+        "description": "The room's token (a share-link secret, or a realtime ticket) instead of a session cookie.",
+        "schema": {
+          "type": "string",
+          "maxLength": 256
+        }
+      }
+    },
+    "schemas": {
+      "StoredImage": {
+        "type": "object",
+        "required": [
+          "sha256",
+          "size",
+          "media_type",
+          "reused"
+        ],
+        "properties": {
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "media_type": {
+            "type": "string",
+            "enum": [
+              "image/png",
+              "image/jpeg",
+              "image/webp",
+              "image/gif"
+            ]
+          },
+          "reused": {
+            "type": "boolean"
+          }
+        }
+      }
+    }
+  }
+}

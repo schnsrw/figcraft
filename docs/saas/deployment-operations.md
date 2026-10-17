@@ -93,6 +93,15 @@ FIGCRAFT_RELAY_MAX_PEERS_PER_ROOM=256      # clients in one room (1 to 10000)
 FIGCRAFT_RELAY_MESSAGES_PER_SECOND=100     # per connection, burst 4x; past it the connection is dropped (1 to 10000)
 FIGCRAFT_RELAY_MAX_MESSAGE_BYTES=67108864  # largest message a client may send (1024 to 67108864)
 FIGCRAFT_RELAY_MAX_QUEUED_BYTES=167772160  # outbound bytes queued per connection; a reader this far behind is dropped
+# Document images (TS-009, large-images.md): pasted photos travel by reference, their bytes over
+# HTTP to the object store. The API route takes at most N bytes per image and the relay tells
+# clients the same figure; past it an editor keeps the image out of the document and says why.
+FIGCRAFT_IMAGE_MAX_BYTES=104857600         # per image (1048576 to 268435456, default 100 MiB)
+FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES=0        # verified image bytes a workspace may hold (0: no quota)
+FIGCRAFT_IMAGE_UPLOAD_SECONDS=300          # longest one image upload may take (10 to 3600)
+# The gateway in front of the API must let image uploads through: a request body at least
+# FIGCRAFT_IMAGE_MAX_BYTES (nginx: client_max_body_size 128m for /api/v1/documents/*/images/*;
+# Caddy and Traefik pass any size by default) and a read timeout of at least the upload seconds.
 
 # Built-in accounts (S6-033): Argon2id cost for new password hashes (stored inside every hash, so
 # raising them upgrades old hashes at the next sign-in) and how many hashes run at once. Memory in use

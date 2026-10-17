@@ -2493,6 +2493,12 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   `Image` entry, placeholders, reference checks against an `AssetDirectory`, per-peer filtering for
   older clients, oversized inline batches refused with a reason, client upload-then-reference and
   hydrate API. `crates/collab/src/asset_tests.rs` (15 tests, no database).
+  (3/6) storage and HTTP: `PUT`/`GET /api/v1/documents/{id}/images/{sha256}` over the existing
+  content-addressed asset path with per-image size cap (default 100 MiB, `FIGCRAFT_IMAGE_MAX_BYTES`),
+  tenant quota hook, document attachment for garbage collection, session/service-account/room-token
+  credentials, OpenAPI `openapi/images-api-v1.json`, upload exempted from the 1 MiB body cap.
+  `apps/figcraft-cloud/src/api/images_api_tests.rs` (12 tests through the real router, in-memory
+  gate, no database). The production gate's SQL is compile-checked and not run here.
 - [x] **S5-019** Preserve compatibility with current filesystem-server and desktop-hosted sessions.
   Evidence: Compatibility with self-hosted sessions is proven by three new test files; all pass. (1)
   apps/figcraft-server/tests/cloud_compat.rs starts figcraft-server in-process on loopback with a

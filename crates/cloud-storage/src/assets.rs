@@ -54,13 +54,31 @@ use crate::object_metadata::{
 };
 use crate::object_references::{Change, ObjectReferenceError, OwnerKind, add_reference, remove_reference};
 use crate::objects::{ObjectStore, ObjectStoreError};
-use crate::uploads::{UploadError, valid_producer_version, validate_upload_request};
+use crate::uploads::valid_producer_version;
 use crate::validation::{Budgets, Rejection, validate};
 
 pub use crate::uploads::{ASSET_MEDIA_TYPES, MAX_ASSET_BYTES};
 
 /// The most assets one document may have attached.
 pub const MAX_ASSETS_PER_DOCUMENT: i64 = 10_000;
+
+/// A lower-case hex SHA-256 (64 characters), the address of a document image.
+#[must_use]
+pub fn parse_sha256_hex(text: &str) -> Option<[u8; 32]> {
+    if text.len() != 64 {
+        return None;
+    }
+    let digit = |b: u8| match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    };
+    let mut out = [0u8; 32];
+    for (slot, pair) in out.iter_mut().zip(text.as_bytes().chunks(2)) {
+        *slot = digit(*pair.first()?)? << 4 | digit(*pair.get(1)?)?;
+    }
+    Some(out)
+}
 /// The most assets one [`list_document_assets`] call returns.
 pub const MAX_ASSET_PAGE: u32 = 500;
 
@@ -156,14 +174,26 @@ pub struct PreparedAsset {
 /// Check `bytes` declared as `media_type` against the asset policy and content validation, and
 /// hash them. Pure and bounded: the size cap is checked before anything reads the bytes.
 pub fn prepare_asset(bytes: &[u8], media_type: &str, producer_version: &str) -> Result<PreparedAsset, AssetError> {
+    prepare_asset_with_limit(bytes, media_type, producer_version, MAX_ASSET_BYTES)
+}
+
+/// The most [`prepare_asset_with_limit`] accepts whatever the caller asks for: the object store's
+/// single-transfer bound.
+pub const MAX_ASSET_BYTES_CEILING: i64 = 256 * 1024 * 1024;
+
+/// [`prepare_asset`] with a size cap of `max_bytes` (clamped to `1..=`[`MAX_ASSET_BYTES_CEILING`])
+/// instead of [`MAX_ASSET_BYTES`]: the cap document images (TS-009) are configured with.
+pub fn prepare_asset_with_limit(bytes: &[u8], media_type: &str, producer_version: &str, max_bytes: i64) -> Result<PreparedAsset, AssetError> {
     if !valid_producer_version(producer_version) {
         return Err(AssetError::InvalidProducerVersion);
     }
     let size_bytes = i64::try_from(bytes.len()).map_err(|_| AssetError::InvalidSize)?;
-    let media_type = validate_upload_request(ObjectKind::Asset, size_bytes, media_type).map_err(|error| match error {
-        UploadError::InvalidSize => AssetError::InvalidSize,
-        _ => AssetError::UnsupportedMediaType,
-    })?;
+    if size_bytes <= 0 || size_bytes > max_bytes.clamp(1, MAX_ASSET_BYTES_CEILING) {
+        return Err(AssetError::InvalidSize);
+    }
+    // The type allowlist and size policy of an asset upload; the size was checked above against
+    // the caller's cap, which may be higher than the default policy's.
+    let media_type = ASSET_MEDIA_TYPES.iter().copied().find(|allowed| *allowed == media_type).ok_or(AssetError::UnsupportedMediaType)?;
     validate(media_type, bytes, &Budgets::default()).map_err(AssetError::Invalid)?;
     Ok(PreparedAsset { media_type, sha256: Sha256::digest(bytes).into(), size_bytes })
 }
@@ -221,7 +251,19 @@ pub async fn store_asset_bytes(
     media_type: &str,
     producer_version: &str,
 ) -> Result<StoredAsset, AssetError> {
-    let prepared = prepare_asset(&bytes, media_type, producer_version)?;
+    store_asset_bytes_with_limit(transaction, store, bytes, media_type, producer_version, MAX_ASSET_BYTES).await
+}
+
+/// [`store_asset_bytes`] with a size cap of `max_bytes` (see [`prepare_asset_with_limit`]).
+pub async fn store_asset_bytes_with_limit(
+    transaction: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    bytes: Vec<u8>,
+    media_type: &str,
+    producer_version: &str,
+    max_bytes: i64,
+) -> Result<StoredAsset, AssetError> {
+    let prepared = prepare_asset_with_limit(&bytes, media_type, producer_version, max_bytes)?;
     if let Some(object) = find_verified(transaction, &prepared.sha256, Some(store.bucket_name())).await? {
         return Ok(StoredAsset { object, reused: true });
     }
@@ -454,6 +496,82 @@ pub async fn presign_document_asset_download(
     })
 }
 
+/// The verified asset with digest `sha256` that is attached to `document` (both in the
+/// transaction's tenant), or `None`. A readable document is `pending`, `active` or `archived`
+/// (`DocumentUnavailable` otherwise); another tenant's or an unknown document is
+/// `DocumentNotFound`. An asset of the tenant that this document does not hold is `None`, so a
+/// reader of one document cannot read another document's images by knowing their hashes. Callers
+/// must have authorized the principal to read the document.
+pub async fn find_document_asset(
+    transaction: &mut TenantTransaction<'_>,
+    document: CloudDocumentId,
+    sha256: &[u8; 32],
+) -> Result<Option<ObjectRecord>, AssetError> {
+    let state = document_state(transaction, document, false).await?;
+    if !matches!(state.as_str(), "pending" | "active" | "archived") {
+        return Err(AssetError::DocumentUnavailable);
+    }
+    let Some(object) = find_verified(transaction, sha256, None).await? else {
+        return Ok(None);
+    };
+    Ok(attached(transaction, document, object.id, false).await?.then_some(object))
+}
+
+/// The bytes of all verified assets the transaction's tenant holds (what a per-tenant image quota
+/// is measured against).
+pub async fn tenant_asset_bytes(transaction: &mut TenantTransaction<'_>) -> Result<u64, AssetError> {
+    let total: i64 = sqlx::query_scalar(concat!(
+        "SELECT COALESCE(sum(size_bytes), 0)::bigint FROM objects ",
+        "WHERE tenant_id = $1::uuid AND kind = 'asset' AND state = 'verified' AND deleted_at IS NULL"
+    ))
+    .bind(transaction.tenant_id().to_string())
+    .fetch_one(transaction.connection())
+    .await
+    .map_err(database_error)?;
+    Ok(u64::try_from(total).unwrap_or(0))
+}
+
+/// Read the bytes of the verified asset `sha256` attached to `document` (see
+/// [`find_document_asset`]), re-checking their digest against the object row. `None` when the
+/// document holds no such asset.
+pub async fn read_document_asset(
+    transaction: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    document: CloudDocumentId,
+    sha256: &[u8; 32],
+) -> Result<Option<(ObjectRecord, Vec<u8>)>, AssetError> {
+    let Some(object) = find_document_asset(transaction, document, sha256).await? else {
+        return Ok(None);
+    };
+    let expected = u64::try_from(object.size_bytes).map_err(|_| AssetError::CorruptRow)?;
+    let bytes = store.get_object(&object.object_key, expected).await.map_err(AssetError::Store)?;
+    if u64::try_from(bytes.len()).ok() != Some(expected) || <[u8; 32]>::from(Sha256::digest(&bytes)) != object.sha256 {
+        return Err(AssetError::VerificationFailed);
+    }
+    Ok(Some((object, bytes)))
+}
+
+/// The relay's check before it accepts a batch that refers to image `sha256` of `len` bytes: the
+/// transaction's tenant holds that verified asset with exactly that size (another tenant's
+/// identical bytes are invisible), and it is attached to `document` (idempotently, so the
+/// reference keeps it from being collected even when it was uploaded for another document).
+/// `false` when there is no such asset. Callers must have admitted the principal to the room.
+pub async fn claim_document_asset(
+    transaction: &mut TenantTransaction<'_>,
+    document: CloudDocumentId,
+    sha256: &[u8; 32],
+    len: u64,
+) -> Result<bool, AssetError> {
+    let Some(object) = find_verified(transaction, sha256, None).await? else {
+        return Ok(false);
+    };
+    if u64::try_from(object.size_bytes).ok() != Some(len) {
+        return Ok(false);
+    }
+    attach_asset(transaction, document, object.id).await?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,6 +614,53 @@ mod tests {
         assert_eq!(prepare_asset(&[], "image/png", "v"), Err(AssetError::InvalidSize));
         assert_eq!(prepare_asset(&bytes, "image/png", ""), Err(AssetError::InvalidProducerVersion));
         assert_eq!(prepare_asset(&bytes, "image/png", "v\n"), Err(AssetError::InvalidProducerVersion));
+    }
+
+    /// A valid PNG with a text chunk of `padding` bytes before the image data.
+    fn padded_png(padding: usize) -> Vec<u8> {
+        let mut png = png();
+        let at = png.len() - 12; // before IEND (length, type, crc)
+        let mut text = b"Comment\0".to_vec();
+        text.resize(padding.max(8), b'x');
+        let mut chunk = u32::try_from(text.len()).unwrap().to_be_bytes().to_vec();
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(b"tEXt");
+        crc.update(&text);
+        chunk.extend_from_slice(b"tEXt");
+        chunk.extend_from_slice(&text);
+        chunk.extend_from_slice(&crc.finalize().to_be_bytes());
+        png.splice(at..at, chunk);
+        png
+    }
+
+    #[test]
+    fn sha256_addresses_are_lowercase_hex_of_exactly_32_bytes() {
+        let sum: [u8; 32] = Sha256::digest(b"abc").into();
+        let hex: String = sum.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(parse_sha256_hex(&hex), Some(sum));
+        for bad in ["", "ab", &hex.to_uppercase(), &hex[..63], &format!("{hex}0"), &format!("g{}", &hex[1..]), &format!("{}é", &hex[..62])] {
+            assert_eq!(parse_sha256_hex(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn document_images_take_a_larger_cap_than_the_default_policy() {
+        let thirty = padded_png(30 * 1024 * 1024);
+        assert!(thirty.len() > 30 * 1024 * 1024);
+        // The default policy stops at 32 MiB; a 40 MiB image is only taken with a higher cap.
+        let forty = padded_png(40 * 1024 * 1024);
+        assert_eq!(prepare_asset(&forty, "image/png", "v"), Err(AssetError::InvalidSize));
+        let cap = 100 * 1024 * 1024;
+        let prepared = prepare_asset_with_limit(&forty, "image/png", "v", cap).unwrap();
+        assert_eq!(prepared.size_bytes, i64::try_from(forty.len()).unwrap());
+        assert_eq!(prepared.sha256, <[u8; 32]>::from(Sha256::digest(&forty)));
+        assert!(prepare_asset_with_limit(&thirty, "image/png", "v", cap).is_ok());
+        // The caller's cap applies; it never goes past the transfer ceiling.
+        assert_eq!(prepare_asset_with_limit(&forty, "image/png", "v", 10 * 1024 * 1024), Err(AssetError::InvalidSize));
+        assert_eq!(prepare_asset_with_limit(&forty, "image/png", "v", i64::MAX).map(|p| p.size_bytes), Ok(prepared.size_bytes));
+        assert_eq!(prepare_asset_with_limit(&[], "image/png", "v", cap), Err(AssetError::InvalidSize));
+        assert_eq!(prepare_asset_with_limit(&forty, "image/png", "v", 0), Err(AssetError::InvalidSize));
+        assert_eq!(prepare_asset_with_limit(&forty, "image/svg+xml", "v", cap), Err(AssetError::UnsupportedMediaType));
     }
 
     #[test]

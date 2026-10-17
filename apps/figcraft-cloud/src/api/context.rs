@@ -90,11 +90,30 @@ pub(crate) struct ContextSettings {
     pub(crate) in_flight: Arc<Semaphore>,
     pub(crate) deadline: Duration,
     pub(crate) max_body_bytes: u64,
+    /// The body size and deadline of the routes that take uploads (document images, TS-009);
+    /// the same as every route's until [`with_uploads`](Self::with_uploads).
+    pub(crate) upload_body_bytes: u64,
+    pub(crate) upload_deadline: Duration,
 }
 
 impl ContextSettings {
     pub(crate) fn new(role: CloudRole, max_in_flight: usize, deadline: Duration, max_body_bytes: u64) -> Self {
-        Self { role, in_flight: Arc::new(Semaphore::new(max_in_flight)), deadline, max_body_bytes }
+        Self {
+            role,
+            in_flight: Arc::new(Semaphore::new(max_in_flight)),
+            deadline,
+            max_body_bytes,
+            upload_body_bytes: max_body_bytes,
+            upload_deadline: deadline,
+        }
+    }
+
+    /// Let upload routes ([`super::images_api::is_upload`]) carry `body_bytes` and take `deadline`.
+    #[must_use]
+    pub(crate) fn with_uploads(mut self, body_bytes: u64, deadline: Duration) -> Self {
+        self.upload_body_bytes = body_bytes.max(self.max_body_bytes);
+        self.upload_deadline = deadline.max(self.deadline);
+        self
     }
 }
 
@@ -109,14 +128,20 @@ pub(crate) async fn middleware(State(settings): State<ContextSettings>, mut requ
 
     let header_bytes =
         request.headers().iter().fold(0usize, |total, (name, value)| total.saturating_add(name.as_str().len()).saturating_add(value.len()));
+    // Uploads (a document image PUT) may be large and slow; nothing else may.
+    let (max_body, deadline) = if super::images_api::is_upload(request.method(), &route) {
+        (settings.upload_body_bytes, settings.upload_deadline)
+    } else {
+        (settings.max_body_bytes, settings.deadline)
+    };
     let response = if header_bytes > MAX_HEADER_BYTES {
         ApiError::new(figcraft_cloud_domain::ErrorCode::InvalidRequest).with_status(StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE).into_response()
-    } else if declared_length.is_some_and(|length| length > settings.max_body_bytes) {
+    } else if declared_length.is_some_and(|length| length > max_body) {
         ApiError::payload_too_large().into_response()
     } else {
         match settings.in_flight.clone().try_acquire_owned() {
             Err(_) => ApiError::unavailable().into_response(),
-            Ok(_permit) => match tokio::time::timeout(settings.deadline, next.run(request)).await {
+            Ok(_permit) => match tokio::time::timeout(deadline, next.run(request)).await {
                 Ok(response) => response,
                 Err(_) => ApiError::unavailable().into_response(),
             },

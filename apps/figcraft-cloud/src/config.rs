@@ -68,6 +68,9 @@ pub(super) struct CloudConfig {
     password_concurrency: usize,
     /// Sign-in lockout (`FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD`, `_BASE_SECONDS`, `_MAX_SECONDS`).
     login_lockout: figcraft_cloud_storage::credentials::LockoutPolicy,
+    /// Document images (TS-009): `FIGCRAFT_IMAGE_MAX_BYTES`, `FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES`,
+    /// `FIGCRAFT_IMAGE_UPLOAD_SECONDS`.
+    images: crate::api::images_api::ImageSettings,
 }
 
 impl Default for CloudConfig {
@@ -97,6 +100,7 @@ impl Default for CloudConfig {
             password_params: figcraft_cloud_auth::password::HashParams::default(),
             password_concurrency: 4,
             login_lockout: figcraft_cloud_storage::credentials::LockoutPolicy::default(),
+            images: crate::api::images_api::ImageSettings::default(),
         }
     }
 }
@@ -255,6 +259,18 @@ impl CloudConfig {
                     config.login_lockout.base_secs =
                         bounded(value, 1, 86_400, "FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS must be a whole number of seconds from 1 to 86400")? as i64;
                 }
+                "FIGCRAFT_IMAGE_MAX_BYTES" => {
+                    config.images.max_bytes =
+                        bounded(value, 1 << 20, 256 << 20, "FIGCRAFT_IMAGE_MAX_BYTES must be a whole number of bytes from 1048576 to 268435456")?;
+                }
+                "FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES" => {
+                    config.images.tenant_quota_bytes =
+                        bounded(value, 0, 1 << 50, "FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES must be a whole number of bytes (0: no quota)")?;
+                }
+                "FIGCRAFT_IMAGE_UPLOAD_SECONDS" => {
+                    config.images.upload_seconds =
+                        bounded(value, 10, 3600, "FIGCRAFT_IMAGE_UPLOAD_SECONDS must be a whole number of seconds from 10 to 3600")?;
+                }
                 "FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS" => {
                     config.login_lockout.max_secs =
                         bounded(value, 1, 86_400, "FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS must be a whole number of seconds from 1 to 86400")? as i64;
@@ -294,6 +310,11 @@ impl CloudConfig {
         }
         config.validate_production()?;
         Ok(config)
+    }
+
+    /// The document image limits (`FIGCRAFT_IMAGE_*`).
+    pub(super) const fn image_settings(&self) -> crate::api::images_api::ImageSettings {
+        self.images
     }
 
     /// `FIGCRAFT_PUBLIC_URL`, when configured.
@@ -528,6 +549,9 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_PASSWORD_CONCURRENCY",
         "FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD",
         "FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS",
+        "FIGCRAFT_IMAGE_MAX_BYTES",
+        "FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES",
+        "FIGCRAFT_IMAGE_UPLOAD_SECONDS",
         "FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS",
         "DATABASE_URL",
         "DATABASE_URL_FILE",
@@ -586,6 +610,30 @@ mod tests {
             "ws://re lay/x",
         ] {
             assert!(ok(bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn image_limits_have_defaults_and_bounds() {
+        use crate::api::images_api::ImageSettings;
+        assert_eq!(CloudConfig::default().image_settings(), ImageSettings { max_bytes: 100 << 20, tenant_quota_bytes: 0, upload_seconds: 300 });
+        let images = |pairs: &[(&str, &str)]| CloudConfig::parse(pairs.iter().copied()).map(|c| c.image_settings());
+        let set = images(&[
+            ("FIGCRAFT_IMAGE_MAX_BYTES", "33554432"),
+            ("FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES", "10737418240"),
+            ("FIGCRAFT_IMAGE_UPLOAD_SECONDS", "120"),
+        ]);
+        assert_eq!(set, Ok(ImageSettings { max_bytes: 32 << 20, tenant_quota_bytes: 10 << 30, upload_seconds: 120 }));
+        for (key, bad) in [
+            ("FIGCRAFT_IMAGE_MAX_BYTES", "0"),
+            ("FIGCRAFT_IMAGE_MAX_BYTES", "1048575"),
+            ("FIGCRAFT_IMAGE_MAX_BYTES", "268435457"),
+            ("FIGCRAFT_IMAGE_MAX_BYTES", "big"),
+            ("FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES", "-1"),
+            ("FIGCRAFT_IMAGE_UPLOAD_SECONDS", "9"),
+            ("FIGCRAFT_IMAGE_UPLOAD_SECONDS", "3601"),
+        ] {
+            assert!(images(&[(key, bad)]).is_err(), "{key}={bad}");
         }
     }
 

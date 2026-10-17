@@ -33,6 +33,7 @@ pub(crate) mod documents_api;
 pub(crate) mod error;
 pub(crate) mod host_api;
 pub(crate) mod host_events;
+pub(crate) mod images_api;
 pub(crate) mod login_throttle;
 pub(crate) mod me_api;
 pub(crate) mod me_routes;
@@ -70,6 +71,8 @@ pub(crate) struct ApiConfig {
     pub(crate) trusted_proxies: Vec<Cidr>,
     pub(crate) auth_rate_limit: RateLimitConfig,
     pub(crate) max_body_bytes: usize,
+    /// Document image limits (TS-009).
+    pub(crate) images: images_api::ImageSettings,
 }
 
 impl Default for ApiConfig {
@@ -79,6 +82,7 @@ impl Default for ApiConfig {
             trusted_proxies: Vec::new(),
             auth_rate_limit: RateLimitConfig::default(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            images: images_api::ImageSettings::default(),
         }
     }
 }
@@ -111,6 +115,9 @@ pub(crate) struct AppState {
     login_throttle: Arc<login_throttle::LoginThrottle>,
     /// The platform realm's limiters and session limits (S6-045).
     platform: Arc<crate::platform_api::PlatformRuntime>,
+    /// Document images (TS-009): how callers are authorized and bytes stored, and the bound on
+    /// transfers in flight.
+    images: images_api::Images,
 }
 
 impl AppState {
@@ -132,7 +139,19 @@ impl AppState {
             lockout: figcraft_cloud_storage::credentials::LockoutPolicy::default(),
             login_throttle: Arc::new(login_throttle::LoginThrottle::new(figcraft_cloud_storage::credentials::LockoutPolicy::default())),
             platform: Arc::new(crate::platform_api::PlatformRuntime::new()),
+            images: images_api::Images::production(),
         }
+    }
+
+    /// Replace how document images are authorized and stored (tests use an in-memory one).
+    #[must_use]
+    pub(crate) fn with_image_gate(mut self, gate: Arc<dyn images_api::ImageGate>) -> Self {
+        self.images = images_api::Images::new(gate);
+        self
+    }
+
+    pub(crate) fn images(&self) -> &images_api::Images {
+        &self.images
     }
 
     /// Install the production identity stack: these settings and the
@@ -273,6 +292,7 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(me_api::me_routes())
         .merge(admin_users_routes::resource_routes())
         .merge(documents_api::routes())
+        .merge(images_api::router())
         .merge(host_api::router());
     // The platform realm (`/platform/v1`) is a separate router with its own authenticator.
     let platform = crate::platform_api::router(state.clone()).layer(DefaultBodyLimit::max(state.config().max_body_bytes));
@@ -306,6 +326,8 @@ async fn unavailable() -> ApiError {
 
 #[cfg(test)]
 mod host_api_tests;
+#[cfg(test)]
+mod images_api_tests;
 #[cfg(test)]
 mod revocation_race_tests;
 #[cfg(test)]
