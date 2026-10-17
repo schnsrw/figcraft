@@ -126,6 +126,15 @@ pub trait Backend: Send + 'static {
     /// The session for a file that isn't open (after [`admit`](Self::admit) let someone in).
     fn open(&mut self, file: &str) -> Result<Server, String>;
 
+    /// How the person admitted through `link` (the [`Admission::link`] of their hello) is shown:
+    /// a name and, optionally, a colour (`#RRGGBB`) the backend vouches for, which replace what the
+    /// client sent in its hello. `None`, the default, keeps the client's name and the hub's colour.
+    /// A backend that authenticates accounts uses this so cursors, comments and undo history
+    /// belong to real people rather than to whatever a client claims (S6-043).
+    fn display(&mut self, _file: &str, _link: Option<&str>) -> Option<(String, Option<String>)> {
+        None
+    }
+
     /// Start opening `file` away from the hub's thread (a restore that takes seconds must not
     /// stop every other room). `Ok(true)`: it is opening; the hub parks the hellos for it and
     /// asks [`opened`](Self::opened) whenever the backend [`wake`s](Wake) it. `Ok(false)` (the
@@ -1621,6 +1630,13 @@ impl<B: Backend> Hub<B> {
         let taken: Vec<&str> = room.server.peers().map(|p| p.color.as_str()).collect();
         let color = PEOPLE.iter().find(|c| !taken.contains(c)).copied().unwrap_or(PEOPLE[taken.len() % PEOPLE.len()]);
         hello.color = color.to_string();
+        // A backend that knows who this is overrides what the client claimed.
+        if let Some((name, account_color)) = self.backend.display(&file, admission.link.as_deref()) {
+            hello.name = name;
+            if let Some(account_color) = account_color.filter(|c| c.len() == 7 && c.starts_with('#') && c[1..].bytes().all(|b| b.is_ascii_hexdigit())) {
+                hello.color = account_color;
+            }
+        }
         hello.name = match clean_name(&hello.name) {
             n if n.is_empty() => {
                 room.guests += 1;

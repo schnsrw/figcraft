@@ -414,3 +414,69 @@ fn tickets_work_through_a_replica_that_does_not_own_the_room() -> TestResult {
     front.stop();
     Ok(())
 }
+
+/// How the room shows client `me`: the `PeerJoined` the hub sends once it seats the hello.
+fn shown_as(raw: &mut Raw, me: u32) -> (String, String) {
+    loop {
+        match raw.next() {
+            Some(ServerMsg::PeerJoined(peer)) if peer.client_id == me => return (peer.name, peer.color),
+            Some(_) => {}
+            None => panic!("the connection ended before the peer list"),
+        }
+    }
+}
+
+#[test]
+fn people_are_shown_as_the_account_they_signed_in_with_not_as_they_claim() -> TestResult {
+    let Some(fixture) = Fixture::new()? else {
+        return Ok(());
+    };
+    let file = fixture.document.to_string();
+    let (ada, ben) = (fixture.member(Role::Editor), fixture.member(Role::Editor));
+    let expires = expiry(now(), MAX_TICKET_SECS);
+    let chosen = figcraft_cloud_storage::profiles::PALETTE[3];
+    fixture.runtime.block_on(async {
+        figcraft_cloud_storage::profiles::update_profile(&fixture.pool, ada.principal, Some("Ada Lovelace"), Some(chosen)).await.unwrap();
+        figcraft_cloud_storage::profiles::update_profile(&fixture.pool, ben.principal, Some("Ben Franklin"), None).await.unwrap();
+    });
+    let ben_default = figcraft_cloud_storage::profiles::color_for(ben.principal);
+    let ((mut owner, _owner_sweeper), (mut front, _front_sweeper)) = (fixture.replica(), fixture.replica());
+
+    // The hello claims to be somebody else (`Raw::join` says "e1 probe"); the relay shows the account.
+    let mut a = Raw::join(owner.addr(), &file, &fixture.ticket(&ada, fixture.document, true, expires));
+    let (ada_id, ..) = a.welcome();
+    assert_eq!(shown_as(&mut a, ada_id), ("Ada Lovelace".to_string(), chosen.to_string()));
+
+    // Through the replica that does not own the room, the owner still applies the account.
+    let mut b = Raw::join(front.addr(), &file, &fixture.ticket(&ben, fixture.document, true, expires));
+    let (ben_id, ..) = b.welcome();
+    assert_eq!(shown_as(&mut b, ben_id), ("Ben Franklin".to_string(), ben_default.to_string()));
+    // Ada is told how Ben is shown, too.
+    assert_eq!(shown_as(&mut a, ben_id), ("Ben Franklin".to_string(), ben_default.to_string()));
+
+    // A member session token (not a ticket) is shown the same way.
+    let mut c = Raw::join(owner.addr(), &file, &format!("member.{}.{}", fixture.tenant, ben.token));
+    let (c_id, ..) = c.welcome();
+    assert_eq!(shown_as(&mut c, c_id).0, "Ben Franklin");
+
+    // A labelled share link shows its label; an unlabelled one keeps what the visitor typed.
+    let (labelled, plain) = fixture.runtime.block_on(async {
+        let mut transaction = begin_tenant_transaction(&fixture.pool, fixture.tenant).await.unwrap();
+        let labelled =
+            create_share_link(&mut transaction, fixture.document, ShareRole::Viewer, Some("Design review"), fixture.owner, None).await.unwrap();
+        let plain = create_share_link(&mut transaction, fixture.document, ShareRole::Viewer, None, fixture.owner, None).await.unwrap();
+        transaction.commit().await.unwrap();
+        (labelled, plain)
+    });
+    let mut d = Raw::join(owner.addr(), &file, &labelled.secret);
+    let (d_id, ..) = d.welcome();
+    assert_eq!(shown_as(&mut d, d_id).0, "Design review");
+    let mut e = Raw::join(owner.addr(), &file, &plain.secret);
+    let (e_id, ..) = e.welcome();
+    assert_eq!(shown_as(&mut e, e_id).0, "e1 probe");
+
+    drop((a, b, c, d, e));
+    owner.stop();
+    front.stop();
+    Ok(())
+}

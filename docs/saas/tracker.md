@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (22/58) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (23/58) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 22 / 58 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 23 / 58 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2712,9 +2712,10 @@ already allow "local accounts or OIDC" (`product-requirements.md`, "Libraries, r
   new accepted head and keeps the original history.
 - [ ] **S6-042** History in the workspace: a per-file timeline (who, when, through which team), named
   versions, and restore with confirmation.
-- [ ] **S6-043** Collaborators are who they authenticated as: the relay sets each peer's displayed name
+- [x] **S6-043** Collaborators are who they authenticated as: the relay sets each peer's displayed name
   and colour from the signed-in account (a share link shows the link's label), instead of trusting
   what the client says, so cursors, comments and undo history belong to real people.
+  Evidence: Hook (patch ledger FP-014, additive and default-no-op): `Backend::display(file, link) -> Option<(name, Option<colour>)>` in `crates/collab-net/src/hub.rs`, called by `join_open` before the hello is seated; when it answers, the name and a valid `#rrggbb` colour replace what the client sent (the hub still sanitises the name). `CloudBackend` (`crates/cloud-relay/src/collab_backend.rs`) answers for signed-in members (ticket or member-session hello): the account's display name and its chosen or derived palette colour from `profiles::get_profile`; a profile that cannot be read refuses the hello instead of trusting the client; for share links the link's label (`share_links::link_label`, new). An unlabelled link keeps what the visitor typed. The map is bounded and pruned with the admitted map. The owner replica applies it, so a hello passed on by a replica that does not own the room is shown the same way. Test (live PostgreSQL and S3, `crates/cloud-relay/tests/realtime_ticket.rs`, skipped cleanly without them): a hello claiming "e1 probe" is shown as "Ada Lovelace" in her chosen colour and as "Ben Franklin" in his derived colour, to herself and to the other person; through a replica that does not own the room; for a member-session token; a labelled share link shows "Design review", an unlabelled one the typed name. The existing ticket, action-matrix, revocation and lease relay suites and the collab-net suite still pass. Not done: comments and undo history live in the editor/engine, which already read the peer name from the room, so they follow without a change here but were not separately exercised; the "last edited by" line on the file page is S6-039.
 
 ### Platform layer and organisation hierarchy
 
@@ -3158,3 +3159,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | TS-012..014 screens: login name at invitation sign-up, link-only invitations, admin temporary passwords (typed or generated, shown once), set a new password, must-change-password screen. 157 web tests. |
 | 2026-10-18 | TS-010 checked off (self-host guide, init-secrets, backup and restore with a rehearsed drill); added TS-016 (HTTPS gateway for a team hostname, partly verified). |
 | 2026-10-18 | TS-004 progress: real outage (cloud service stopped mid-edit) kept the edit and both sessions converged after it returned; export still unverified. |
+| 2026-10-18 | S6-043: collaborators are shown as the account they signed in with (name and palette colour set by the relay, share-link label for link joins); hub hook FP-014. S6 reaches 23/58. |

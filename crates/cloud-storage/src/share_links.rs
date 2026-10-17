@@ -23,7 +23,7 @@ use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
-use crate::TenantTransaction;
+use crate::{TenantTransaction, begin_tenant_transaction};
 
 /// Random bytes in a share secret.
 pub const SECRET_BYTES: usize = 32;
@@ -268,6 +268,20 @@ pub async fn resolve_share_link(pool: &PgPool, secret: &str) -> Result<ResolvedS
         role: grant.role,
         created_by: grant.created_by,
     })
+}
+
+/// The label of link `link_id` in `tenant`, if it has one (the relay shows it as the name of
+/// people who join through the link, S6-043).
+pub async fn link_label(pool: &PgPool, tenant: TenantId, link_id: Uuid) -> Result<Option<String>, ShareLinkError> {
+    let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| ShareLinkError::Database)?;
+    let label: Option<Option<String>> = sqlx::query_scalar("SELECT label FROM share_links WHERE tenant_id = $1::uuid AND id = $2::uuid")
+        .bind(tenant.to_string())
+        .bind(link_id.to_string())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(|_| ShareLinkError::Database)?;
+    let _ = transaction.rollback().await;
+    Ok(label.flatten())
 }
 
 /// Exchange a presented share secret for a [`ShareGrant`] (S4-005): the API mints a share session

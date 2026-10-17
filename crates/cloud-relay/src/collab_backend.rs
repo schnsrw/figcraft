@@ -437,6 +437,10 @@ pub struct CloudBackend {
     timeout: Duration,
     max_open: usize,
     admitted: HashMap<String, Admitted>,
+    /// How people admitted through a member session or a share link are shown, by `(file, link)`
+    /// (S6-043): the account's display name and palette colour, or the link's label. The hub asks
+    /// through [`Backend::display`] when it seats the hello.
+    displays: HashMap<(String, String), (String, Option<String>)>,
     open: HashMap<String, OpenDoc>,
     /// Files whose changes couldn't be kept outside a flush; reported by the next flush.
     failed: Vec<String>,
@@ -498,6 +502,7 @@ impl CloudBackend {
             timeout: config.timeout,
             max_open: config.max_open.max(1),
             admitted: HashMap::new(),
+            displays: HashMap::new(),
             open: HashMap::new(),
             failed: Vec::new(),
             watch: RevocationWatch::new(),
@@ -940,6 +945,40 @@ impl CloudBackend {
             self.admitted.retain(|file, _| open.contains_key(file));
             self.watch.retain(|file| open.contains_key(file));
         }
+        if self.displays.len() >= MAX_ADMITTED {
+            let open = &self.open;
+            self.displays.retain(|(file, _), _| open.contains_key(file));
+        }
+    }
+
+    /// Remember how the person admitted through `link` is shown in `file`; `None` clears it.
+    fn set_display(&mut self, file: &str, link: &str, shown: Option<(String, Option<String>)>) {
+        let key = (file.to_string(), link.to_string());
+        match shown {
+            Some(shown) => {
+                self.displays.insert(key, shown);
+            }
+            None => {
+                self.displays.remove(&key);
+            }
+        }
+    }
+
+    /// The account's display name and colour for a signed-in member, remembered for the hub. A
+    /// profile that can't be read refuses the hello (the client's own claim is not a substitute).
+    fn member_display(&mut self, file: &str, link: &str, principal: PrincipalId) -> Result<(), String> {
+        let pool = &self.pool;
+        match self.block(figcraft_cloud_storage::profiles::get_profile(pool, principal)) {
+            Some(Ok(profile)) => {
+                self.set_display(file, link, Some((profile.display_name, Some(profile.color))));
+                Ok(())
+            }
+            Some(Err(figcraft_cloud_storage::profiles::ProfileError::NotFound)) => Err(REFUSED.into()),
+            Some(Err(_)) | None => {
+                log::error!("document {file}: a member's profile couldn't be read (storage unavailable)");
+                Err(UNAVAILABLE.into())
+            }
+        }
     }
 
     /// Admit a signed-in member (a `member.<tenant>.<session>` hello token).
@@ -959,8 +998,10 @@ impl CloudBackend {
             return Err(UNAVAILABLE.into());
         }
         self.admitted.insert(file.to_string(), Admitted { tenant: admission.tenant, actor: admission.principal });
+        let link = member_link(admission.session);
+        self.member_display(file, &link, admission.principal)?;
         let access = if admission.edit { Access::Edit } else { Access::View };
-        Ok(Admission { access, link: Some(member_link(admission.session)) })
+        Ok(Admission { access, link: Some(link) })
     }
 }
 
@@ -990,8 +1031,10 @@ impl CloudBackend {
             return Err(UNAVAILABLE.into());
         }
         self.admitted.insert(file.to_string(), Admitted { tenant: admission.tenant, actor: admission.principal });
+        let link = member_link(admission.session);
+        self.member_display(file, &link, admission.principal)?;
         let access = if admission.edit { Access::Edit } else { Access::View };
-        Ok(Admission { access, link: Some(member_link(admission.session)) })
+        Ok(Admission { access, link: Some(link) })
     }
 }
 
@@ -1024,11 +1067,25 @@ impl Backend for CloudBackend {
             return Err(UNAVAILABLE.into());
         }
         self.admitted.insert(file.to_string(), Admitted { tenant: link.tenant_id, actor: link.created_by });
+        let pool = &self.pool;
+        let label = match self.block(figcraft_cloud_storage::share_links::link_label(pool, link.tenant_id, link.id)) {
+            Some(Ok(label)) => label,
+            Some(Err(_)) | None => {
+                log::error!("document {file}: a share link's label couldn't be read (storage unavailable)");
+                return Err(UNAVAILABLE.into());
+            }
+        };
+        // People who join through a labelled link are shown as the label, not as what they type.
+        self.set_display(file, &link.id.to_string(), label.map(|label| (label, None)));
         let access = match link.role {
             ShareRole::Editor => Access::Edit,
             ShareRole::Viewer => Access::View,
         };
         Ok(Admission { access, link: Some(link.id.to_string()) })
+    }
+
+    fn display(&mut self, file: &str, link: Option<&str>) -> Option<(String, Option<String>)> {
+        self.displays.get(&(file.to_string(), link?.to_string())).cloned()
     }
 
     fn open(&mut self, file: &str) -> Result<Server, String> {

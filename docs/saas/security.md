@@ -178,6 +178,7 @@ hold both).
 
 ## Collaboration controls
 
+- A peer is shown with the display name and colour of the account that was admitted (S6-043), or with the share link's label; what the client puts in its hello is ignored for signed-in members. A profile that cannot be read refuses the join rather than falling back to the client's claim.
 - Realtime tickets are short-lived and bound to one document and role.
 - The relay ignores tenant, role or principal fields asserted by normal client messages.
 - Message size, rate, queue bytes and connection count are bounded.
