@@ -26,11 +26,13 @@ md-5 = "0.11"
 base64 = { workspace = true }
 # S6-013: AES-256-GCM for webhook secrets at rest and the CSPRNG; already built for rustls.
 ring = "0.17"
+# S6-014: resolving webhook destinations and the delivery timeouts (net, rt, time only).
+tokio = { workspace = true }
 roxmltree = "0.21"
 
 [dev-dependencies]
 zip = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "io-util"] }
 
 [lints]
 workspace = true

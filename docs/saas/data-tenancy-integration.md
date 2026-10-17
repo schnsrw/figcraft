@@ -72,6 +72,8 @@ RLS policy work must account for membership-based tenant discovery before a tena
 | `host_system_keys` | `tenant_id`, `system_id`, `kid`, `alg` (EdDSA or ES256), public key, `not_before`, `expires_at`, `retired_at`; public keys only |
 | `embed_token_uses` | `tenant_id`, `system_id`, `jti`, `expires_at` (token expiry plus skew), `consumed_at`; primary key makes consumption atomic |
 | `webhook_endpoints` | `tenant_id`, `id`, `system_id`, HTTPS `url`, `event_types`, sealed signing secret (AES-256-GCM, bound to tenant and endpoint), sealed previous secret with expiry, `enabled` |
+| `webhook_deliveries` | `tenant_id`, `id`, `endpoint_id`, `event_id` (unique per endpoint), `event_type`, exact signed `body`, `state` (pending, succeeded, failed), attempts, lease, `next_attempt_at`, last status or error category |
+| `webhook_delivery_attempts` | `tenant_id`, `delivery_id`, `attempt`, start, duration, HTTP status or error category; never a response body |
 | `document_members` | `tenant_id`, `document_id`, `principal_id`, `role`, timestamps |
 | `document_team_grants` | `tenant_id`, `document_id`, `team_id`, `role`, timestamps |
 | `share_links` | `id`, `tenant_id`, `document_id`, `token_hash`, `role`, expiry, revocation, timestamps |
@@ -388,6 +390,17 @@ share_link.revoked
 Webhook bodies include event ID, tenant ID, event type, creation time, resource identifiers and a
 minimal payload. Sign `timestamp + "." + raw_body` with a per-endpoint secret. Retain delivery
 attempts, cap retries and permit manual replay without changing the event identifier.
+
+Delivery format (implemented in `crates/cloud-storage/src/webhook_delivery.rs`): `POST` the stored
+JSON body with `X-FigCraft-Event-Id` (constant across retries and replays),
+`X-FigCraft-Event-Type`, `X-FigCraft-Delivery-Id`, `X-FigCraft-Timestamp` (Unix seconds) and
+`X-FigCraft-Signature: v1=<hex HMAC-SHA256(secret, timestamp + "." + body)>` (one `v1=` item per live
+secret during a rotation overlap). Receivers reject timestamps more than 300 seconds from their
+clock and deduplicate on the event id: delivery is at least once. Any `2xx` is success; anything
+else is retried after 10 s, 30 s, 2 min, 10 min, 30 min, 2 h and 6 h, and the delivery is `failed`
+(terminal) after eight attempts until replayed by hand. Redirects are not followed, timeouts are 5 s
+to connect and 10 s overall, and a destination that resolves to a loopback, private or link-local
+address is never contacted.
 
 ## Deletion and retention
 

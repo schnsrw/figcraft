@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::Router;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -36,6 +36,9 @@ use figcraft_cloud_storage::resource_admin::get_project_by_id;
 use figcraft_cloud_storage::secret_box::SecretKey;
 use figcraft_cloud_storage::service_accounts::Scope;
 use figcraft_cloud_storage::sessions;
+use figcraft_cloud_storage::webhook_delivery::{
+    DeliveryError, DeliveryRecord, DeliveryState, get_delivery, list_attempts, list_deliveries, replay_delivery,
+};
 use figcraft_cloud_storage::webhooks::{
     NewSecret, WebhookEndpoint, WebhookError, create_webhook_endpoint, delete_webhook_endpoint, get_webhook_endpoint, list_webhook_endpoints,
     rotate_webhook_secret, update_webhook_endpoint,
@@ -85,6 +88,14 @@ pub(crate) const HOST_ROUTES: &[HostRoute] = &[
     route("PATCH", "/host/systems/{system_id}/webhooks/{webhook_id}", "updateHostWebhook", Some("webhooks:manage")),
     route("DELETE", "/host/systems/{system_id}/webhooks/{webhook_id}", "deleteHostWebhook", Some("webhooks:manage")),
     route("POST", "/host/systems/{system_id}/webhooks/{webhook_id}/rotate-secret", "rotateHostWebhookSecret", Some("webhooks:manage")),
+    route("GET", "/host/systems/{system_id}/webhooks/{webhook_id}/deliveries", "listHostWebhookDeliveries", Some("webhooks:manage")),
+    route("GET", "/host/systems/{system_id}/webhooks/{webhook_id}/deliveries/{delivery_id}", "getHostWebhookDelivery", Some("webhooks:manage")),
+    route(
+        "POST",
+        "/host/systems/{system_id}/webhooks/{webhook_id}/deliveries/{delivery_id}/replay",
+        "replayHostWebhookDelivery",
+        Some("webhooks:manage"),
+    ),
 ];
 
 /// The host routes this build serves, relative to `/api/v1`.
@@ -106,6 +117,9 @@ pub(crate) fn router() -> Router<AppState> {
             get(get_webhook_handler).patch(update_webhook_handler).delete(delete_webhook_handler),
         )
         .route("/host/systems/{system_id}/webhooks/{webhook_id}/rotate-secret", post(rotate_webhook_secret_handler))
+        .route("/host/systems/{system_id}/webhooks/{webhook_id}/deliveries", get(list_deliveries_handler))
+        .route("/host/systems/{system_id}/webhooks/{webhook_id}/deliveries/{delivery_id}", get(get_delivery_handler))
+        .route("/host/systems/{system_id}/webhooks/{webhook_id}/deliveries/{delivery_id}/replay", post(replay_delivery_handler))
 }
 
 /// The embed-token exchange, mounted under `/api/v1/auth` so it shares the auth rate limit.
@@ -610,6 +624,110 @@ async fn rotate_webhook_secret_handler(
     let view = webhook_with_secret(&endpoint, &secret);
     commit(transaction).await?;
     Ok(json_response(StatusCode::OK, &view))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Webhook deliveries (S6-014)
+
+fn delivery_error(error: DeliveryError) -> ApiError {
+    match error {
+        DeliveryError::InvalidInput => invalid(),
+        DeliveryError::NotFound => ApiError::not_found(),
+        DeliveryError::Database => ApiError::unavailable(),
+    }
+}
+
+fn delivery_json(record: &DeliveryRecord) -> Value {
+    json!({
+        "id": record.id.to_string(),
+        "endpoint_id": record.endpoint_id.to_string(),
+        "event_id": record.event_id.to_string(),
+        "event_type": record.event_type,
+        "state": record.state.as_str(),
+        "attempts": record.attempts,
+        "max_attempts": record.max_attempts,
+        "last_status": record.last_status,
+        "last_error": record.last_error,
+        "next_attempt_at": record.next_attempt_at,
+        "created_at": record.created_at,
+        "completed_at": record.completed_at,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+struct DeliveriesQuery {
+    state: Option<String>,
+}
+
+/// The endpoint must exist for this host before any delivery under it is visible.
+async fn require_endpoint(transaction: &mut TenantTransaction<'_>, system_id: &str, id: Uuid) -> Result<(), ApiError> {
+    get_webhook_endpoint(transaction, system_id, id).await.map_err(webhook_error)?.map(|_| ()).ok_or(ApiError::not_found())
+}
+
+async fn list_deliveries_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, id)): Path<(String, String)>,
+    Query(query): Query<DeliveriesQuery>,
+) -> Result<Response, ApiError> {
+    let id = webhook_id(&id)?;
+    let filter = match query.state.as_deref() {
+        None => None,
+        Some("pending") => Some(DeliveryState::Pending),
+        Some("succeeded") => Some(DeliveryState::Succeeded),
+        Some("failed") => Some(DeliveryState::Failed),
+        Some(_) => return Err(invalid()),
+    };
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    require_endpoint(&mut transaction, &system_id, id).await?;
+    let deliveries = list_deliveries(&mut transaction, &system_id, id, filter).await.map_err(delivery_error)?;
+    Ok(json_response(StatusCode::OK, &json!({"deliveries": deliveries.iter().map(delivery_json).collect::<Vec<_>>()})))
+}
+
+async fn get_delivery_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, id, delivery_id)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let (id, delivery_id) = (webhook_id(&id)?, webhook_id(&delivery_id)?);
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    let record = get_delivery(&mut transaction, &system_id, id, delivery_id).await.map_err(delivery_error)?.ok_or(ApiError::not_found())?;
+    let attempts = list_attempts(&mut transaction, delivery_id).await.map_err(delivery_error)?;
+    let mut view = delivery_json(&record);
+    view["attempt_log"] = Value::Array(
+        attempts
+            .iter()
+            .map(|attempt| {
+                json!({
+                    "attempt": attempt.attempt,
+                    "started_at": attempt.started_at,
+                    "duration_ms": attempt.duration_ms,
+                    "http_status": attempt.http_status,
+                    "error": attempt.error,
+                })
+            })
+            .collect(),
+    );
+    Ok(json_response(StatusCode::OK, &view))
+}
+
+/// Replay a finished delivery: the same event, body and event id again. A delivery that is still
+/// pending is `409`.
+async fn replay_delivery_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, id, delivery_id)): Path<(String, String, String)>,
+) -> Result<Response, ApiError> {
+    let (id, delivery_id) = (webhook_id(&id)?, webhook_id(&delivery_id)?);
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::WebhooksManage).await?;
+    if !replay_delivery(&mut transaction, &system_id, id, delivery_id).await.map_err(delivery_error)? {
+        return Err(ApiError::new(ErrorCode::Conflict));
+    }
+    audit_host(&mut transaction, &caller, "host.webhook.replay", "webhook", delivery_id, &system_id).await?;
+    let record = get_delivery(&mut transaction, &system_id, id, delivery_id).await.map_err(delivery_error)?.ok_or(ApiError::not_found())?;
+    let view = delivery_json(&record);
+    commit(transaction).await?;
+    Ok(json_response(StatusCode::ACCEPTED, &view))
 }
 
 // ---------------------------------------------------------------------------------------------

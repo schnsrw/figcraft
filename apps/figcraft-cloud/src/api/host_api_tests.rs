@@ -652,6 +652,87 @@ async fn webhook_endpoints_are_managed_with_secrets_shown_once_and_stored_encryp
 }
 
 #[tokio::test]
+async fn webhook_deliveries_can_be_listed_inspected_and_replayed_through_the_api() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let a = world(&pool).await?;
+    let b = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let base = "/host/systems/host-a/webhooks";
+    let made = send(&app, "POST", base, Some(&a.all), &[], Some(&json!({"url": "https://hooks.example.com/x"}))).await?;
+    let endpoint = made.body["id"].as_str().ok_or("id")?.to_owned();
+    let endpoint_id: Uuid = endpoint.parse()?;
+
+    // Two deliveries: one failed (after two attempts), one pending.
+    let (failed_event, pending_event) = (Uuid::new_v4(), Uuid::new_v4());
+    let mut t = begin_tenant_transaction(&pool, a.tenant).await.map_err(err)?;
+    let failed =
+        figcraft_cloud_storage::webhook_delivery::enqueue_delivery(&mut t, endpoint_id, failed_event, "document.created", b"{\"id\":\"x\"}", 2)
+            .await
+            .map_err(err)?
+            .ok_or("enqueue")?;
+    let pending =
+        figcraft_cloud_storage::webhook_delivery::enqueue_delivery(&mut t, endpoint_id, pending_event, "document.archived", b"{\"id\":\"y\"}", 8)
+            .await
+            .map_err(err)?
+            .ok_or("enqueue")?;
+    sqlx::query("UPDATE webhook_deliveries SET state = 'failed', attempts = 2, last_status = 500, last_error = 'http_status', completed_at = clock_timestamp() WHERE id = $1::uuid")
+        .bind(failed.to_string())
+        .execute(t.connection())
+        .await?;
+    sqlx::query("INSERT INTO webhook_delivery_attempts (tenant_id, delivery_id, attempt, duration_ms, http_status, error) VALUES ($1::uuid, $2::uuid, 1, 12, 500, 'http_status'), ($1::uuid, $2::uuid, 2, 9, 500, 'http_status')")
+        .bind(a.tenant.to_string())
+        .bind(failed.to_string())
+        .execute(t.connection())
+        .await?;
+    t.commit().await?;
+
+    let list = send(&app, "GET", &format!("{base}/{endpoint}/deliveries"), Some(&a.all), &[], None).await?;
+    assert_eq!(list.status, 200);
+    assert_eq!(list.body["deliveries"].as_array().map(Vec::len), Some(2));
+    let only_failed = send(&app, "GET", &format!("{base}/{endpoint}/deliveries?state=failed"), Some(&a.all), &[], None).await?;
+    assert_eq!(only_failed.body["deliveries"][0]["id"].as_str(), Some(failed.to_string().as_str()));
+    assert_eq!(send(&app, "GET", &format!("{base}/{endpoint}/deliveries?state=bogus"), Some(&a.all), &[], None).await?.status, 400);
+
+    let detail = send(&app, "GET", &format!("{base}/{endpoint}/deliveries/{failed}"), Some(&a.all), &[], None).await?;
+    assert_eq!(
+        (detail.status, detail.body["state"].as_str(), detail.body["event_id"].as_str()),
+        (200, Some("failed"), Some(failed_event.to_string().as_str()))
+    );
+    assert_eq!(detail.body["attempt_log"].as_array().map(Vec::len), Some(2));
+    assert_eq!(detail.body["attempt_log"][0]["attempt"], 2);
+    // Bodies and secrets are never part of a delivery view.
+    assert!(!detail.body.to_string().contains("\"id\\\":\\\"x\\\"") && detail.body.get("body").is_none());
+
+    // Replay: a failed delivery goes back to pending with the same event id; a pending one is 409.
+    let replayed = send(&app, "POST", &format!("{base}/{endpoint}/deliveries/{failed}/replay"), Some(&a.all), &[], None).await?;
+    assert_eq!((replayed.status, replayed.body["state"].as_str(), replayed.body["attempts"].as_i64()), (202, Some("pending"), Some(0)));
+    assert_eq!(replayed.body["event_id"].as_str(), Some(failed_event.to_string().as_str()));
+    let again = send(&app, "POST", &format!("{base}/{endpoint}/deliveries/{failed}/replay"), Some(&a.all), &[], None).await?;
+    assert_eq!((again.status, code(&again)), (409, "conflict"));
+    let pending_replay = send(&app, "POST", &format!("{base}/{endpoint}/deliveries/{pending}/replay"), Some(&a.all), &[], None).await?;
+    assert_eq!(pending_replay.status, 409);
+
+    // Scope and isolation.
+    assert_eq!(send(&app, "GET", &format!("{base}/{endpoint}/deliveries"), Some(&a.read_only), &[], None).await?.status, 403);
+    assert_eq!(send(&app, "POST", &format!("{base}/{endpoint}/deliveries/{failed}/replay"), Some(&a.read_only), &[], None).await?.status, 403);
+    assert_eq!(send(&app, "GET", &format!("{base}/{endpoint}/deliveries"), Some(&b.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "GET", &format!("{base}/{endpoint}/deliveries/{failed}"), Some(&b.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "POST", &format!("{base}/{endpoint}/deliveries/{failed}/replay"), Some(&b.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "GET", &format!("{base}/{}/deliveries", Uuid::new_v4()), Some(&a.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "GET", &format!("{base}/{endpoint}/deliveries/{}", Uuid::new_v4()), Some(&a.all), &[], None).await?.status, 404);
+
+    // Deleting the endpoint removes its deliveries and their attempts.
+    assert_eq!(send(&app, "DELETE", &format!("{base}/{endpoint}"), Some(&a.all), &[], None).await?.status, 204);
+    let mut t = begin_tenant_transaction(&pool, a.tenant).await.map_err(err)?;
+    let left: i64 = sqlx::query_scalar("SELECT (SELECT count(*) FROM webhook_deliveries) + (SELECT count(*) FROM webhook_delivery_attempts)")
+        .fetch_one(t.connection())
+        .await?;
+    t.rollback().await?;
+    assert_eq!(left, 0);
+    Ok(())
+}
+
+#[tokio::test]
 async fn the_embed_exchange_is_rate_limited_per_issuer() -> Fallible<()> {
     let Some(pool) = pool().await? else { return Ok(()) };
     let world = world(&pool).await?;

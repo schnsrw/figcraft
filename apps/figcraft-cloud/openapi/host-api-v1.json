@@ -3,7 +3,7 @@
   "info": {
     "title": "FigCraft Cloud host API",
     "version": "1.0.0",
-    "description": "Server-to-server API for a registered host product that embeds FigCraft: create, resolve, archive and restore documents by the host's own identifiers and request exports. Versioned by the /api/v1 prefix; additive changes keep 1.x, a breaking change would be /api/v2. Every failure uses the fixed error envelope; messages never contain request data."
+    "description": "Server-to-server API for a registered host product that embeds FigCraft: create, resolve, archive and restore documents by the host's own identifiers and request exports. Versioned by the /api/v1 prefix; additive changes keep 1.x, a breaking change would be /api/v2. Every failure uses the fixed error envelope; messages never contain request data. Webhook deliveries are signed: see the X-FigCraft-Signature scheme in the delivery module documentation (HMAC-SHA256 over timestamp.body, v1= items, 300 second replay window)."
   },
   "servers": [
     {
@@ -605,6 +605,169 @@
           }
         }
       }
+    },
+    "/host/systems/{system_id}/webhooks/{webhook_id}/deliveries": {
+      "get": {
+        "operationId": "listHostWebhookDeliveries",
+        "summary": "Recent deliveries to the endpoint, newest first (at most 50).",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          },
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "pending",
+                "succeeded",
+                "failed"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The deliveries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDeliveryList"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Error"
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/host/systems/{system_id}/webhooks/{webhook_id}/deliveries/{delivery_id}": {
+      "get": {
+        "operationId": "getHostWebhookDelivery",
+        "summary": "One delivery with its attempt log (status and timing of the last 20 attempts; never bodies).",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          },
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "delivery_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The delivery.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDeliveryDetail"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/host/systems/{system_id}/webhooks/{webhook_id}/deliveries/{delivery_id}/replay": {
+      "post": {
+        "operationId": "replayHostWebhookDelivery",
+        "summary": "Send a finished delivery again: same event, same body, same event id, a fresh attempt budget.",
+        "description": "Only a succeeded or failed delivery can be replayed; a pending one is 409. Receivers deduplicate on the event id (delivery is at least once).",
+        "x-required-scope": "webhooks:manage",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/SystemId"
+          },
+          {
+            "name": "webhook_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "delivery_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Queued again.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookDelivery"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Error"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error"
+          },
+          "404": {
+            "$ref": "#/components/responses/Error"
+          },
+          "409": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1044,6 +1207,201 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Webhook"
+            }
+          }
+        }
+      },
+      "WebhookDelivery": {
+        "type": "object",
+        "required": [
+          "id",
+          "endpoint_id",
+          "event_id",
+          "event_type",
+          "state",
+          "attempts",
+          "max_attempts",
+          "last_status",
+          "last_error",
+          "next_attempt_at",
+          "created_at",
+          "completed_at"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "endpoint_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "succeeded",
+              "failed"
+            ]
+          },
+          "attempts": {
+            "type": "integer"
+          },
+          "max_attempts": {
+            "type": "integer"
+          },
+          "last_status": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "http_status, timeout, connect_failure, dns_failure, blocked_destination, secret_unavailable or request_failure."
+          },
+          "next_attempt_at": {
+            "type": "integer",
+            "description": "Unix seconds."
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "completed_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        }
+      },
+      "WebhookDeliveryList": {
+        "type": "object",
+        "required": [
+          "deliveries"
+        ],
+        "properties": {
+          "deliveries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WebhookDelivery"
+            }
+          }
+        }
+      },
+      "WebhookDeliveryDetail": {
+        "type": "object",
+        "required": [
+          "id",
+          "endpoint_id",
+          "event_id",
+          "event_type",
+          "state",
+          "attempts",
+          "max_attempts",
+          "last_status",
+          "last_error",
+          "next_attempt_at",
+          "created_at",
+          "completed_at",
+          "attempt_log"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "endpoint_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "event_type": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "succeeded",
+              "failed"
+            ]
+          },
+          "attempts": {
+            "type": "integer"
+          },
+          "max_attempts": {
+            "type": "integer"
+          },
+          "last_status": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "http_status, timeout, connect_failure, dns_failure, blocked_destination, secret_unavailable or request_failure."
+          },
+          "next_attempt_at": {
+            "type": "integer",
+            "description": "Unix seconds."
+          },
+          "created_at": {
+            "type": "integer"
+          },
+          "completed_at": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "attempt_log": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "attempt",
+                "started_at",
+                "duration_ms"
+              ],
+              "properties": {
+                "attempt": {
+                  "type": "integer"
+                },
+                "started_at": {
+                  "type": "integer"
+                },
+                "duration_ms": {
+                  "type": "integer"
+                },
+                "http_status": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "error": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
             }
           }
         }
