@@ -42,9 +42,17 @@ use super::error::{ApiError, ApiJson, denied};
 use super::teams_api::{GrantBody, authorize_team, team_error, workspace_grant_role};
 use super::tenants_api::{TenantCall, commit, invalid, open, path_uuid, require_tenant, revoke_after_commit, storage_unavailable};
 
+/// The checked-in OpenAPI document for the routes of this module (and `POST .../projects`).
+pub(crate) const OPENAPI_JSON: &str = include_str!("../../openapi/hierarchy-api-v1.json");
+
+async fn openapi() -> Response {
+    ([(axum::http::header::CONTENT_TYPE, "application/json")], OPENAPI_JSON).into_response()
+}
+
 pub(crate) fn routes() -> Router<AppState> {
     let tenant = "/tenants/{tenant}";
     Router::new()
+        .route("/hierarchy/openapi.json", get(openapi))
         .route(&format!("{tenant}/policy"), get(read_policy).put(write_policy))
         .route(&format!("{tenant}/projects/{{project}}/team-grants"), get(list_grants))
         .route(&format!("{tenant}/teams/{{team}}/grants/projects/{{project}}"), put(grant_project).delete(revoke_project))
@@ -169,4 +177,85 @@ async fn write_policy(
     let revoked = workspace_policy::save(&mut call.transaction, call.principal, &policy).await.map_err(policy_error)?;
     commit(call.transaction).await?;
     Ok(Json(policy_body(&policy, state.oidc().is_some(), Some(revoked))).into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::net::SocketAddr;
+    use std::time::Duration;
+
+    use axum::body::{Body, to_bytes};
+    use axum::extract::ConnectInfo;
+    use axum::http::{Method, Request, StatusCode};
+    use figcraft_cloud_domain::DeploymentMode;
+    use tower::ServiceExt as _;
+
+    use super::*;
+    use crate::api::authenticator::IdentityConfig;
+    use crate::api::context::ContextSettings;
+    use crate::api::{ApiConfig, AppState};
+    use crate::config::CloudRole;
+
+    /// No database is reachable: every request below is refused at authentication, before storage.
+    fn app() -> Router {
+        let pool = sqlx::postgres::PgPoolOptions::new().connect_lazy("postgres://nobody@127.0.0.1:9/none").expect("lazy pool");
+        let objects = figcraft_cloud_storage::objects::ObjectStore::new(&figcraft_cloud_storage::objects::ObjectStoreSettings {
+            endpoint: "http://127.0.0.1:9".to_string(),
+            region: "us-east-1".to_string(),
+            bucket: "figcraft-test".to_string(),
+            access_key: "FCtestkey".to_string(),
+            secret_key: "FCtestsecret".to_string(),
+            path_style: true,
+        })
+        .expect("object store");
+        let identity = IdentityConfig::new(DeploymentMode::MultiTenant, None, Some("https://t.example"), Some(b"hierarchy-test-signing-key-012345"))
+            .expect("identity");
+        let state = AppState::new(pool, objects, ApiConfig::default()).with_identity(std::sync::Arc::new(identity));
+        crate::health::app(
+            CloudRole::Api,
+            true,
+            Some(crate::api::api_router(state)),
+            ContextSettings::new(CloudRole::Api, 16, Duration::from_secs(10), 1 << 20),
+        )
+    }
+
+    async fn call(app: &Router, method: Method, path: &str, body: bool) -> (StatusCode, Vec<u8>) {
+        let peer: SocketAddr = "192.0.2.9:4000".parse().expect("peer");
+        let mut request = Request::builder().method(method).uri(path).extension(ConnectInfo(peer));
+        let body = if body {
+            request = request.header("content-type", "application/json");
+            Body::from("{}")
+        } else {
+            Body::empty()
+        };
+        let response = app.clone().oneshot(request.body(body).expect("request")).await.expect("response");
+        let status = response.status();
+        (status, to_bytes(response.into_body(), 1 << 20).await.expect("body").to_vec())
+    }
+
+    #[tokio::test]
+    async fn the_document_is_served_and_every_documented_operation_is_routed_and_needs_a_session() {
+        let app = app();
+        let (status, bytes) = call(&app, Method::GET, "/api/v1/hierarchy/openapi.json", false).await;
+        assert_eq!(status, StatusCode::OK);
+        let doc: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        assert_eq!(doc, serde_json::from_str::<serde_json::Value>(OPENAPI_JSON).expect("embedded"));
+        assert_eq!(doc["openapi"], "3.1.0");
+        let id = "11111111-1111-4111-8111-111111111111";
+        let mut seen = 0;
+        for (path, item) in doc["paths"].as_object().expect("paths") {
+            if path == "/hierarchy/openapi.json" {
+                continue;
+            }
+            let concrete = path.replace("{tenant}", id).replace("{team}", id).replace("{project}", id).replace("{workspace}", id);
+            for (method, operation) in item.as_object().expect("item") {
+                let (status, _) =
+                    call(&app, method.to_uppercase().parse().expect("method"), &format!("/api/v1{concrete}"), operation.get("requestBody").is_some())
+                        .await;
+                assert_eq!(status, StatusCode::UNAUTHORIZED, "{method} {path} must exist and need a signed-in person");
+                seen += 1;
+            }
+        }
+        assert_eq!(seen, 7);
+    }
 }

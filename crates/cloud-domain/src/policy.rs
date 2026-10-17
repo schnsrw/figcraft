@@ -94,12 +94,10 @@ impl WorkspacePolicy {
     /// Whether `inviter` may invite people to a team under this policy.
     #[must_use]
     pub const fn may_invite(&self, inviter: Inviter) -> bool {
-        match (self.who_may_invite, inviter) {
-            (_, Inviter::Admin)
-            | (InvitePolicy::TeamLeads | InvitePolicy::Members, Inviter::TeamLead)
-            | (InvitePolicy::Members, Inviter::TeamMember) => true,
-            _ => false,
-        }
+        matches!(
+            (self.who_may_invite, inviter),
+            (_, Inviter::Admin) | (InvitePolicy::TeamLeads | InvitePolicy::Members, Inviter::TeamLead) | (InvitePolicy::Members, Inviter::TeamMember)
+        )
     }
 
     /// Whether a person may join the workspace with the workspace role `role`: guest roles
