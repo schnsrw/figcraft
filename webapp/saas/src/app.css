@@ -461,6 +461,37 @@ th {
   }
 }
 
+.swatches {
+  margin: 16px 0;
+  padding: 0;
+  border: 0;
+}
+
+.swatches legend {
+  margin-bottom: 8px;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.swatch-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.swatch {
+  width: 32px;
+  height: 32px;
+  cursor: pointer;
+  border: 2px solid #121412;
+  border-radius: 50%;
+}
+
+.swatch[aria-checked="true"] {
+  outline: 3px solid #ebece7;
+  outline-offset: 2px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     scroll-behavior: auto !important;

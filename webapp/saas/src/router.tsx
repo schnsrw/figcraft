@@ -38,6 +38,7 @@ export type Route =
   | { name: "people" }
   | { name: "invite" }
   | { name: "setup" }
+  | { name: "account" }
   | { name: "not_found" };
 
 export function isUuid(value: string): boolean {
@@ -55,6 +56,7 @@ export function parseRoute(pathname: string): Route {
   if (first === "people" && parts.length === 1) return { name: "people" };
   if (first === "invite" && parts.length === 1) return { name: "invite" };
   if (first === "setup" && parts.length === 1) return { name: "setup" };
+  if (first === "account" && parts.length === 1) return { name: "account" };
   if (
     first === "workspace" &&
     workspaceId !== undefined &&
@@ -87,6 +89,8 @@ export function formatRoute(route: Route): string {
       return "/invite";
     case "setup":
       return "/setup";
+    case "account":
+      return "/account";
     case "not_found":
       return "/";
   }

@@ -1,4 +1,5 @@
 import { Link, useRouter } from "../router";
+import { AccountScreen } from "./account";
 import { FileScreen } from "./file";
 import { HomeScreen } from "./home";
 import { InviteScreen } from "./invite";
@@ -30,6 +31,8 @@ export function ReadyRoutes() {
       return <PeopleScreen />;
     case "invite":
       return <InviteScreen />;
+    case "account":
+      return <AccountScreen />;
     case "setup":
       return (
         <section className="panel narrow">

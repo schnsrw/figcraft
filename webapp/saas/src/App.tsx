@@ -72,6 +72,7 @@ function Shell({ branding }: { branding: Branding }) {
           <nav className="topnav" aria-label="Main">
             <Link to="/">Files</Link>
             <Link to="/people">People</Link>
+            <Link to="/account">Account</Link>
           </nav>
         )}
         <AccountMenu />
@@ -181,6 +182,7 @@ const TITLES: Record<string, string> = {
   people: "People",
   invite: "Invitation",
   setup: "Set up",
+  account: "Your account",
   not_found: "Page not found",
 };
 
