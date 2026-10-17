@@ -20,6 +20,7 @@
 //! committed sequence) the document is quarantined in its own committed transaction before the
 //! error is returned, so no later open serves it until an operator clears the quarantine.
 
+pub mod admission;
 pub mod collab_backend;
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
