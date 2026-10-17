@@ -46,6 +46,8 @@ pub mod plugins;
 pub mod proto_run;
 pub mod rename;
 pub mod rotation_origin;
+pub mod selection_colors;
+pub mod selection_spacing;
 pub mod shape_handles;
 pub mod shapebuilder;
 pub mod snap;
@@ -1660,6 +1662,8 @@ mod menu_gaps_tests;
 #[cfg(test)]
 mod nested_override_tests;
 #[cfg(test)]
+mod node_set_refusals_tests;
+#[cfg(test)]
 mod online_tests;
 #[cfg(test)]
 mod open_issues_tests;
@@ -1801,3 +1805,6 @@ mod version_tests;
 mod view_behaviour_tests;
 #[cfg(test)]
 mod widgets_tests;
+
+#[cfg(test)]
+mod selection_spacing_tests;
