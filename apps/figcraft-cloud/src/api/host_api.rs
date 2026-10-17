@@ -12,12 +12,40 @@
 //! contract version `MAJOR.MINOR.PATCH`. Within `1.x` only additive changes are allowed (new
 //! optional fields, new routes); removing or changing a field's meaning needs `/api/v2`.
 
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use axum::Json;
 use axum::Router;
-use axum::http::{HeaderValue, header};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
+use figcraft_cloud_auth::embed_token::{self, EmbedError};
+use figcraft_cloud_domain::{CloudDocumentId, ErrorCode, PrincipalId, ProjectId, ResourceState, Uuid};
+use figcraft_cloud_storage::access_guard::MembershipRequirement;
+use figcraft_cloud_storage::exports::{ExportError, ExportFormat, ExportRecord};
+use figcraft_cloud_storage::host_mappings::{
+    HostMappingError, MappingKind, document_current_seq, external_ids_for_internal, map_external_resource, resolve_external_resource,
+};
+use figcraft_cloud_storage::host_systems::{HostSystemError, MAX_SYSTEM_ID_CHARS, get_host_system};
+use figcraft_cloud_storage::idempotency::{
+    RepositoryError as IdempotencyError, ReservationOutcome, complete_idempotency_key, reserve_idempotency_key,
+};
+use figcraft_cloud_storage::metadata::{DocumentRecord, archive_document, create_document, get_document, restore_document};
+use figcraft_cloud_storage::resource_admin::get_project_by_id;
+use figcraft_cloud_storage::service_accounts::Scope;
+use figcraft_cloud_storage::sessions;
+use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use sha2::{Digest as _, Sha256};
 
 use super::AppState;
+use super::auth::{Authenticated, CredentialKind};
+use super::authenticator::hold_caller_access;
+use super::documents_api::{repository_error, valid_name};
+use super::error::{ApiError, ApiJson};
+use super::rate_limit::{Decision, RateLimitConfig};
 
 /// The OpenAPI document served and checked by the tests.
 pub(crate) const OPENAPI_JSON: &str = include_str!("../../openapi/host-api-v1.json");
@@ -39,6 +67,7 @@ const fn route(method: &'static str, path: &'static str, operation_id: &'static 
 /// Every host route.
 pub(crate) const HOST_ROUTES: &[HostRoute] = &[
     route("GET", "/host/openapi.json", "getHostOpenApi", None),
+    route("POST", "/auth/embed/exchange", "exchangeEmbedToken", None),
     route("POST", "/host/systems/{system_id}/documents", "createHostDocument", Some("documents:write")),
     route("GET", "/host/systems/{system_id}/documents/{external_id}", "resolveHostDocument", Some("documents:read")),
     route("POST", "/host/systems/{system_id}/documents/{external_id}/archive", "archiveHostDocument", Some("documents:write")),
@@ -52,15 +81,428 @@ pub(crate) fn router() -> Router<AppState> {
     // Named `router`, not `routes`: the S4 permission matrix scans `::routes()` merges for its
     // member-role table, while host routes are service-account routes with their own table
     // ([`HOST_ROUTES`]) and conformance tests.
-    Router::new().route("/host/openapi.json", get(openapi))
+    Router::new()
+        .route("/host/openapi.json", get(openapi))
+        .route("/host/systems/{system_id}/documents", post(create_document_handler))
+        .route("/host/systems/{system_id}/documents/{external_id}", get(resolve_document_handler))
+        .route("/host/systems/{system_id}/documents/{external_id}/archive", post(archive_document_handler))
+        .route("/host/systems/{system_id}/documents/{external_id}/restore", post(restore_document_handler))
+        .route("/host/systems/{system_id}/documents/{external_id}/exports", post(request_export_handler))
+        .route("/host/systems/{system_id}/exports/{export_id}", get(get_export_handler))
+}
+
+/// The embed-token exchange, mounted under `/api/v1/auth` so it shares the auth rate limit.
+pub(crate) fn auth_router() -> Router<AppState> {
+    Router::new().route("/embed/exchange", post(exchange))
 }
 
 async fn openapi() -> Response {
-    let mut response = (axum::http::StatusCode::OK, OPENAPI_JSON).into_response();
+    let mut response = (StatusCode::OK, OPENAPI_JSON).into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static("application/json"));
     headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("public, max-age=300"));
     response
+}
+
+// ---------------------------------------------------------------------------------------------
+// Shared pieces
+
+/// How long an idempotency key keeps its stored response.
+const IDEMPOTENCY_TTL_SECS: i64 = 24 * 60 * 60;
+const MIN_IDEMPOTENCY_KEY: usize = 8;
+const MAX_IDEMPOTENCY_KEY: usize = 255;
+/// Embed exchanges one host may make: a burst, then a steady rate. Per issuer, on top of the
+/// per-address auth limit.
+pub(crate) const EMBED_LIMIT: RateLimitConfig = RateLimitConfig { burst: 120, refill_every: Duration::from_millis(100), max_keys: 2_048 };
+
+const fn invalid() -> ApiError {
+    ApiError::new(ErrorCode::InvalidRequest)
+}
+
+fn host_error(error: HostSystemError) -> ApiError {
+    match error {
+        HostSystemError::NotFound => ApiError::not_found(),
+        HostSystemError::InvalidInput | HostSystemError::TooManyKeys => invalid(),
+        HostSystemError::Conflict => ApiError::new(ErrorCode::Conflict),
+        HostSystemError::Database => ApiError::unavailable(),
+    }
+}
+
+fn mapping_error(error: HostMappingError) -> ApiError {
+    match error {
+        HostMappingError::InvalidInput => invalid(),
+        HostMappingError::NotFound => ApiError::not_found(),
+        HostMappingError::Conflict => ApiError::new(ErrorCode::Conflict),
+        HostMappingError::TooMany => ApiError::new(ErrorCode::QuotaExceeded),
+        HostMappingError::Database => ApiError::unavailable(),
+    }
+}
+
+fn export_error(error: ExportError) -> ApiError {
+    match error {
+        ExportError::NotFound => ApiError::not_found(),
+        ExportError::NotAuthorized => ApiError::forbidden(),
+        ExportError::DocumentUnavailable => ApiError::new(ErrorCode::ResourceInactive),
+        ExportError::SeqAhead | ExportError::InvalidSeq | ExportError::InvalidOptions => invalid(),
+        ExportError::TooManyOpenExports => ApiError::new(ErrorCode::QuotaExceeded),
+        _ => ApiError::new(ErrorCode::Internal),
+    }
+}
+
+/// Authorize a host call and open the tenant transaction: a service-account credential with
+/// `scope` (browser sessions and share links are refused), then the host must be registered and
+/// enabled in the caller's tenant. Anything else about the host is `404`.
+async fn begin_host<'a>(state: &'a AppState, caller: &Authenticated, system_id: &str, scope: Scope) -> Result<TenantTransaction<'a>, ApiError> {
+    if caller.session.kind != CredentialKind::ServiceAccount {
+        return Err(ApiError::forbidden());
+    }
+    caller.require_scope(scope)?;
+    if system_id.is_empty() || system_id.len() > 4 * MAX_SYSTEM_ID_CHARS {
+        return Err(ApiError::not_found());
+    }
+    let mut transaction = begin_tenant_transaction(state.pool(), caller.tenant.tenant_id()).await.map_err(|_| ApiError::unavailable())?;
+    hold_caller_access(state, &mut transaction, caller, MembershipRequirement::None).await?;
+    match get_host_system(&mut transaction, system_id).await.map_err(host_error)? {
+        Some(host) if host.enabled => Ok(transaction),
+        _ => Err(ApiError::not_found()),
+    }
+}
+
+async fn commit(transaction: TenantTransaction<'_>) -> Result<(), ApiError> {
+    transaction.commit().await.map_err(|_| ApiError::unavailable())
+}
+
+fn json_response(status: StatusCode, body: &Value) -> Response {
+    let mut response = (status, Json(body)).into_response();
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+/// The caller's `Idempotency-Key`, hashed: 8 to 255 printable ASCII characters.
+fn idempotency_key(headers: &HeaderMap) -> Result<[u8; 32], ApiError> {
+    let value = headers.get("idempotency-key").and_then(|value| value.to_str().ok()).ok_or_else(invalid)?;
+    if !(MIN_IDEMPOTENCY_KEY..=MAX_IDEMPOTENCY_KEY).contains(&value.len()) || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) {
+        return Err(invalid());
+    }
+    Ok(Sha256::digest(value.as_bytes()).into())
+}
+
+/// What an idempotent request has to remember between reserving its key and completing it.
+struct Idempotent {
+    route: String,
+    key_hash: [u8; 32],
+}
+
+/// Reserve the key inside the work's transaction. `Ok(Err(response))` is a stored response to
+/// replay; the same key with another request, or one still in flight, is `409`.
+async fn reserve(
+    transaction: &mut TenantTransaction<'_>,
+    caller: &Authenticated,
+    operation: &str,
+    system_id: &str,
+    headers: &HeaderMap,
+    request: &Value,
+) -> Result<Result<Idempotent, Response>, ApiError> {
+    let key_hash = idempotency_key(headers)?;
+    let route = format!("host:{operation}:{system_id}");
+    let request_hash = Sha256::digest(serde_json::to_vec(request).map_err(|_| invalid())?);
+    match reserve_idempotency_key(transaction, caller.principal, &route, &key_hash, &request_hash, IDEMPOTENCY_TTL_SECS).await {
+        Ok(ReservationOutcome::Reserved | ReservationOutcome::TakenOver) => Ok(Ok(Idempotent { route, key_hash })),
+        Ok(ReservationOutcome::Replay { response_status, response_body, .. }) => {
+            let status =
+                u16::try_from(response_status).ok().and_then(|code| StatusCode::from_u16(code).ok()).ok_or(ApiError::new(ErrorCode::Internal))?;
+            let mut response = (status, [(header::CONTENT_TYPE, "application/json")], response_body).into_response();
+            response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            response.headers_mut().insert("idempotent-replay", HeaderValue::from_static("true"));
+            Ok(Err(response))
+        }
+        Ok(ReservationOutcome::InFlight) | Err(IdempotencyError::Conflict) => Err(ApiError::new(ErrorCode::Conflict)),
+        Err(_) => Err(ApiError::unavailable()),
+    }
+}
+
+/// Store the response against the key, then commit the work and the key together.
+async fn complete(
+    mut transaction: TenantTransaction<'_>,
+    caller: &Authenticated,
+    idempotent: &Idempotent,
+    status: StatusCode,
+    body: &Value,
+) -> Result<Response, ApiError> {
+    let bytes = serde_json::to_vec(body).map_err(|_| ApiError::new(ErrorCode::Internal))?;
+    complete_idempotency_key(
+        &mut transaction,
+        caller.principal,
+        &idempotent.route,
+        &idempotent.key_hash,
+        i16::try_from(status.as_u16()).map_err(|_| ApiError::new(ErrorCode::Internal))?,
+        &bytes,
+        "application/json",
+    )
+    .await
+    .map_err(|_| ApiError::unavailable())?;
+    commit(transaction).await?;
+    Ok(json_response(status, body))
+}
+
+fn document_json(record: &DocumentRecord, external_id: &str) -> Value {
+    json!({
+        "id": record.id.to_string(),
+        "external_id": external_id,
+        "workspace_id": record.workspace_id.to_string(),
+        "project_id": record.project_id.to_string(),
+        "name": record.name,
+        "state": super::documents_api::state_str(record.state),
+    })
+}
+
+/// The document the host's `external_id` maps to, as it exists in this tenant.
+async fn mapped_document(transaction: &mut TenantTransaction<'_>, system_id: &str, external_id: &str) -> Result<DocumentRecord, ApiError> {
+    let internal = resolve_external_resource(transaction, system_id, MappingKind::Document, external_id)
+        .await
+        .map_err(mapping_error)?
+        .ok_or(ApiError::not_found())?;
+    let id = CloudDocumentId::try_from(internal).map_err(|_| ApiError::not_found())?;
+    get_document(transaction, id).await.map_err(repository_error)?.ok_or(ApiError::not_found())
+}
+
+async fn audit_host(
+    transaction: &mut TenantTransaction<'_>,
+    caller: &Authenticated,
+    action: &str,
+    resource_kind: &str,
+    resource: Uuid,
+    system_id: &str,
+) -> Result<(), ApiError> {
+    super::documents_api::audit(transaction, caller, action, resource_kind, resource, json!({"system_id": system_id})).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Documents
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateDocumentBody {
+    external_id: String,
+    external_project_id: String,
+    name: String,
+}
+
+async fn create_document_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(system_id): Path<String>,
+    headers: HeaderMap,
+    ApiJson(body): ApiJson<CreateDocumentBody>,
+) -> Result<Response, ApiError> {
+    let name = valid_name(&body.name)?.to_owned();
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::DocumentsWrite).await?;
+    let request = json!({"external_id": body.external_id, "external_project_id": body.external_project_id, "name": name});
+    let idempotent = match reserve(&mut transaction, &caller, "create_document", &system_id, &headers, &request).await? {
+        Ok(idempotent) => idempotent,
+        Err(replay) => return Ok(replay),
+    };
+    if resolve_external_resource(&mut transaction, &system_id, MappingKind::Document, &body.external_id).await.map_err(mapping_error)?.is_some() {
+        return Err(ApiError::new(ErrorCode::Conflict));
+    }
+    let project_id = resolve_external_resource(&mut transaction, &system_id, MappingKind::Project, &body.external_project_id)
+        .await
+        .map_err(mapping_error)?
+        .and_then(|id| ProjectId::try_from(id).ok())
+        .ok_or(ApiError::not_found())?;
+    let project = get_project_by_id(&mut transaction, project_id).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    if project.state != ResourceState::Active {
+        return Err(ApiError::new(ErrorCode::ResourceInactive));
+    }
+    let record =
+        create_document(&mut transaction, CloudDocumentId::random(), project.workspace_id, project_id, &name).await.map_err(repository_error)?;
+    map_external_resource(&mut transaction, &system_id, MappingKind::Document, &body.external_id, record.id.as_uuid())
+        .await
+        .map_err(mapping_error)?;
+    audit_host(&mut transaction, &caller, "host.document.create", "document", record.id.as_uuid(), &system_id).await?;
+    let view = document_json(&record, &body.external_id);
+    complete(transaction, &caller, &idempotent, StatusCode::CREATED, &view).await
+}
+
+async fn resolve_document_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, external_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::DocumentsRead).await?;
+    let record = mapped_document(&mut transaction, &system_id, &external_id).await?;
+    Ok(json_response(StatusCode::OK, &document_json(&record, &external_id)))
+}
+
+/// Archive or restore. Both are idempotent: repeating either is a `200` with the document
+/// unchanged and no second audit row.
+async fn transition(state: &AppState, caller: &Authenticated, system_id: &str, external_id: &str, archive: bool) -> Result<Response, ApiError> {
+    let mut transaction = begin_host(state, caller, system_id, Scope::DocumentsWrite).await?;
+    let current = mapped_document(&mut transaction, system_id, external_id).await?;
+    let target = if archive { ResourceState::Archived } else { ResourceState::Active };
+    let record = if current.state == target {
+        current
+    } else {
+        let changed =
+            if archive { archive_document(&mut transaction, current.id).await } else { restore_document(&mut transaction, current.id).await }
+                .map_err(repository_error)?
+                .ok_or(ApiError::not_found())?;
+        if changed.state != target {
+            return Err(ApiError::new(ErrorCode::ResourceInactive));
+        }
+        let action = if archive { "host.document.archive" } else { "host.document.restore" };
+        audit_host(&mut transaction, caller, action, "document", changed.id.as_uuid(), system_id).await?;
+        changed
+    };
+    let view = document_json(&record, external_id);
+    commit(transaction).await?;
+    Ok(json_response(StatusCode::OK, &view))
+}
+
+async fn archive_document_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(path): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    transition(&state, &caller, &path.0, &path.1, true).await
+}
+
+async fn restore_document_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(path): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    transition(&state, &caller, &path.0, &path.1, false).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Exports
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestExportBody {
+    format: String,
+    external_user_id: String,
+}
+
+fn export_json(record: &ExportRecord) -> Value {
+    use figcraft_cloud_storage::exports::ExportState;
+    let state = match record.state {
+        ExportState::Queued => "queued",
+        ExportState::Running => "running",
+        ExportState::Succeeded => "succeeded",
+        ExportState::Failed => "failed",
+        ExportState::Expired => "expired",
+    };
+    json!({
+        "id": record.id.to_string(),
+        "document_id": record.document_id.to_string(),
+        "format": record.format.as_str(),
+        "state": state,
+        "error_code": record.error_code,
+        "completed_at": record.completed_at_unix,
+    })
+}
+
+async fn request_export_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, external_id)): Path<(String, String)>,
+    headers: HeaderMap,
+    ApiJson(body): ApiJson<RequestExportBody>,
+) -> Result<Response, ApiError> {
+    let format = ExportFormat::parse(&body.format).ok_or_else(invalid)?;
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::ExportsCreate).await?;
+    let request = json!({"external_id": external_id, "format": body.format, "external_user_id": body.external_user_id});
+    let idempotent = match reserve(&mut transaction, &caller, "request_export", &system_id, &headers, &request).await? {
+        Ok(idempotent) => idempotent,
+        Err(replay) => return Ok(replay),
+    };
+    let document = mapped_document(&mut transaction, &system_id, &external_id).await?;
+    let requester = resolve_external_resource(&mut transaction, &system_id, MappingKind::Principal, &body.external_user_id)
+        .await
+        .map_err(mapping_error)?
+        .and_then(|id| PrincipalId::try_from(id).ok())
+        .ok_or(ApiError::not_found())?;
+    let sequence = document_current_seq(&mut transaction, document.id.as_uuid()).await.map_err(mapping_error)?.ok_or(ApiError::not_found())?;
+    let record = figcraft_cloud_storage::exports::request_export(&mut transaction, document.id, requester, format, &json!({}), sequence)
+        .await
+        .map_err(export_error)?;
+    audit_host(&mut transaction, &caller, "host.export.request", "export", record.id, &system_id).await?;
+    complete(transaction, &caller, &idempotent, StatusCode::ACCEPTED, &export_json(&record)).await
+}
+
+async fn get_export_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((system_id, export_id)): Path<(String, String)>,
+) -> Result<Response, ApiError> {
+    let export_id: Uuid = export_id.parse().map_err(|_| ApiError::not_found())?;
+    let mut transaction = begin_host(&state, &caller, &system_id, Scope::JobsRead).await?;
+    let record = figcraft_cloud_storage::exports::get_export(&mut transaction, export_id).await.map_err(export_error)?.ok_or(ApiError::not_found())?;
+    // Only exports of documents this host has mapped are visible through it.
+    let mapped =
+        external_ids_for_internal(&mut transaction, &system_id, MappingKind::Document, record.document_id.as_uuid()).await.map_err(mapping_error)?;
+    if mapped.is_empty() {
+        return Err(ApiError::not_found());
+    }
+    Ok(json_response(StatusCode::OK, &export_json(&record)))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Embed-token exchange
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExchangeBody {
+    token: String,
+}
+
+/// `POST /auth/embed/exchange {"token"}`: the embedded editor trades the host's one-use token for
+/// a browser session and the document it opens. Same-origin only (the editor page itself makes the
+/// call, never the host page), rate limited per address by the auth router and per issuer here.
+/// Every refusal is the same `401`; a valid token outside the host's boundary does not say which
+/// part failed. The token is never logged. The granted role is reported, not stored on the
+/// session: the session itself is a normal browser session (see the tracker for that limit).
+async fn exchange(State(state): State<AppState>, headers: HeaderMap, ApiJson(body): ApiJson<ExchangeBody>) -> Result<Response, ApiError> {
+    let identity = state.identity().ok_or(ApiError::unavailable())?;
+    if !identity.same_origin(&headers) {
+        return Err(ApiError::forbidden());
+    }
+    if body.token.is_empty() || body.token.len() > embed_token::MAX_TOKEN_BYTES {
+        return Err(invalid());
+    }
+    // Per-issuer limit before any database work.
+    if let Ok(issuer) = embed_token::token_issuer(&body.token)
+        && let Decision::Limited { retry_after } = state.embed_limiter().check_at(None, &format!("embed:{issuer}"), Instant::now())
+    {
+        return Err(ApiError::rate_limited(retry_after.as_secs()));
+    }
+    let now = i64::try_from(SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_secs())).unwrap_or(0);
+    let verified = match embed_token::exchange_embed_token(state.pool(), &body.token, now).await {
+        Ok(verified) => verified,
+        Err(EmbedError::Refused(_)) => return Err(ApiError::unauthenticated()),
+        Err(EmbedError::Unavailable) => return Err(ApiError::unavailable()),
+    };
+    let principal = PrincipalId::try_from(verified.principal_id).map_err(|_| ApiError::new(ErrorCode::Internal))?;
+    let created = sessions::create_session(state.pool(), principal, identity.limits()).await.map_err(|error| match error {
+        sessions::SessionError::Database | sessions::SessionError::Random => ApiError::unavailable(),
+        sessions::SessionError::InactivePrincipal => ApiError::new(ErrorCode::ResourceInactive),
+        _ => ApiError::unauthenticated(),
+    })?;
+    let cookie = identity.policy().set_cookie(&created.token, created.absolute_remaining_secs).ok_or(ApiError::new(ErrorCode::Internal))?;
+    let mut response = json_response(
+        StatusCode::OK,
+        &json!({
+            "tenant_id": verified.tenant_id.to_string(),
+            "workspace_id": verified.workspace_id.to_string(),
+            "document_id": verified.document_id.to_string(),
+            "role": verified.role.as_str(),
+            "system_id": verified.system_id,
+        }),
+    );
+    response.headers_mut().append(header::SET_COOKIE, HeaderValue::from_str(&cookie).map_err(|_| ApiError::new(ErrorCode::Internal))?);
+    Ok(response)
 }
 
 #[cfg(test)]

@@ -25,6 +25,7 @@ struct Host {
     workspace: Uuid,
     project: Uuid,
     document: Uuid,
+    principal: Uuid,
 }
 
 fn now() -> i64 {
@@ -98,8 +99,14 @@ async fn host_with(pool: &PgPool, max_role: HostRole) -> TestResult<Host> {
         .bind(principal.to_string())
         .execute(tx.connection())
         .await?;
-    sqlx::query("INSERT INTO tenant_members (tenant_id, principal_id, role, state) VALUES ($1::uuid, $2::uuid, 'viewer', 'active')")
+    sqlx::query("INSERT INTO tenant_members (tenant_id, principal_id, role, state) VALUES ($1::uuid, $2::uuid, 'editor', 'active')")
         .bind(&t)
+        .bind(principal.to_string())
+        .execute(tx.connection())
+        .await?;
+    sqlx::query("INSERT INTO document_members (tenant_id, document_id, principal_id, role) VALUES ($1::uuid, $2::uuid, $3::uuid, 'editor')")
+        .bind(&t)
+        .bind(document.to_string())
         .bind(principal.to_string())
         .execute(tx.connection())
         .await?;
@@ -112,7 +119,7 @@ async fn host_with(pool: &PgPool, max_role: HostRole) -> TestResult<Host> {
         map_external_resource(&mut tx, "host-a", kind, external, internal).await?;
     }
     tx.commit().await?;
-    Ok(Host { tenant, issuer, key, workspace, project, document })
+    Ok(Host { tenant, issuer, key, workspace, project, document, principal })
 }
 
 fn b64(value: &Value) -> String {
@@ -411,6 +418,84 @@ async fn disabling_an_issuer_refuses_its_tokens_immediately_and_enabling_restore
     sqlx::query("UPDATE tenants SET state = 'suspended' WHERE id = $1::uuid").bind(host.tenant.to_string()).execute(tx.connection()).await?;
     tx.commit().await?;
     assert_eq!(exchange_embed_token(&pool, &token(&host, &jti(), |_| {}), now()).await.err(), Some(issuer_gone));
+    Ok(())
+}
+
+#[tokio::test]
+async fn exchanges_and_refusals_are_audited_without_the_token() -> TestResult {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let host = host(&pool).await?;
+    let good = token(&host, &jti(), |_| {});
+    exchange_embed_token(&pool, &good, now()).await?;
+    assert_eq!(exchange_embed_token(&pool, &good, now()).await.err(), Some(EmbedError::Refused(Refusal::Replay)));
+    let bad_audience = token(&host, &jti(), |c| c["aud"] = json!("elsewhere"));
+    assert!(exchange_embed_token(&pool, &bad_audience, now()).await.is_err());
+
+    let mut tx = begin_tenant_transaction(&pool, host.tenant).await.map_err(|e| format!("{e:?}"))?;
+    let rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT outcome, metadata::text, coalesce(resource_id::text, '') FROM audit_events WHERE action = 'embed.exchange' ORDER BY outcome, created_at")
+            .fetch_all(tx.connection())
+            .await?;
+    tx.rollback().await?;
+    let denied: Vec<&(String, String, String)> = rows.iter().filter(|row| row.0 == "denied").collect();
+    let succeeded: Vec<&(String, String, String)> = rows.iter().filter(|row| row.0 == "succeeded").collect();
+    assert_eq!((succeeded.len(), denied.len()), (1, 2), "{rows:?}");
+    assert_eq!(succeeded[0].2, host.document.to_string());
+    assert!(denied.iter().any(|row| row.1.contains("replay")) && denied.iter().any(|row| row.1.contains("audience")));
+    for row in &rows {
+        assert!(!row.1.contains(&good) && !row.1.contains("eyJ") && !row.1.contains("figcraft\""), "no token material in {}", row.1);
+    }
+    Ok(())
+}
+
+async fn set_document_grant(pool: &PgPool, host: &Host, role: Option<&str>) -> TestResult {
+    let mut tx = begin_tenant_transaction(pool, host.tenant).await.map_err(|e| format!("{e:?}"))?;
+    let (t, document, principal) = (host.tenant.to_string(), host.document.to_string(), host.principal.to_string());
+    match role {
+        Some(role) => {
+            sqlx::query("UPDATE document_members SET role = $4 WHERE tenant_id = $1::uuid AND document_id = $2::uuid AND principal_id = $3::uuid")
+                .bind(&t)
+                .bind(&document)
+                .bind(&principal)
+                .bind(role)
+                .execute(tx.connection())
+                .await?;
+        }
+        None => {
+            sqlx::query("DELETE FROM document_members WHERE tenant_id = $1::uuid AND document_id = $2::uuid AND principal_id = $3::uuid")
+                .bind(&t)
+                .bind(&document)
+                .bind(&principal)
+                .execute(tx.connection())
+                .await?;
+        }
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_effective_role_is_the_intersection_with_the_principals_own_grants() -> TestResult {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let host = host(&pool).await?;
+    let ask = |role: &'static str| {
+        let t = token(&host, &jti(), |c| c["role"] = json!(role));
+        let pool = pool.clone();
+        async move { exchange_embed_token(&pool, &t, now()).await }
+    };
+    // The principal holds editor: the token's role decides, up to the host maximum.
+    assert_eq!(ask("viewer").await?.role, HostRole::Viewer);
+    assert_eq!(ask("editor").await?.role, HostRole::Editor);
+    // The principal's own role is a ceiling the token cannot raise.
+    set_document_grant(&pool, &host, Some("commenter")).await?;
+    assert_eq!(ask("editor").await?.role, HostRole::Commenter);
+    assert_eq!(ask("commenter").await?.role, HostRole::Commenter);
+    assert_eq!(ask("viewer").await?.role, HostRole::Viewer);
+    set_document_grant(&pool, &host, Some("viewer")).await?;
+    assert_eq!(ask("editor").await?.role, HostRole::Viewer);
+    // No grant at all: the token creates no access (the tenant editor role alone grants none).
+    set_document_grant(&pool, &host, None).await?;
+    assert_eq!(ask("viewer").await.err(), Some(EmbedError::Refused(Refusal::Boundary)));
     Ok(())
 }
 

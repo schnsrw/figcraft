@@ -306,7 +306,7 @@ async fn commit(transaction: TenantTransaction<'_>) -> Result<(), ApiError> {
 /// Record a successful mutation by `caller` on `resource_kind`/`resource_id` in `transaction`
 /// (before commit, so the change and its audit row land together). `metadata` holds ids and roles
 /// only.
-async fn audit(
+pub(crate) async fn audit(
     transaction: &mut TenantTransaction<'_>,
     caller: &Authenticated,
     action: &str,
@@ -373,7 +373,7 @@ async fn tenant_access(transaction: &mut TenantTransaction<'_>, caller: &Authent
 // ---------------------------------------------------------------------------------------------
 // Bodies and views
 
-fn valid_name(name: &str) -> Result<&str, ApiError> {
+pub(crate) fn valid_name(name: &str) -> Result<&str, ApiError> {
     let name = name.trim();
     let chars = name.chars().count();
     if chars == 0 || chars > MAX_NAME_CHARS || name.chars().any(char::is_control) { Err(invalid()) } else { Ok(name) }

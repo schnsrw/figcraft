@@ -1,0 +1,566 @@
+//! S6-012: the host API and the embed-token exchange over HTTP against the dev PostgreSQL, through
+//! the production router with real service-account credentials (skipped without
+//! `FIGCRAFT_TEST_DATABASE_URL_FILE`). Every tenant and principal is random, so runs are independent.
+
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Router;
+use axum::body::{Body, to_bytes};
+use axum::extract::ConnectInfo;
+use axum::http::{Method, Request, header};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use figcraft_cloud_domain::{CloudDocumentId, DeploymentMode, PrincipalId, ProjectId, Role, TenantId, Uuid, WorkspaceId};
+use figcraft_cloud_storage::begin_tenant_transaction;
+use figcraft_cloud_storage::host_mappings::{MappingKind, map_external_resource};
+use figcraft_cloud_storage::host_systems::{HostRole, KeyAlgorithm, NewHostKey, NewHostSystem, add_host_key, register_host_system, set_host_enabled};
+use figcraft_cloud_storage::memberships::{add_tenant_member, set_document_member};
+use figcraft_cloud_storage::metadata::{create_project, create_workspace};
+use figcraft_cloud_storage::resource_admin::{Transition, transition_project};
+use figcraft_cloud_storage::service_accounts::{Scope, create_service_account, issue_credential};
+use figcraft_cloud_storage::tenants::{NewTenant, create_tenant_with_owner};
+use ring::rand::SystemRandom;
+use ring::signature::{Ed25519KeyPair, KeyPair};
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use sqlx::postgres::PgPoolOptions;
+use tower::ServiceExt as _;
+
+use super::authenticator::IdentityConfig;
+use super::context::ContextSettings;
+use super::host_api::HOST_ROUTES;
+use super::rate_limit::RateLimitConfig;
+use super::{ApiConfig, AppState, api_router};
+use crate::config::CloudRole;
+
+type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
+
+const ORIGIN: &str = "https://figcraft-s6.test";
+
+fn err<E: std::fmt::Debug>(error: E) -> Box<dyn std::error::Error> {
+    format!("{error:?}").into()
+}
+
+async fn pool() -> Fallible<Option<PgPool>> {
+    let Ok(file) = std::env::var("FIGCRAFT_TEST_DATABASE_URL_FILE") else {
+        eprintln!("FIGCRAFT_TEST_DATABASE_URL_FILE is unset; host API DB test skipped");
+        return Ok(None);
+    };
+    let url = std::fs::read_to_string(file)?;
+    Ok(Some(PgPoolOptions::new().max_connections(8).connect(url.trim_end()).await?))
+}
+
+fn app(pool: PgPool) -> Fallible<Router> {
+    let objects = figcraft_cloud_storage::objects::ObjectStore::new(&figcraft_cloud_storage::objects::ObjectStoreSettings {
+        endpoint: "http://127.0.0.1:9".to_string(),
+        region: "us-east-1".to_string(),
+        bucket: "figcraft-test".to_string(),
+        access_key: "FCtestkey".to_string(),
+        secret_key: "FCtestsecret".to_string(),
+        path_style: true,
+    })
+    .map_err(err)?;
+    let identity =
+        Arc::new(IdentityConfig::new(DeploymentMode::MultiTenant, None, Some(ORIGIN), Some(b"s6-host-api-signing-key-0123456")).map_err(err)?);
+    let config = ApiConfig {
+        deployment: DeploymentMode::MultiTenant,
+        auth_rate_limit: RateLimitConfig { burst: 1_000_000, refill_every: Duration::from_millis(1), max_keys: 1_000 },
+        ..ApiConfig::default()
+    };
+    let state = AppState::new(pool, objects, config).with_identity(identity);
+    Ok(crate::health::app(CloudRole::Api, true, Some(api_router(state)), ContextSettings::new(CloudRole::Api, 256, Duration::from_secs(30), 1 << 20)))
+}
+
+struct Reply {
+    status: u16,
+    body: Value,
+    headers: axum::http::HeaderMap,
+}
+
+async fn send(app: &Router, method: &str, path: &str, bearer: Option<&str>, extra: &[(&str, &str)], body: Option<&Value>) -> Fallible<Reply> {
+    let peer: SocketAddr = "192.0.2.90:4000".parse()?;
+    let mut request = Request::builder().method(Method::from_bytes(method.as_bytes())?).uri(format!("/api/v1{path}")).extension(ConnectInfo(peer));
+    if let Some(bearer) = bearer {
+        request = request.header(header::AUTHORIZATION, format!("Bearer {bearer}"));
+    }
+    for (name, value) in extra {
+        request = request.header(*name, *value);
+    }
+    let request = match body {
+        Some(body) => request.header(header::CONTENT_TYPE, "application/json").body(Body::from(body.to_string()))?,
+        None => request.body(Body::empty())?,
+    };
+    let response = app.clone().oneshot(request).await?;
+    let status = response.status().as_u16();
+    let headers = response.headers().clone();
+    let bytes = to_bytes(response.into_body(), 1 << 20).await?;
+    Ok(Reply { status, body: serde_json::from_slice(&bytes).unwrap_or(Value::Null), headers })
+}
+
+async fn principal(pool: &PgPool, name: &str) -> Fallible<PrincipalId> {
+    let id = PrincipalId::random();
+    sqlx::query("INSERT INTO principals (id, kind, display_name) VALUES ($1::uuid, 'user', $2)")
+        .bind(id.to_string())
+        .bind(name)
+        .execute(pool)
+        .await?;
+    Ok(id)
+}
+
+/// A tenant with one registered host (`host-a`, key `k1`), mapped project `p1` and member `u1`,
+/// and service accounts for the four scopes.
+struct World {
+    tenant: TenantId,
+    owner: PrincipalId,
+    member: PrincipalId,
+    workspace: WorkspaceId,
+    project: ProjectId,
+    key: Ed25519KeyPair,
+    issuer: String,
+    all: String,
+    read_only: String,
+    export_only: String,
+}
+
+async fn world(pool: &PgPool) -> Fallible<World> {
+    let owner = principal(pool, "s6 owner").await?;
+    let member = principal(pool, "s6 member").await?;
+    let tenant = TenantId::random();
+    let mut t = begin_tenant_transaction(pool, tenant).await.map_err(err)?;
+    let slug = format!("s6-{}", &tenant.as_uuid().simple().to_string()[..12]);
+    create_tenant_with_owner(&mut t, NewTenant { slug: &slug, name: "s6 host", plan_id: "team", home_region: "local" }, owner).await.map_err(err)?;
+    add_tenant_member(&mut t, member, Role::Editor).await.map_err(err)?;
+    let workspace = create_workspace(&mut t, WorkspaceId::random(), "s6 workspace", None).await.map_err(err)?.id;
+    let project = create_project(&mut t, ProjectId::random(), workspace, "s6 project", None).await.map_err(err)?.id;
+    let rng = SystemRandom::new();
+    let key = Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| "keygen")?.as_ref()).map_err(|_| "pkcs8")?;
+    let issuer = format!("https://host-{}.example", Uuid::new_v4().simple());
+    register_host_system(
+        &mut t,
+        &NewHostSystem {
+            system_id: "host-a".into(),
+            issuer: issuer.clone(),
+            audiences: vec!["figcraft".into()],
+            allowed_origins: vec!["https://host.example".into()],
+            max_role: HostRole::Editor,
+            allow_insecure_localhost: false,
+        },
+    )
+    .await
+    .map_err(err)?;
+    add_host_key(
+        &mut t,
+        "host-a",
+        &NewHostKey { kid: "k1".into(), alg: KeyAlgorithm::EdDsa, public_key: key.public_key().as_ref().to_vec(), not_before: 0, expires_at: None },
+    )
+    .await
+    .map_err(err)?;
+    map_external_resource(&mut t, "host-a", MappingKind::Tenant, "t1", tenant.as_uuid()).await.map_err(err)?;
+    map_external_resource(&mut t, "host-a", MappingKind::Workspace, "w1", workspace.as_uuid()).await.map_err(err)?;
+    map_external_resource(&mut t, "host-a", MappingKind::Project, "p1", project.as_uuid()).await.map_err(err)?;
+    map_external_resource(&mut t, "host-a", MappingKind::Principal, "u1", member.as_uuid()).await.map_err(err)?;
+    let mut secrets = Vec::new();
+    for (name, scopes) in [
+        ("all", vec![Scope::DocumentsRead, Scope::DocumentsWrite, Scope::ExportsCreate, Scope::JobsRead]),
+        ("read", vec![Scope::DocumentsRead]),
+        ("export", vec![Scope::ExportsCreate]),
+    ] {
+        let account = create_service_account(&mut t, &format!("s6 {name}"), &scopes, owner).await.map_err(err)?;
+        secrets.push(issue_credential(&mut t, account.id, 3_600, owner).await.map_err(err)?.secret);
+    }
+    t.commit().await?;
+    let export_only = secrets.pop().ok_or("secret")?;
+    let read_only = secrets.pop().ok_or("secret")?;
+    let all = secrets.pop().ok_or("secret")?;
+    Ok(World { tenant, owner, member, workspace, project, key, issuer, all, read_only, export_only })
+}
+
+fn key(value: &str) -> [(&'static str, String); 1] {
+    [("idempotency-key", value.to_owned())]
+}
+
+fn extra<'a>(pairs: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+    pairs.iter().map(|(name, value)| (*name, value.as_str())).collect()
+}
+
+fn code(reply: &Reply) -> &str {
+    reply.body["error"]["code"].as_str().unwrap_or("")
+}
+
+#[tokio::test]
+async fn documents_are_created_resolved_archived_restored_and_exported_idempotently() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let world = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let base = "/host/systems/host-a";
+    let create = json!({"external_id": "doc-1", "external_project_id": "p1", "name": "First"});
+    let idem = format!("create-{}", Uuid::new_v4().simple());
+
+    // Create, then replay: the same stored response, no second document.
+    let first = send(&app, "POST", &format!("{base}/documents"), Some(&world.all), &extra(&key(&idem)), Some(&create)).await?;
+    assert_eq!(first.status, 201, "{}", first.body);
+    assert_eq!(first.body["external_id"], "doc-1");
+    assert_eq!(first.body["state"], "active");
+    let document_id = first.body["id"].as_str().ok_or("id")?.to_owned();
+    let replay = send(&app, "POST", &format!("{base}/documents"), Some(&world.all), &extra(&key(&idem)), Some(&create)).await?;
+    assert_eq!((replay.status, &replay.body), (201, &first.body));
+    assert_eq!(replay.headers.get("idempotent-replay").and_then(|v| v.to_str().ok()), Some("true"));
+    // The same key with another body is a conflict; so is a new key for a mapped external id.
+    let other = json!({"external_id": "doc-2", "external_project_id": "p1", "name": "Second"});
+    let reuse = send(&app, "POST", &format!("{base}/documents"), Some(&world.all), &extra(&key(&idem)), Some(&other)).await?;
+    assert_eq!((reuse.status, code(&reuse)), (409, "conflict"));
+    let duplicate = send(
+        &app,
+        "POST",
+        &format!("{base}/documents"),
+        Some(&world.all),
+        &extra(&key(&format!("again-{}", Uuid::new_v4().simple()))),
+        Some(&create),
+    )
+    .await?;
+    assert_eq!((duplicate.status, code(&duplicate)), (409, "conflict"));
+    // Missing or malformed keys, unknown fields and bad names are 400.
+    for headers in [vec![], vec![("idempotency-key", "short".to_owned())], vec![("idempotency-key", "has space in it!".to_owned())]] {
+        let bad = send(&app, "POST", &format!("{base}/documents"), Some(&world.all), &extra(&headers), Some(&other)).await?;
+        assert_eq!(bad.status, 400, "{:?}", headers);
+    }
+    let unknown = json!({"external_id": "doc-3", "external_project_id": "p1", "name": "x", "extra": 1});
+    assert_eq!(
+        send(&app, "POST", &format!("{base}/documents"), Some(&world.all), &extra(&key("unknown-field-1")), Some(&unknown)).await?.status,
+        400
+    );
+    let blank = json!({"external_id": "doc-3", "external_project_id": "p1", "name": "   "});
+    assert_eq!(send(&app, "POST", &format!("{base}/documents"), Some(&world.all), &extra(&key("blank-name-0001")), Some(&blank)).await?.status, 400);
+    // A project the host has not mapped does not exist for it.
+    let unmapped = json!({"external_id": "doc-4", "external_project_id": "nope", "name": "x"});
+    assert_eq!(
+        send(&app, "POST", &format!("{base}/documents"), Some(&world.all), &extra(&key("unmapped-proj-1")), Some(&unmapped)).await?.status,
+        404
+    );
+
+    // Resolve.
+    let resolved = send(&app, "GET", &format!("{base}/documents/doc-1"), Some(&world.read_only), &[], None).await?;
+    assert_eq!((resolved.status, resolved.body["id"].as_str()), (200, Some(document_id.as_str())));
+    assert_eq!(send(&app, "GET", &format!("{base}/documents/missing"), Some(&world.read_only), &[], None).await?.status, 404);
+
+    // Archive and restore are idempotent.
+    for _ in 0..2 {
+        let archived = send(&app, "POST", &format!("{base}/documents/doc-1/archive"), Some(&world.all), &[], None).await?;
+        assert_eq!((archived.status, archived.body["state"].as_str()), (200, Some("archived")));
+    }
+    for _ in 0..2 {
+        let restored = send(&app, "POST", &format!("{base}/documents/doc-1/restore"), Some(&world.all), &[], None).await?;
+        assert_eq!((restored.status, restored.body["state"].as_str()), (200, Some("active")));
+    }
+    // Each real change is audited once; repeats are not.
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    let audits: Vec<(String, i64)> =
+        sqlx::query_as("SELECT action, count(*) FROM audit_events WHERE action LIKE 'host.document.%' GROUP BY action ORDER BY action")
+            .fetch_all(t.connection())
+            .await?;
+    t.rollback().await?;
+    assert_eq!(
+        audits,
+        vec![("host.document.archive".to_owned(), 1), ("host.document.create".to_owned(), 1), ("host.document.restore".to_owned(), 1)]
+    );
+
+    // Export: needs a mapped, active member as the requester; idempotent; visible through the host.
+    let request = json!({"format": "png", "external_user_id": "u1"});
+    let export_key = format!("export-{}", Uuid::new_v4().simple());
+    let accepted =
+        send(&app, "POST", &format!("{base}/documents/doc-1/exports"), Some(&world.export_only), &extra(&key(&export_key)), Some(&request)).await?;
+    assert_eq!(accepted.status, 202, "{}", accepted.body);
+    assert_eq!(accepted.body["state"], "queued");
+    let export_id = accepted.body["id"].as_str().ok_or("export id")?.to_owned();
+    let again =
+        send(&app, "POST", &format!("{base}/documents/doc-1/exports"), Some(&world.export_only), &extra(&key(&export_key)), Some(&request)).await?;
+    assert_eq!((again.status, &again.body), (202, &accepted.body));
+    let polled = send(&app, "GET", &format!("{base}/exports/{export_id}"), Some(&world.all), &[], None).await?;
+    assert_eq!((polled.status, polled.body["id"].as_str()), (200, Some(export_id.as_str())));
+    let bad_format = json!({"format": "exe", "external_user_id": "u1"});
+    assert_eq!(
+        send(&app, "POST", &format!("{base}/documents/doc-1/exports"), Some(&world.export_only), &extra(&key("bad-format-0001")), Some(&bad_format))
+            .await?
+            .status,
+        400
+    );
+    let stranger = json!({"format": "png", "external_user_id": "nobody"});
+    assert_eq!(
+        send(&app, "POST", &format!("{base}/documents/doc-1/exports"), Some(&world.export_only), &extra(&key("stranger-0001")), Some(&stranger))
+            .await?
+            .status,
+        404
+    );
+    assert_eq!(send(&app, "GET", &format!("{base}/exports/{}", Uuid::new_v4()), Some(&world.all), &[], None).await?.status, 404);
+    Ok(())
+}
+
+#[tokio::test]
+async fn scopes_credentials_hosts_and_tenants_are_enforced() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let a = world(&pool).await?;
+    let b = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let base = "/host/systems/host-a";
+    let create = json!({"external_id": "doc-1", "external_project_id": "p1", "name": "First"});
+    send(&app, "POST", &format!("{base}/documents"), Some(&a.all), &extra(&key("setup-0000001")), Some(&create)).await?;
+
+    // Anonymous is 401 on every authenticated route; a bad bearer too.
+    for route in HOST_ROUTES.iter().filter(|route| route.scope.is_some()) {
+        let path = route.path.replace("{system_id}", "host-a").replace("{external_id}", "doc-1").replace("{export_id}", &Uuid::new_v4().to_string());
+        let body = json!({});
+        let reply = send(&app, route.method, &path, None, &[], (route.method == "POST").then_some(&body)).await?;
+        assert_eq!(reply.status, 401, "{} {}", route.method, route.path);
+        let reply = send(&app, route.method, &path, Some("not-a-credential"), &[], (route.method == "POST").then_some(&body)).await?;
+        assert_eq!(reply.status, 401, "{} {}", route.method, route.path);
+    }
+    // A scope that is not granted is 403 (read-only cannot write, export-only cannot read).
+    assert_eq!(
+        send(&app, "POST", &format!("{base}/documents"), Some(&a.read_only), &extra(&key("scope-write-001")), Some(&create)).await?.status,
+        403
+    );
+    assert_eq!(send(&app, "POST", &format!("{base}/documents/doc-1/archive"), Some(&a.read_only), &[], None).await?.status, 403);
+    assert_eq!(send(&app, "GET", &format!("{base}/documents/doc-1"), Some(&a.export_only), &[], None).await?.status, 403);
+    let export = json!({"format": "png", "external_user_id": "u1"});
+    assert_eq!(
+        send(&app, "POST", &format!("{base}/documents/doc-1/exports"), Some(&a.read_only), &extra(&key("scope-export-01")), Some(&export))
+            .await?
+            .status,
+        403
+    );
+    assert_eq!(send(&app, "GET", &format!("{base}/exports/{}", Uuid::new_v4()), Some(&a.read_only), &[], None).await?.status, 403);
+
+    // A browser session is not a host credential.
+    let session = figcraft_cloud_storage::sessions::create_session(&pool, a.owner, figcraft_cloud_storage::sessions::SessionLimits::default())
+        .await
+        .map_err(err)?
+        .token;
+    let reply = send(
+        &app,
+        "GET",
+        &format!("{base}/documents/doc-1"),
+        None,
+        &[("cookie", &format!("__Host-figcraft_session={session}")), ("x-figcraft-tenant", &a.tenant.to_string())],
+        None,
+    )
+    .await?;
+    assert!(matches!(reply.status, 401 | 403), "{}", reply.status);
+
+    // An unregistered system, and another tenant's credential on the same system id, find nothing:
+    // B has its own `host-a` with its own mappings, and A's external ids do not exist there.
+    assert_eq!(send(&app, "GET", "/host/systems/unknown/documents/doc-1", Some(&a.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "GET", &format!("{base}/documents/doc-1"), Some(&b.all), &[], None).await?.status, 404);
+    let created_in_b = send(&app, "POST", &format!("{base}/documents"), Some(&b.all), &extra(&key("tenant-b-doc-001")), Some(&create)).await?;
+    assert_eq!(created_in_b.status, 201);
+    let a_doc = send(&app, "GET", &format!("{base}/documents/doc-1"), Some(&a.all), &[], None).await?;
+    assert_ne!(a_doc.body["id"], created_in_b.body["id"]);
+    assert_eq!(a_doc.body["workspace_id"].as_str(), Some(a.workspace.to_string().as_str()));
+
+    // Disabling the host switches the whole API off for it.
+    let mut t = begin_tenant_transaction(&pool, a.tenant).await.map_err(err)?;
+    set_host_enabled(&mut t, "host-a", false).await.map_err(err)?;
+    t.commit().await?;
+    assert_eq!(send(&app, "GET", &format!("{base}/documents/doc-1"), Some(&a.all), &[], None).await?.status, 404);
+    assert_eq!(send(&app, "POST", &format!("{base}/documents"), Some(&a.all), &extra(&key("disabled-host-01")), Some(&create)).await?.status, 404);
+
+    // An archived project takes no new documents.
+    let mut t = begin_tenant_transaction(&pool, b.tenant).await.map_err(err)?;
+    transition_project(&mut t, b.project, Transition::Archive).await.map_err(err)?;
+    t.commit().await?;
+    let blocked = json!({"external_id": "doc-9", "external_project_id": "p1", "name": "x"});
+    let reply = send(&app, "POST", &format!("{base}/documents"), Some(&b.all), &extra(&key("archived-proj-01")), Some(&blocked)).await?;
+    assert_eq!((reply.status, code(&reply)), (409, "resource_inactive"));
+    Ok(())
+}
+
+fn sign(world: &World, jti: &str, mutate: impl FnOnce(&mut Value)) -> String {
+    let now = i64::try_from(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs())).unwrap_or(0);
+    let mut claims = json!({"iss": world.issuer, "aud": "figcraft", "sub": "u1", "jti": jti, "exp": now + 120, "nbf": now - 5, "iat": now - 5,
+        "tenant": "t1", "workspace": "w1", "document": "doc-1", "role": "editor"});
+    mutate(&mut claims);
+    let enc = |value: &Value| URL_SAFE_NO_PAD.encode(value.to_string());
+    let input = format!("{}.{}", enc(&json!({"alg": "EdDSA", "kid": "k1"})), enc(&claims));
+    format!("{input}.{}", URL_SAFE_NO_PAD.encode(world.key.sign(input.as_bytes()).as_ref()))
+}
+
+#[tokio::test]
+async fn the_embed_exchange_trades_a_token_once_for_a_session_and_refuses_everything_else_alike() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let world = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let create = json!({"external_id": "doc-1", "external_project_id": "p1", "name": "Embedded"});
+    let made = send(&app, "POST", "/host/systems/host-a/documents", Some(&world.all), &extra(&key("embed-doc-0001")), Some(&create)).await?;
+    assert_eq!(made.status, 201);
+    let document = CloudDocumentId::try_from(Uuid::parse_str(made.body["id"].as_str().ok_or("id")?)?).map_err(err)?;
+    // The principal needs a grant of its own: the token only narrows what the member already holds.
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    set_document_member(&mut t, document, world.member, Role::Editor).await.map_err(err)?;
+    t.commit().await?;
+    let same_origin = [("origin", ORIGIN)];
+
+    let token = sign(&world, &Uuid::new_v4().simple().to_string(), |_| {});
+    let body = json!({"token": token});
+    let ok = send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&body)).await?;
+    assert_eq!(ok.status, 200, "{}", ok.body);
+    assert_eq!((ok.body["role"].as_str(), ok.body["document_id"].as_str()), (Some("editor"), Some(document.to_string().as_str())));
+    let cookie = ok.headers.get(header::SET_COOKIE).and_then(|v| v.to_str().ok()).unwrap_or_default();
+    assert!(cookie.contains("figcraft_session"), "{cookie}");
+    assert!(!ok.body.to_string().contains(&token));
+
+    // A viewer token narrows the role.
+    let viewer = send(
+        &app,
+        "POST",
+        "/auth/embed/exchange",
+        None,
+        &same_origin,
+        Some(&json!({"token": sign(&world, &Uuid::new_v4().simple().to_string(), |c| c["role"] = json!("viewer"))})),
+    )
+    .await?;
+    assert_eq!(viewer.body["role"], "viewer");
+
+    // Replay, forged, expired, wrong audience, unmapped document, role escalation beyond the host
+    // maximum, an unknown issuer and garbage are all the same 401 with the same body shape.
+    let id = Uuid::new_v4().simple().to_string();
+    let used = sign(&world, &id, |_| {});
+    assert_eq!(send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&json!({"token": used}))).await?.status, 200);
+    let mut cases: Vec<(&str, String)> = vec![
+        ("replay", used.clone()),
+        ("expired", sign(&world, &Uuid::new_v4().simple().to_string(), |c| c["exp"] = json!(1_000))),
+        ("audience", sign(&world, &Uuid::new_v4().simple().to_string(), |c| c["aud"] = json!("other"))),
+        ("unmapped document", sign(&world, &Uuid::new_v4().simple().to_string(), |c| c["document"] = json!("nope"))),
+        ("unknown issuer", sign(&world, &Uuid::new_v4().simple().to_string(), |c| c["iss"] = json!("https://nobody.example"))),
+        ("garbage", "not.a.token".to_owned()),
+    ];
+    let tampered = sign(&world, &Uuid::new_v4().simple().to_string(), |_| {});
+    let mut parts: Vec<String> = tampered.split('.').map(str::to_owned).collect();
+    parts[1] = URL_SAFE_NO_PAD.encode(json!({"iss": world.issuer, "aud": "figcraft", "sub": "u1", "jti": "tamper-0000001", "exp": 4_000_000_000_i64, "nbf": 0, "iat": 0, "tenant": "t1", "workspace": "w1", "document": "doc-1", "role": "editor"}).to_string());
+    cases.push(("tampered", parts.join(".")));
+    let mut shapes = Vec::new();
+    for (label, token) in cases {
+        let reply = send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&json!({"token": token}))).await?;
+        assert_eq!(reply.status, 401, "{label}: {}", reply.body);
+        assert!(reply.headers.get(header::SET_COOKIE).is_none(), "{label}");
+        shapes.push((reply.body["error"]["code"].clone(), reply.body["error"]["message"].clone()));
+    }
+    assert!(shapes.windows(2).all(|pair| pair[0] == pair[1]), "refusals must be indistinguishable: {shapes:?}");
+
+    // Cross-origin posts, oversize and malformed bodies never reach the validator.
+    let cross = send(&app, "POST", "/auth/embed/exchange", None, &[("origin", "https://evil.example")], Some(&json!({"token": token}))).await?;
+    assert_eq!(cross.status, 403);
+    assert_eq!(send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&json!({"token": "a".repeat(5_000)}))).await?.status, 400);
+    assert_eq!(send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&json!({"token": ""}))).await?.status, 400);
+    assert_eq!(send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&json!({"token": "x", "more": 1}))).await?.status, 400);
+
+    // A principal whose own role is lower than the token's: the grant is the ceiling.
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    sqlx::query("UPDATE document_members SET role = 'commenter' WHERE tenant_id = $1::uuid AND principal_id = $2::uuid")
+        .bind(world.tenant.to_string())
+        .bind(world.member.to_string())
+        .execute(t.connection())
+        .await?;
+    t.commit().await?;
+    let narrowed = send(
+        &app,
+        "POST",
+        "/auth/embed/exchange",
+        None,
+        &same_origin,
+        Some(&json!({"token": sign(&world, &Uuid::new_v4().simple().to_string(), |_| {})})),
+    )
+    .await?;
+    assert_eq!(narrowed.body["role"], "commenter");
+
+    // Exchanges and denials are audited.
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    let counts: Vec<(String, i64)> =
+        sqlx::query_as("SELECT outcome, count(*) FROM audit_events WHERE action = 'embed.exchange' GROUP BY outcome ORDER BY outcome")
+            .fetch_all(t.connection())
+            .await?;
+    t.rollback().await?;
+    assert!(
+        counts.iter().any(|(outcome, n)| outcome == "succeeded" && *n >= 4) && counts.iter().any(|(outcome, n)| outcome == "denied" && *n >= 3),
+        "{counts:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn concurrent_identical_creates_make_exactly_one_document() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let world = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let create = json!({"external_id": "race-1", "external_project_id": "p1", "name": "Race"});
+    let mut tasks = Vec::new();
+    for _ in 0..6 {
+        let (app, bearer, create) = (app.clone(), world.all.clone(), create.clone());
+        tasks.push(tokio::spawn(async move {
+            let reply =
+                send(&app, "POST", "/host/systems/host-a/documents", Some(&bearer), &[("idempotency-key", "race-key-0000001")], Some(&create)).await;
+            reply.map(|reply| (reply.status, reply.body["id"].as_str().map(str::to_owned))).map_err(|error| error.to_string())
+        }));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    let mut created = 0;
+    for task in tasks {
+        let (status, id) = task.await?.map_err(err)?;
+        // The loser of the reservation race either waits and replays (201) or is told the first
+        // attempt is still running (409); it never makes a second document.
+        assert!(matches!(status, 201 | 409), "{status}");
+        if status == 201 {
+            created += 1;
+            ids.insert(id.ok_or("id")?);
+        }
+    }
+    assert!(created >= 1);
+    assert_eq!(ids.len(), 1, "one document id across all replays: {ids:?}");
+    let mut t = begin_tenant_transaction(&pool, world.tenant).await.map_err(err)?;
+    let documents: i64 = sqlx::query_scalar("SELECT count(*) FROM documents WHERE tenant_id = $1::uuid")
+        .bind(world.tenant.to_string())
+        .fetch_one(t.connection())
+        .await?;
+    t.rollback().await?;
+    assert_eq!(documents, 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_embed_exchange_is_rate_limited_per_issuer() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let world = world(&pool).await?;
+    let app = app(pool.clone())?;
+    let same_origin = [("origin", ORIGIN)];
+    let mut limited = 0;
+    for _ in 0..140 {
+        let reply = send(&app, "POST", "/auth/embed/exchange", None, &same_origin, Some(&json!({"token": sign(&world, "short", |_| {})}))).await?;
+        if reply.status == 429 {
+            limited += 1;
+            assert!(reply.headers.get(header::RETRY_AFTER).is_some());
+            assert_eq!(code(&reply), "rate_limited");
+        } else {
+            assert_eq!(reply.status, 401);
+        }
+    }
+    assert!(limited >= 10, "burst of 120 then throttled, got {limited} throttled of 140");
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_route_table_matches_the_router() -> Fallible<()> {
+    // Every documented route is registered (not 404/405 for an anonymous caller) and nothing the
+    // table does not list is: the same lists back the OpenAPI document test.
+    let pool = PgPoolOptions::new().connect_lazy("postgres://nobody@127.0.0.1:9/none")?;
+    let app = app(pool)?;
+    for route in HOST_ROUTES {
+        let path = route.path.replace("{system_id}", "s").replace("{external_id}", "e").replace("{export_id}", &Uuid::new_v4().to_string());
+        let reply =
+            send(&app, route.method, &path, None, &[("origin", ORIGIN)], (route.method == "POST").then(|| json!({"token": "x"})).as_ref()).await?;
+        assert!(!matches!(reply.status, 404 | 405) || route.path.contains("openapi"), "{} {} -> {}", route.method, route.path, reply.status);
+        let wrong = if route.method == "GET" { "DELETE" } else { "PUT" };
+        let reply = send(&app, wrong, &path, None, &[], None).await?;
+        assert!(matches!(reply.status, 404 | 405), "{wrong} {} must not exist", route.path);
+    }
+    Ok(())
+}

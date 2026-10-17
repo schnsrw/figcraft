@@ -225,6 +225,17 @@ pub async fn unmap_external_resource(
     Ok(result.rows_affected() == 1)
 }
 
+/// The document's latest event sequence in this tenant (`None` when it does not exist).
+pub async fn document_current_seq(transaction: &mut TenantTransaction<'_>, document_id: Uuid) -> Result<Option<u64>, HostMappingError> {
+    let seq: Option<i64> = sqlx::query_scalar("SELECT current_seq FROM documents WHERE tenant_id = $1::uuid AND id = $2::uuid")
+        .bind(transaction.tenant_id().to_string())
+        .bind(document_id.to_string())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(database_error)?;
+    seq.map(|seq| u64::try_from(seq).map_err(|_| HostMappingError::Database)).transpose()
+}
+
 /// The boundary check an embed exchange makes (S6-004): `document_id` is an active document of
 /// `workspace_id` in this tenant, and `principal_id` is an active member of the tenant.
 pub async fn embed_boundary_holds(

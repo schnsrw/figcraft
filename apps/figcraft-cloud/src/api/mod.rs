@@ -83,6 +83,8 @@ pub(crate) struct AppState {
     config: Arc<ApiConfig>,
     authenticator: Arc<dyn Authenticator>,
     auth_limiter: Arc<RateLimiter>,
+    /// Embed-token exchanges per issuer (S6-012).
+    embed_limiter: Arc<RateLimiter>,
     /// Identity settings (sessions, CSRF origin, share-session key, bootstrap gate); `None`
     /// leaves `/api/v1/auth` answering `503`.
     identity: Option<Arc<IdentityConfig>>,
@@ -97,7 +99,17 @@ impl AppState {
     /// State with the deny-all authenticator.
     pub(crate) fn new(pool: PgPool, objects: ObjectStore, config: ApiConfig) -> Self {
         let auth_limiter = Arc::new(RateLimiter::new(config.auth_rate_limit));
-        Self { pool, objects, config: Arc::new(config), authenticator: Arc::new(DenyAll), auth_limiter, identity: None, oidc: None, realtime: None }
+        Self {
+            pool,
+            objects,
+            config: Arc::new(config),
+            authenticator: Arc::new(DenyAll),
+            auth_limiter,
+            embed_limiter: Arc::new(RateLimiter::new(host_api::EMBED_LIMIT)),
+            identity: None,
+            oidc: None,
+            realtime: None,
+        }
     }
 
     /// Install the production identity stack: these settings and the
@@ -162,12 +174,16 @@ impl AppState {
     pub(crate) fn auth_limiter(&self) -> &RateLimiter {
         &self.auth_limiter
     }
+
+    pub(crate) fn embed_limiter(&self) -> &RateLimiter {
+        &self.embed_limiter
+    }
 }
 
 /// The `/api/v1` router (full paths) with every module's routes.
 pub(crate) fn api_router(state: AppState) -> Router {
     // S4 modules merge their routers here, e.g. `.merge(oidc::routes())`.
-    let auth: Router<AppState> = Router::new().merge(auth_routes::routes());
+    let auth: Router<AppState> = Router::new().merge(auth_routes::routes()).merge(host_api::auth_router());
     let resources: Router<AppState> = Router::new().merge(tenants_api::routes()).merge(documents_api::routes()).merge(host_api::router());
     api_router_with(state, auth, resources)
 }
@@ -197,6 +213,8 @@ async fn unavailable() -> ApiError {
     ApiError::unavailable()
 }
 
+#[cfg(test)]
+mod host_api_tests;
 #[cfg(test)]
 mod revocation_race_tests;
 #[cfg(test)]

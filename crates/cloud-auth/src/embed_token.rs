@@ -16,8 +16,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use figcraft_cloud_domain::{TenantId, Uuid};
+use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, ResourceState, Role, TenantId, Uuid};
+use figcraft_cloud_storage::audit::record_audit_event;
 use figcraft_cloud_storage::begin_tenant_transaction;
+use figcraft_cloud_storage::effective_roles::resolve_document_access;
 use figcraft_cloud_storage::embed_tokens::{EmbedTokenStoreError, consume_embed_jti, valid_jti};
 use figcraft_cloud_storage::host_mappings::{HostMappingError, MappingKind, embed_boundary_holds, resolve_external_resource};
 use figcraft_cloud_storage::host_systems::{HostKey, HostRole, HostSystem, KeyAlgorithm, find_host_by_issuer, get_host_system, list_host_keys};
@@ -114,7 +116,7 @@ fn split(token: &str) -> Result<(&str, &str, &str), EmbedError> {
 }
 
 /// The unverified issuer, used only to find the registered host whose key will verify the token.
-fn unverified_issuer(token: &str) -> Result<String, EmbedError> {
+pub fn token_issuer(token: &str) -> Result<String, EmbedError> {
     let (_, claims, _) = split(token)?;
     let claims = decode_part(claims, MAX_TOKEN_BYTES)?;
     match claims.get("iss").and_then(Value::as_str) {
@@ -234,6 +236,33 @@ pub fn verify_embed_token(token: &str, host: &HostSystem, keys: &[HostKey], now:
     })
 }
 
+/// S6 effective role: the token's role intersected with what the principal itself holds on the
+/// document (tenant role, workspace and document grants, team grants). A principal with no access,
+/// or whose document, project or workspace is not active, gets nothing: the token never creates
+/// access, it only narrows it.
+async fn effective_role(
+    transaction: &mut figcraft_cloud_storage::TenantTransaction<'_>,
+    token_role: HostRole,
+    principal: Uuid,
+    document: Uuid,
+) -> Result<HostRole, EmbedError> {
+    let (Ok(principal), Ok(document)) = (PrincipalId::try_from(principal), CloudDocumentId::try_from(document)) else {
+        return refused(Refusal::Boundary);
+    };
+    let access = match resolve_document_access(transaction, principal, document).await {
+        Ok(Some(access)) => access,
+        Ok(None) => return refused(Refusal::Boundary),
+        Err(_) => return Err(EmbedError::Unavailable),
+    };
+    let held = match (access.state, access.role) {
+        (ResourceState::Active, Some(Role::TenantOwner | Role::TenantAdmin | Role::WorkspaceAdmin | Role::Editor)) => HostRole::Editor,
+        (ResourceState::Active, Some(Role::Commenter)) => HostRole::Commenter,
+        (ResourceState::Active, Some(Role::Viewer | Role::TeamManager)) => HostRole::Viewer,
+        _ => return refused(Refusal::Boundary),
+    };
+    Ok(token_role.min(held))
+}
+
 /// A token that passed every check and whose `jti` is now spent.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct VerifiedEmbed {
@@ -243,7 +272,8 @@ pub struct VerifiedEmbed {
     pub workspace_id: Uuid,
     pub document_id: Uuid,
     pub principal_id: Uuid,
-    /// The granted role: the token's role, never above the host's registered maximum.
+    /// The granted role: the lowest of the token's role, the host's registered maximum and the
+    /// principal's own effective role on the document.
     pub role: HostRole,
     pub claims: EmbedClaims,
 }
@@ -280,9 +310,38 @@ async fn resolve_boundary(
 /// by its (enabled) issuer; a second presentation of the same token, concurrent or later, is
 /// refused as a replay.
 pub async fn exchange_embed_token(pool: &PgPool, token: &str, now: i64) -> Result<VerifiedEmbed, EmbedError> {
-    let issuer = unverified_issuer(token)?;
+    let issuer = token_issuer(token)?;
     let located =
         find_host_by_issuer(pool, &issuer).await.map_err(|_| EmbedError::Unavailable)?.ok_or(EmbedError::Refused(Refusal::UnknownIssuer))?;
+    let result = exchange_located(pool, &located, token, now).await;
+    if let Err(EmbedError::Refused(reason)) = result {
+        // The host is known, so the refusal is attributable to it: audit the category (never the
+        // token) so a host's operator can see failed and replayed exchanges. Best effort: a
+        // failing audit write must not turn a refusal into a different answer.
+        record_denial(pool, &located, reason).await;
+    }
+    result
+}
+
+async fn record_denial(pool: &PgPool, located: &figcraft_cloud_storage::host_systems::HostLocator, reason: Refusal) {
+    let Ok(mut transaction) = begin_tenant_transaction(pool, located.tenant_id).await else {
+        return;
+    };
+    let metadata = serde_json::json!({"system_id": located.system_id, "reason": format!("{reason:?}").to_lowercase()});
+    if record_audit_event(&mut transaction, Uuid::new_v4(), None, "embed.exchange", "host_system", None, None, None, "denied", &metadata)
+        .await
+        .is_ok()
+    {
+        let _ = transaction.commit().await;
+    }
+}
+
+async fn exchange_located(
+    pool: &PgPool,
+    located: &figcraft_cloud_storage::host_systems::HostLocator,
+    token: &str,
+    now: i64,
+) -> Result<VerifiedEmbed, EmbedError> {
     let mut transaction = begin_tenant_transaction(pool, located.tenant_id).await.map_err(|_| EmbedError::Unavailable)?;
     let host = get_host_system(&mut transaction, &located.system_id)
         .await
@@ -292,6 +351,7 @@ pub async fn exchange_embed_token(pool: &PgPool, token: &str, now: i64) -> Resul
     let keys = list_host_keys(&mut transaction, &located.system_id).await.map_err(|_| EmbedError::Unavailable)?;
     let claims = verify_embed_token(token, &host, &keys, now)?;
     let (workspace_id, document_id, principal_id) = resolve_boundary(&mut transaction, &host, &claims).await?;
+    let role = effective_role(&mut transaction, claims.role, principal_id, document_id).await?;
     // The row outlives the token's last possible validity (expiry plus skew).
     let keep_until = claims.expires_at.saturating_add(CLOCK_SKEW_SECS);
     match consume_embed_jti(&mut transaction, &located.system_id, &claims.jti, keep_until).await {
@@ -300,16 +360,23 @@ pub async fn exchange_embed_token(pool: &PgPool, token: &str, now: i64) -> Resul
         Err(EmbedTokenStoreError::InvalidInput) => return refused(Refusal::Claims),
         Err(_) => return Err(EmbedError::Unavailable),
     }
+    let metadata = serde_json::json!({"system_id": located.system_id, "role": role.as_str(), "workspace_id": workspace_id.to_string()});
+    record_audit_event(
+        &mut transaction,
+        Uuid::new_v4(),
+        Some(principal_id),
+        "embed.exchange",
+        "document",
+        Some(document_id),
+        None,
+        None,
+        "succeeded",
+        &metadata,
+    )
+    .await
+    .map_err(|_| EmbedError::Unavailable)?;
     transaction.commit().await.map_err(|_| EmbedError::Unavailable)?;
-    Ok(VerifiedEmbed {
-        tenant_id: located.tenant_id,
-        system_id: located.system_id,
-        workspace_id,
-        document_id,
-        principal_id,
-        role: claims.role,
-        claims,
-    })
+    Ok(VerifiedEmbed { tenant_id: located.tenant_id, system_id: located.system_id.clone(), workspace_id, document_id, principal_id, role, claims })
 }
 
 #[cfg(test)]
