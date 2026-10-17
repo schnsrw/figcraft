@@ -21,8 +21,12 @@ WORKDIR /src
 COPY . .
 # No craft-fonts checkout in the build context: the editor uses egui's bundled fonts.
 ENV CRAFT_FONTS_DIR=/nonexistent
+# Trunk keeps the wasm-bindgen and wasm-opt releases it downloads under $XDG_CACHE_HOME/trunk; a
+# cache mount keeps them across builds so only the first build fetches them from GitHub.
+ENV XDG_CACHE_HOME=/trunk-cache
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
+    --mount=type=cache,target=/trunk-cache \
     cd apps/figcraft-web \
     && trunk build --release --locked --public-url /edit/ --dist /out/edit \
     && test -s /out/edit/index.html \

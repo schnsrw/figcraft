@@ -138,9 +138,12 @@ the continuation point, a blocker or a major decision changes.
    thumbnails, garbage collection and reconciliation; S3-018..S3-020 add the checkpointed legacy import, read-only cutover
    verification and a backup/restore probe; S3 is complete (20/20) and its gate passes. The S2/S3 follow-ups above are closed (quarantine, attributed holds,
    register-first writes plus orphan sweep, legacy library/plugin import, typed retryable errors,
-   stale idempotency takeover), except share-link import. NEXT (owner priority, 2026-10-17): the
-   "Core slice" in the tracker, browser co-editing on the cloud stack (CS-002..CS-004), then full
-   S4 -> S5 -> S6. Testing policy: targeted suites per step and a quick scan before push; run the full
+   stale idempotency takeover), except share-link import. The core slice is complete (2026-10-17): two browsers co-edit a cloud
+   document through the Compose stack (`figcraft-cloud --create-share-link`, then open the printed
+   `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
+   ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
+   sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
+   NEXT: full S4 with axum (API) and the openidconnect crate (OIDC), both chosen by the owner. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.
    Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
    plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight

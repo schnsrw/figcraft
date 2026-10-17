@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); **Core slice in progress (3/4): browser co-editing on the cloud stack, current priority** · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); **Core slice complete (4/4): browser co-editing works on the cloud stack** · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -21,7 +21,7 @@ the same commit as the completed task.
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
-| **Core slice** Browser co-editing on the cloud stack (pulled forward, current priority) | in progress | 3 / 4 | Two browsers co-edit through the gateway and survive a cloud restart |
+| **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 4 / 4 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -1198,8 +1198,15 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   joins through the normal join path and clears the fragment so the secret leaves the address bar.
   Unit tests cover the hash parser with a 20,000-input junk sweep; the image build and `/edit/`
   content types were checked. `docs/saas/core-slice.md` describes the demo.
-- [ ] **CS-004** Demonstrate two browsers co-editing through the gateway, with the document
+- [x] **CS-004** Demonstrate two browsers co-editing through the gateway, with the document
   surviving a cloud container restart.
+  Evidence: on 2026-10-17 a disposable Compose stack (`figcraft-demo`) built from `main` served
+  the editor at `/edit/` (200, `application/wasm`), upgraded `/ws/v1/collab/` through the gateway
+  (`101 Switching Protocols`) and `figcraft-cloud --create-share-link` created a document link;
+  the product owner opened it in two browsers and confirmed live co-editing: remote cursors move in
+  real time and edits appear in the other browser. Known gap: a drag is sent when the command
+  completes (on drop), not while dragging, because the protocol syncs committed batches; live
+  in-progress transforms need an ephemeral channel beside presence (follow-up).
 
 ## S4 — Identity, tenancy and authorization
 
@@ -1584,3 +1591,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S3-018/S3-019/S3-020/S3-GATE: repeatable checkpointed legacy import with read-only cutover verification, a database-and-bucket-version backup/restore probe, and a Compose no-local-persistence check. S3 complete (20/20) and its gate passes. |
 | 2026-10-17 | S2/S3 follow-ups: plugin uniqueness by index, attributed retention holds, document quarantine, register-first object writes with an orphan sweep, legacy library/plugin import, typed retryable event errors and stale idempotency-key takeover (four parallel agents; schema 20261017000003). Core slice section added: browser co-editing pulled ahead of full S4–S6. |
 | 2026-10-17 | Core slice CS-001..CS-003: share links stored as hashed secrets; the cloud relay serves FigCraft's collaboration protocol on port 8082 (gateway `/ws/v1/collab`) with commit-before-broadcast durability, snapshot-first recovery and share-link admission; the browser editor is served at `/edit/` and joins from `#join=<link>`; `figcraft-cloud --create-share-link` prints a demo URL. CS-004 (two-browser demo through the stack) is running. |
+| 2026-10-17 | Core slice CS-004: the product owner confirmed two browsers co-editing one cloud document through the Compose stack (real-time cursors, edits synced on commit). Follow-up: stream in-progress drags. Core slice complete. |
