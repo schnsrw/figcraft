@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (10/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (10/43) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 10 / 31 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 10 / 43 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2516,6 +2516,45 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   as recoverable branches.
 - [ ] **S6-031** Add browser/desktop identity, convergence, offline and conflict end-to-end tests.
 
+### Built-in accounts, attribution and history
+
+Added 2026-10-18 at the owner's request: the product must own its identity, not only accept an
+external provider's. Without accounts of its own it cannot say who edited, whether they acted as
+themselves or through a team, or keep a history people can read and restore from. The requirements
+already allow "local accounts or OIDC" (`product-requirements.md`, "Libraries, review and history");
+`security.md` requires a memory-hard hash if passwords are offered. Local accounts sit beside OIDC
+(a tenant chooses its methods); neither is a bypass of the other.
+
+- [ ] **S6-032** Local account model: a credentials record per principal (normalized login, password
+  hash with its parameters, state), tenant-scoped with forced row-level security, unique per tenant.
+- [ ] **S6-033** Memory-hard password hashing (Argon2id through a reviewed, permissively licensed
+  crate recorded in the dependency review), constant-time verification, and an unknown-account path
+  that costs the same as a wrong password.
+- [ ] **S6-034** Invitation-based sign-up: accepting an invitation creates the account (name and
+  password) and the membership it grants; open registration exists only as an explicit, off-by-default
+  tenant setting.
+- [ ] **S6-035** Password sign-in beside OIDC: per-account and per-address rate limits with backoff,
+  generic errors, session creation and rotation on the existing session store, per-tenant allowed
+  methods.
+- [ ] **S6-036** Account self-service: change password (re-authentication, other sessions revoked),
+  profile (display name and colour), list and revoke own sessions.
+- [ ] **S6-037** Administration: invite or create a user, disable and re-enable, single-use
+  time-limited password-reset links (no mail server required; mail delivery optional later), revoke a
+  user's sessions, all audited.
+- [ ] **S6-038** Optional TOTP second factor: enrol, verify, recovery codes, per-tenant requirement.
+- [ ] **S6-039** Edit attribution that tells a person from a team: every committed batch records its
+  principal and how access was held (direct member, team grant, share link, service account), shown in
+  history as "Ada, through the Design team".
+- [ ] **S6-040** Document history API: activity by person and time, named versions and checkpoints
+  (not confused with the event log), paged and permission-checked.
+- [ ] **S6-041** Named versions and restore: create, rename and delete a version; restoring one adds a
+  new accepted head and keeps the original history.
+- [ ] **S6-042** History in the workspace: a per-file timeline (who, when, through which team), named
+  versions, and restore with confirmation.
+- [ ] **S6-043** Collaborators are who they authenticated as: the relay sets each peer's displayed name
+  and colour from the signed-in account (a share link shows the link's label), instead of trusting
+  what the client says, so cursors, comments and undo history belong to real people.
+
 ### S6 gate
 
 - [ ] **S6-GATE** Demonstrate browser and desktop access to one cloud document identity, recoverable
@@ -2778,3 +2817,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-014: signed webhook delivery (HMAC-SHA256 over timestamp.body, 300 s window), retry schedule, terminal failure, manual replay, SSRF-safe connects and a leased multi-worker claim (schema 20261018000013). S6 reaches 9/31. |
 | 2026-10-18 | S6-015: webhook events published transactionally for host and browser document changes, filtered by endpoint subscription, ids-only payloads enforced by an allow-list. S6 reaches 10/31; the API and webhooks block (S6-011 to S6-015) is complete, and the process now starts the delivery dispatcher in the worker and all roles. |
 | 2026-10-18 | Core slice follow-up closed: a drag is now visible to others while it moves. The mover's engine sends the dragged layers' boxes as a throttled `drag` signal (about 20 a second, repeated while held, an empty one on drop); everyone else sees ghosts at the live position with "<name> is moving" until the drop commits the real batch. No protocol change (a new signal kind; the server relays it to signal readers and drops it from viewers). Tested in collab, engine, the headless UI and the live relay matrix. |
+| 2026-10-18 | S6 scope: built-in accounts, edit attribution and history added as S6-032 to S6-043 (S6 is now 43 tasks): local accounts beside OIDC, a person-versus-team attribution record, a history API, named versions with restore, and relay-authenticated collaborator names. Requested by the owner; the design docs already allowed local accounts and required restore-without-losing-history. |
