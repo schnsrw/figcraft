@@ -135,6 +135,8 @@ mod live_chat_tests;
 #[cfg(test)]
 mod live_docs_tests;
 #[cfg(test)]
+mod live_drag_tests;
+#[cfg(test)]
 mod live_join_tests;
 #[cfg(test)]
 mod live_server_tests;

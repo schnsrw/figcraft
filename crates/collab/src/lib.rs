@@ -42,7 +42,7 @@ pub use client::{Client, HISTORY_LIMIT};
 pub use diff::{Diff, diff};
 pub use figcraft_doc::{Document, NodeId};
 pub use history::{BatchKind, Notice};
-pub use message::{Accepted, Access, CatchUp, ClientMsg, EditingText, Hello, Peer, Presence, Processed, Resume, ServerMsg, Signal};
+pub use message::{Accepted, Access, CatchUp, ClientMsg, DragBox, EditingText, Hello, Peer, Presence, Processed, Resume, ServerMsg, Signal};
 pub use replica::{Applied, Mode, Replica};
 pub use server::{Journal, Outgoing, Server, SessionState, VIEW_ONLY};
 

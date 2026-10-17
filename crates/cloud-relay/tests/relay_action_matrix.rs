@@ -482,6 +482,15 @@ fn probe(addr: SocketAddr, file: &str, token: &str, watcher: &mut Watcher) -> [O
         outcomes[4] = Outcome::Allowed;
     }
 
+    // A drag preview (layers being moved) reaches the room from someone who can edit, and from no
+    // one who can only view.
+    let drag = Signal::drag(&[figcraft_collab::DragBox { id: page, x: 1.0, y: 2.0, w: 30.0, h: 40.0 }]);
+    let _ = raw.send(&ClientMsg::Signal(drag));
+    let heard = watcher
+        .raw
+        .heard_before_pong(|msg| matches!(msg, ServerMsg::Signal { client_id, signal } if *client_id == me && signal.kind == Signal::DRAG));
+    assert_eq!(heard, Some(welcome.access == Access::Edit), "{me}: a drag preview is heard exactly when the sender can edit");
+
     // Drop, miss a batch, come back: the same id and access, and the missed batch as catch-up.
     let last = watcher.seq;
     drop(raw);

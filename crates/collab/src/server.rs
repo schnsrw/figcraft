@@ -370,6 +370,10 @@ impl Server {
             // current spotlight.
             ClientMsg::Signal(sig) => {
                 let Some(sig) = sig.clean().filter(|s| s.kind != Signal::READY) else { return Vec::new() };
+                // A drag preview says layers are being moved: only someone who can edit says so.
+                if sig.kind == Signal::DRAG && self.viewers.contains(&from) {
+                    return Vec::new();
+                }
                 if sig.kind == Signal::SPOTLIGHT {
                     if sig.on() {
                         self.spotlight = Some(from);

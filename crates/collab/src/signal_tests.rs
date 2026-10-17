@@ -121,3 +121,90 @@ fn signals_never_reach_the_document_or_the_log() {
     assert_eq!(after.log, before.log);
     assert!(s.take_journal().is_empty(), "nothing for the store to keep");
 }
+
+fn boxed(id: u64, x: f32) -> crate::message::DragBox {
+    crate::message::DragBox { id: figcraft_doc::NodeId(id), x, y: -3.5, w: 120.25, h: 40.0 }
+}
+
+#[test]
+fn a_drag_signal_carries_boxes_and_round_trips() {
+    let boxes = vec![boxed(7, 10.5), boxed(u64::MAX, -1e6)];
+    let sig = Signal::drag(&boxes);
+    assert_eq!(sig.kind, Signal::DRAG);
+    assert_eq!(sig.drag_boxes(), Some(boxes));
+    // No boxes: the drag ended.
+    assert_eq!(Signal::drag(&[]).drag_boxes(), Some(Vec::new()));
+    assert_eq!(Signal::drag(&[]).text, "");
+    // Not a drag signal at all.
+    assert_eq!(Signal::chat("hi").drag_boxes(), None);
+}
+
+#[test]
+fn a_drag_signal_is_bounded_and_never_carries_what_is_not_finite() {
+    let many: Vec<_> = (0..50).map(|i| boxed(i, 0.0)).collect();
+    let sig = Signal::drag(&many);
+    assert_eq!(sig.drag_boxes().map(|b| b.len()), Some(Signal::MAX_DRAG_BOXES), "a preview keeps the first few");
+    assert!(sig.kind.len() + sig.text.len() <= Signal::MAX_BYTES);
+    // Even the widest numbers fit.
+    let wide: Vec<_> = (0..Signal::MAX_DRAG_BOXES as u64)
+        .map(|i| crate::message::DragBox { id: figcraft_doc::NodeId(u64::MAX - i), x: f32::MIN, y: f32::MIN_POSITIVE, w: f32::MAX, h: f32::MAX })
+        .collect();
+    let sig = Signal::drag(&wide);
+    assert!(sig.kind.len() + sig.text.len() <= Signal::MAX_BYTES);
+    assert!(sig.clone().clean().is_some());
+    // Non-finite boxes are left out when sending.
+    assert_eq!(Signal::drag(&[boxed(1, f32::NAN), boxed(2, 0.0)]).drag_boxes().map(|b| b.len()), Some(1));
+}
+
+#[test]
+fn malformed_drag_signals_are_refused_by_the_server() {
+    let mut s = server();
+    let (a, _) = s.join(hello(&client_version())).unwrap();
+    let (b, _) = s.join(hello(&client_version())).unwrap();
+    for text in [
+        "1,2,3,4",     // a field short
+        "1,2,3,4,5,6", // a field over
+        "x,2,3,4,5",   // the id isn't a number
+        "1,NaN,3,4,5", // not finite
+        "1,inf,3,4,5",
+        "1,2,3,-4,5", // a negative size
+        "1,2,3,4,5;", // an empty box
+        ";",
+        "1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5;1,2,3,4,5", // 13 boxes
+    ] {
+        let out = s.receive(a, ClientMsg::Signal(Signal { kind: Signal::DRAG.into(), text: text.into() }));
+        assert!(signals(&out, b).is_empty(), "{text:?} must go nowhere");
+    }
+}
+
+#[test]
+fn a_drag_goes_to_readers_of_signals_only_and_is_not_kept_for_newcomers() {
+    let mut s = server();
+    let (a, _) = s.join(hello(&client_version())).unwrap();
+    let (reader, _) = s.join(hello(&client_version())).unwrap();
+    let (old, _) = s.join(hello("0.3.1")).unwrap();
+    let sig = Signal::drag(&[boxed(5, 1.0)]);
+    let out = s.receive(a, ClientMsg::Signal(sig.clone()));
+    assert_eq!(signals(&out, reader), vec![(a, sig.clone())]);
+    assert!(signals(&out, old).is_empty() && signals(&out, a).is_empty());
+    assert_eq!(out.len(), 1);
+    // A newcomer is told nothing of a drag in progress (it is a moment, not state).
+    let (late, out) = s.join(hello(&client_version())).unwrap();
+    assert_eq!(signals(&out, late), vec![(late, Signal::ready())]);
+    // Ending the drag goes out too.
+    let out = s.receive(a, ClientMsg::Signal(Signal::drag(&[])));
+    assert_eq!(signals(&out, reader).len(), 1);
+}
+
+#[test]
+fn a_viewer_cannot_show_a_drag_but_can_still_chat() {
+    let mut s = server();
+    let (editor, _) = s.join(hello(&client_version())).unwrap();
+    let (viewer, _) = s.join_as(hello(&client_version()), crate::message::Access::View).unwrap();
+    let drag = Signal::drag(&[boxed(5, 1.0)]);
+    // The viewer's drag goes nowhere; the editor's reaches the viewer.
+    assert!(signals(&s.receive(viewer, ClientMsg::Signal(drag.clone())), editor).is_empty());
+    assert_eq!(signals(&s.receive(editor, ClientMsg::Signal(drag.clone())), viewer), vec![(editor, drag)]);
+    // Chat is for everyone.
+    assert_eq!(signals(&s.receive(viewer, ClientMsg::Signal(Signal::chat("hi"))), editor), vec![(viewer, Signal::chat("hi"))]);
+}

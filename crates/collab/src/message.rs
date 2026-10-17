@@ -125,6 +125,17 @@ pub struct EditingText {
     pub selection: Option<(usize, usize)>,
 }
 
+/// One layer someone is moving, resizing or rotating right now, as the box it fills on the page
+/// (page coordinates), streamed while the drag is under way ([`Signal::DRAG`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DragBox {
+    pub id: NodeId,
+    pub x: f32,
+    pub y: f32,
+    pub w: f32,
+    pub h: f32,
+}
+
 /// Presence beyond [`Presence`]: someone's cursor chat, or their spotlight. Ephemeral like presence
 /// (never in the document or the log), latest per kind wins. Kinds a side doesn't know are
 /// ignored: a server drops them, a client skips them.
@@ -141,6 +152,11 @@ impl Signal {
     pub const CHAT: &str = "chat";
     /// Someone asks everyone to follow their view.
     pub const SPOTLIGHT: &str = "spotlight";
+    /// The layers someone is dragging, as boxes, while they drag (empty: they let go). Sent by
+    /// editors only in practice; the document changes only when the drag is dropped.
+    pub const DRAG: &str = "drag";
+    /// Most layers one drag signal carries (more are left out: it is a preview).
+    pub const MAX_DRAG_BOXES: usize = 12;
     /// From the server, about the client itself, right after its welcome: signals may be sent.
     pub const READY: &str = "ready";
     /// Longest chat message (characters).
@@ -154,6 +170,52 @@ impl Signal {
 
     pub fn spotlight(on: bool) -> Signal {
         Signal { kind: Signal::SPOTLIGHT.into(), text: if on { "on".into() } else { String::new() } }
+    }
+
+    /// A drag in progress: the layers' boxes (`id,x,y,w,h` joined by `;`), at most
+    /// [`MAX_DRAG_BOXES`](Self::MAX_DRAG_BOXES), always within [`MAX_BYTES`](Self::MAX_BYTES);
+    /// boxes that aren't finite are left out. No boxes: the drag ended.
+    pub fn drag(boxes: &[DragBox]) -> Signal {
+        let mut text = String::new();
+        for b in boxes.iter().filter(|b| [b.x, b.y, b.w, b.h].iter().all(|v| v.is_finite())).take(Signal::MAX_DRAG_BOXES) {
+            let one = format!("{},{},{},{},{}", b.id.0, b.x, b.y, b.w, b.h);
+            if Signal::DRAG.len() + text.len() + one.len() + 1 > Signal::MAX_BYTES {
+                break;
+            }
+            if !text.is_empty() {
+                text.push(';');
+            }
+            text.push_str(&one);
+        }
+        Signal { kind: Signal::DRAG.into(), text }
+    }
+
+    /// The boxes of a drag signal: `None` when it isn't one or is malformed (too many boxes, a
+    /// field that isn't a number or isn't finite, a negative size).
+    pub fn drag_boxes(&self) -> Option<Vec<DragBox>> {
+        if self.kind != Signal::DRAG {
+            return None;
+        }
+        if self.text.is_empty() {
+            return Some(Vec::new());
+        }
+        let mut out = Vec::new();
+        for part in self.text.split(';') {
+            if out.len() == Signal::MAX_DRAG_BOXES {
+                return None;
+            }
+            let mut f = part.split(',');
+            let id = f.next()?.parse::<u64>().ok()?;
+            let mut v = [0f32; 4];
+            for slot in &mut v {
+                *slot = f.next()?.parse::<f32>().ok().filter(|n| n.is_finite())?;
+            }
+            if f.next().is_some() || v[2] < 0.0 || v[3] < 0.0 {
+                return None;
+            }
+            out.push(DragBox { id: NodeId(id), x: v[0], y: v[1], w: v[2], h: v[3] });
+        }
+        Some(out)
     }
 
     pub fn ready() -> Signal {
@@ -178,6 +240,7 @@ impl Signal {
                 Some(Signal::chat(if text.trim().is_empty() { "" } else { &text }))
             }
             Signal::SPOTLIGHT if self.text.is_empty() || self.on() => Some(self),
+            Signal::DRAG if self.drag_boxes().is_some() => Some(self),
             Signal::READY if self.text.is_empty() => Some(self),
             _ => None,
         }

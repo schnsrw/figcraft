@@ -223,7 +223,7 @@ Client → server:
 | `Admin {publish {name, snapshot} \| files \| links {file} \| createLink {file, access, label} \| revoke {file, link} \| remove {file}}` | A request on a managing connection; each gets one `Admin` reply, in order. |
 | `OpenLibrary {protocol, file, token, client_version}` | Instead of `Hello`: use a file's team library with one of the file's share links. |
 | `Library {fetch {have?, usage?} \| publish {archive} \| usage}` | A request on a library connection; each gets one `Library` reply, in order. `usage` is `{file, components: [(id, instances)]}`. |
-| `Signal {kind, text}` | Ephemeral presence, only after the server's `ready`: `chat` (the cursor chat message; empty: closed) or `spotlight` (`"on"`, or empty: stopped). |
+| `Signal {kind, text}` | Ephemeral presence, only after the server's `ready`: `chat` (the cursor chat message; empty: closed), `spotlight` (`"on"`, or empty: stopped) or `drag` (the layers being moved right now: boxes `id,x,y,w,h` in page coordinates joined by `;`, at most 12; empty: let go). A viewer's `drag` is dropped by the server. |
 | `OpenPlugins {protocol, key, client_version}` | Instead of `Hello`: use the server's plugin directory; `key` empty to browse, the server key to publish too. |
 | `OpenHosting {protocol, client_version, file, owner}` | Instead of `Hello`: ask about the server's hosting; publish without the key (`Admin publish`) when it is open to the public; with a file's id and owner token, manage that file (`Admin links \| createLink \| revoke \| rename \| remove` of it). Answered with `Hosting` or `Refused`. |
 | `Admin {rename {file, name} \| listing \| reports \| block {ip} \| unblock {ip} \| blocked}` | Later managing requests: rename a file on the server, the files with what the operator moderates by, the reports, blocking addresses (an IPv6 address: its /64). Owner tokens may only rename their file. |
@@ -245,7 +245,7 @@ Server → client:
 | `Pong` | Keep-alive. |
 | `Admin {ready \| published {file, edit, view} \| files \| links \| link \| done \| failed {reason}}` | A managing connection's answer: the key is right, a published file with its first two links (tokens shown once), listings, a new link, done, or why not. |
 | `Library {ready {access} \| library {version, archive} \| unchanged {version} \| empty \| published {version} \| usage [{usage, updated}] \| failed {reason}}` | A library connection's answer: the link is right (with its access), the library (a `.figcraft` archive holding it), no newer version, no library yet, kept, the usage reports, or why not. |
-| `Signal {client_id, signal: {kind, text}}` | Someone's cursor chat or spotlight, cleaned by the server; `ready` (about the client itself, after its welcome): signals may be sent. Only to clients whose hello announced `signals`. |
+| `Signal {client_id, signal: {kind, text}}` | Someone's cursor chat, spotlight or drag preview, cleaned by the server; `ready` (about the client itself, after its welcome): signals may be sent. Only to clients whose hello announced `signals`. |
 | `Hosting {open, operator, terms, idle_secs, max_file_mb, expires?}` | The answer to `OpenHosting`, and after a welcome to clients whose hello announced `hosting`: anyone may publish, how to reach the operator, the terms (a URL), how long files published without the key are kept unopened, the largest file, and this file's expiry (seconds since 1970). |
 | `Admin {hosted {file, edit, view, owner, expires?} \| listing [row] \| reports [report] \| blocked [ip]}` | A file published without the key with its links and owner token (shown once), and the answers to the later managing requests. |
 | `Reported {error?}` | The answer to `Report`: kept, or why not. |
@@ -436,6 +436,12 @@ resuming with its offline edits, and leaving the session going back to snapshot 
   follows it); the presenter leaving or stopping ends it. While you spotlight a banner says so,
   with Stop. After a reconnect your spotlight goes out again once the host says it reads signals.
   With no accounts, anyone in a session can spotlight.
+- **Live drags.** While someone moves, resizes or rotates layers, the others see those layers'
+  boxes at the position being dragged to, in that person's colour with "name is moving"
+  (about 20 updates a second, repeated while the drag is held, ended by a "let go" signal, hidden
+  if the updates stop). It is a preview: the document changes for everyone when the drag is dropped,
+  as one committed batch. It travels as the `drag` signal kind, so it needs no protocol change and
+  older apps simply never see it; View ▸ Multiplayer cursors hides it.
 - **Signals are presence**: never in the document, the log or a saved state; the server keeps only
   who spotlights (for newcomers). It cleans each one (unknown kinds, malformed spotlights, a
   client's `ready` and anything over 1 KiB are dropped; chat text is cut to 100 characters with

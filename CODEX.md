@@ -140,9 +140,9 @@ the continuation point, a blocker or a major decision changes.
    register-first writes plus orphan sweep, legacy library/plugin import, typed retryable errors,
    stale idempotency takeover), except share-link import. The core slice is complete (2026-10-17): two browsers co-edit a cloud
    document through the Compose stack (`figcraft-cloud --create-share-link`, then open the printed
-   `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
-   ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
-   sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
+   `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups (all since closed): in-progress drags stream as `drag` signals (ghost with the
+   person's name; the real batch commits on drop), periodic snapshots, the cloud binary's logger,
+   link revocation disconnecting live sessions.
    STATE: S4 is complete (25/25) and its gate passes (2026-10-17). S5 is 10/25.
    S5-002 fixes batch actor attribution: each accepted batch is now stored under its own
    admitted client's principal, verified with two editors in a live room against PostgreSQL/S3.
@@ -183,8 +183,7 @@ the continuation point, a blocker or a major decision changes.
    takeover, periodic snapshots, link revocation disconnecting live sessions, the cloud binary's
    logger). Still open: lifecycle enforcement by SeaweedFS is unverified (the sweep is
    authoritative); production network isolation, backup/restore drills and lifecycle policy are
-   S8 work; in-progress drags sync on drop (a client-side sync change in upstream-owned engine
-   code, see below if taken up).
+   S8 work.
 3. Update task evidence and milestone counts in the same commit as each completed task.
 
 ## Local environment notes

@@ -1207,6 +1207,8 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   real time and edits appear in the other browser. Known gap: a drag is sent when the command
   completes (on drop), not while dragging, because the protocol syncs committed batches; live
   in-progress transforms need an ephemeral channel beside presence (follow-up).
+  Closed 2026-10-18: drags stream as `drag` signals (an ephemeral channel beside presence); see the
+  revision history.
 - [x] **CS-005** Make branding (product name, colours, logo, favicon, links) and deployment
   configuration settable from Docker environment variables, with no code change or image rebuild.
   Evidence: landed in e20b5cd. The web image now ships deploy/saas/branding.json.tmpl as
@@ -2775,3 +2777,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-013: webhook endpoint management (create, list, get, update, delete, rotate) with signing secrets sealed at rest, shown once, and an SSRF-safe URL policy (schema 20261018000012). S6 reaches 8/31. |
 | 2026-10-18 | S6-014: signed webhook delivery (HMAC-SHA256 over timestamp.body, 300 s window), retry schedule, terminal failure, manual replay, SSRF-safe connects and a leased multi-worker claim (schema 20261018000013). S6 reaches 9/31. |
 | 2026-10-18 | S6-015: webhook events published transactionally for host and browser document changes, filtered by endpoint subscription, ids-only payloads enforced by an allow-list. S6 reaches 10/31; the API and webhooks block (S6-011 to S6-015) is complete apart from starting the dispatcher in the worker role. |
+| 2026-10-18 | Core slice follow-up closed: a drag is now visible to others while it moves. The mover's engine sends the dragged layers' boxes as a throttled `drag` signal (about 20 a second, repeated while held, an empty one on drop); everyone else sees ghosts at the live position with "<name> is moving" until the drop commits the real batch. No protocol change (a new signal kind; the server relays it to signal readers and drops it from viewers). Tested in collab, engine, the headless UI and the live relay matrix. |

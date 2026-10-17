@@ -43,8 +43,8 @@ use std::sync::Arc;
 
 use figcraft_collab::Client;
 use figcraft_collab::code::{self, Code};
-pub use figcraft_collab::message::Signal;
 use figcraft_collab::message::{Admin, AdminReply, ClientMsg, EditingText, LibraryReply, LibraryReq, PluginReply, PluginReq, ServerMsg};
+pub use figcraft_collab::message::{DragBox, Signal};
 
 pub use figcraft_collab::message::{Access, HostInfo, Resume, utc_date};
 use figcraft_doc::{Document, NodeId};
@@ -589,6 +589,16 @@ pub struct Live {
     pub signals: bool,
     /// Others' open cursor chat messages.
     pub chats: BTreeMap<u32, String>,
+    /// The layers others are dragging right now, as boxes in page coordinates: a preview that
+    /// comes and goes (the document changes when the drag is dropped). Cleared by their "let go"
+    /// signal, when they leave and when the connection drops.
+    pub drags: BTreeMap<u32, Vec<DragBox>>,
+    /// How many drag signals each peer's preview has had (also the repeats of a held drag): a
+    /// preview that stops being refreshed is stale (the UI hides it after a few seconds).
+    pub drag_updates: BTreeMap<u32, u64>,
+    /// What your own drag last told the others (and when, in the UI's clock): re-sent when it
+    /// changes, at most every [`DRAG_INTERVAL`] seconds, and once more when it ends.
+    drag_sent: Option<(Vec<DragBox>, f64)>,
     /// Your cursor chat message (empty: none).
     pub chat: String,
     /// Who spotlights (you follow them until you move your view).
@@ -596,6 +606,12 @@ pub struct Live {
     /// You spotlight: everyone follows you.
     pub spotlighting: bool,
 }
+
+/// The fewest seconds between two drag previews you send (about 20 a second).
+pub const DRAG_INTERVAL: f64 = 0.05;
+
+/// A drag you hold still is repeated this often, so the others' preview doesn't time out.
+pub const DRAG_KEEPALIVE: f64 = 1.0;
 
 impl Live {
     pub fn role(&self) -> Option<Role> {
@@ -974,6 +990,9 @@ impl Session {
                     // again then).
                     live.signals = false;
                     live.chats.clear();
+                    live.drags.clear();
+                    live.drag_updates.clear();
+                    live.drag_sent = None;
                     live.chat.clear();
                     live.spotlight = None;
                     if let Some(c) = live.client.as_mut() {
@@ -1005,6 +1024,8 @@ impl Session {
             Event::PeerLeft(peer) => {
                 live.presence.remove(&peer);
                 live.chats.remove(&peer);
+                live.drags.remove(&peer);
+                live.drag_updates.remove(&peer);
                 if live.spotlight == Some(peer) {
                     live.spotlight = None;
                 }
@@ -1073,6 +1094,17 @@ impl Session {
                     self.live.send(id, [ClientMsg::Signal(Signal::spotlight(true))]);
                 }
             }
+            // Someone's drag in progress (or its end): a preview, never in the document.
+            (Signal::DRAG, Some(_)) => match sig.drag_boxes() {
+                Some(boxes) if !boxes.is_empty() && peer != live.info.as_ref().map_or(u32::MAX, |i| i.me) => {
+                    live.drags.insert(peer, boxes);
+                    *live.drag_updates.entry(peer).or_insert(0) += 1;
+                }
+                _ => {
+                    live.drags.remove(&peer);
+                    live.drag_updates.remove(&peer);
+                }
+            },
             (Signal::CHAT, Some(_)) if sig.text.is_empty() => {
                 live.chats.remove(&peer);
             }
@@ -1096,6 +1128,63 @@ impl Session {
             }
             _ => {}
         }
+    }
+
+    /// The layers your own pointer is moving, resizing or rotating right now, as boxes in page
+    /// coordinates (the gesture's live position, not the dropped one); `None` when there is no
+    /// such drag.
+    pub fn live_drag_boxes(&self) -> Option<Vec<DragBox>> {
+        let ids = match &self.tool.gesture {
+            crate::tools::Gesture::Move { moved: true, ids, duplicate, .. } => {
+                if *duplicate {
+                    self.selection()
+                } else {
+                    ids.clone()
+                }
+            }
+            crate::tools::Gesture::Resize { moved: true, .. } => self.selection(),
+            crate::tools::Gesture::Rotate { ids, .. } => ids.clone(),
+            _ => return None,
+        };
+        let doc = self.doc().ok()?;
+        let boxes: Vec<DragBox> = ids
+            .iter()
+            .filter_map(|id| {
+                let r = doc.world_bounds(*id)?;
+                Some(DragBox { id: *id, x: r.x0 as f32, y: r.y0 as f32, w: (r.x1 - r.x0) as f32, h: (r.y1 - r.y0) as f32 })
+            })
+            .take(Signal::MAX_DRAG_BOXES)
+            .collect();
+        (!boxes.is_empty()).then_some(boxes)
+    }
+
+    /// Tell the others about your drag, once per frame by the UI (`now`: its clock in seconds).
+    /// Sends the boxes when they changed (at most every [`DRAG_INTERVAL`] seconds) or every
+    /// [`DRAG_KEEPALIVE`] seconds while you hold still, and an empty drag when you let go. Only
+    /// editors send, and only to a host that passes signals on.
+    pub fn live_stream_drag(&mut self, now: f64) {
+        let boxes = self.live_drag_boxes();
+        let may = self.signal_blocker().is_none() && self.live().info.as_ref().is_some_and(|i| i.access == Access::Edit);
+        let Some(live) = self.live_mut() else { return };
+        let id = live.id;
+        let message = match (may.then_some(boxes).flatten(), live.drag_sent.take()) {
+            (Some(b), Some((last, at))) if b == last && now - at < DRAG_KEEPALIVE => {
+                live.drag_sent = Some((last, at));
+                return;
+            }
+            (Some(_), Some((last, at))) if now - at < DRAG_INTERVAL => {
+                live.drag_sent = Some((last, at));
+                return;
+            }
+            (Some(b), _) => {
+                live.drag_sent = Some((b.clone(), now));
+                Signal::drag(&b)
+            }
+            // Let go (or no longer able to send): tell them once.
+            (None, Some(_)) => Signal::drag(&[]),
+            (None, None) => return,
+        };
+        self.live.send(id, [ClientMsg::Signal(message)]);
     }
 
     /// Why cursor chat or a spotlight can't go out now, if it can't.

@@ -122,6 +122,9 @@ pub struct LiveUi {
     focus_report: bool,
     /// Others' chat messages as last seen, with when they changed (UI clock): they fade from then.
     chat_seen: BTreeMap<u32, (String, f64)>,
+    /// Others' drag previews: the engine's refresh count for each and when (UI clock) it last
+    /// changed. One not refreshed for [`DRAG_STALE`] seconds is hidden.
+    drag_seen: BTreeMap<u32, (u64, f64)>,
     /// Your cursor chat (open when `Some`).
     pub chat: Option<ChatBox>,
 }
@@ -203,6 +206,35 @@ fn chat_fade(ctx: &egui::Context, age: f64, reduce: bool) -> f32 {
     }
 }
 
+/// A drag preview not refreshed for this long (seconds, UI clock) is hidden: the sender went away
+/// without saying so.
+const DRAG_STALE: f64 = 3.0;
+
+/// The layers someone is dragging, as boxes at their live position (page coordinates) in their
+/// colour, with "name is moving" on the first. Only layers that exist on `page` of your copy.
+fn drag_ghosts(
+    app: &FigApp,
+    painter: &egui::Painter,
+    doc: &figcraft_doc::Document,
+    page: figcraft_doc::NodeId,
+    boxes: &[figcraft_engine::live::DragBox],
+    fill: Color32,
+    name: &str,
+) {
+    let mut label_at = None;
+    for b in boxes.iter().filter(|b| doc.page_of(b.id) == Some(page)) {
+        let a = app.to_screen(f64::from(b.x), f64::from(b.y));
+        let c = app.to_screen(f64::from(b.x + b.w), f64::from(b.y + b.h));
+        let r = Rect::from_two_pos(a, c);
+        painter.rect_filled(r, CornerRadius::same(2), fill.gamma_multiply(0.14));
+        painter.rect_stroke(r, CornerRadius::same(2), Stroke::new(1.5, fill), egui::StrokeKind::Middle);
+        label_at.get_or_insert(r.left_top());
+    }
+    if let Some(at) = label_at {
+        name_tag(painter, at + vec2(0.0, -4.0), Align2::LEFT_BOTTOM, &format!("{name} is moving"), fill);
+    }
+}
+
 /// A cursor chat bubble next to the pointer at `tip`: the person's name (when given) over their
 /// message, in their colour, `alpha` opaque.
 fn chat_bubble(painter: &egui::Painter, tip: Pos2, name: Option<&str>, text: &str, fill: Color32, alpha: f32) {
@@ -228,6 +260,7 @@ pub fn track_pointer(app: &mut FigApp, ctx: &egui::Context) {
     if std::mem::replace(&mut ui.session, id) != id {
         ui.shown.clear();
         ui.chat_seen.clear();
+        ui.drag_seen.clear();
         ui.seen = None;
         ui.chat = None;
         ui.report = None;
@@ -247,13 +280,20 @@ pub fn track_pointer(app: &mut FigApp, ctx: &egui::Context) {
 
 /// Others' selections and cursors on the canvas, and the frame around it while following.
 pub fn draw(app: &mut FigApp, painter: &egui::Painter, ctx: &egui::Context) {
+    let now = ctx.input(|i| i.time);
+    // Your own drag tells the others as it moves (and when you let go); a held drag repeats, which
+    // needs a frame now and then.
+    app.session.live_stream_drag(now);
+    if app.session.live_drag_boxes().is_some() {
+        ctx.request_repaint_after(std::time::Duration::from_millis(500));
+    }
     let live = app.session.live();
     if live.peers.is_empty() {
         app.ui.live.shown.clear();
         app.ui.live.chat_seen.clear();
+        app.ui.live.drag_seen.clear();
         return;
     }
-    let now = ctx.input(|i| i.time);
     // A chat message fades from its last change.
     let seen = &mut app.ui.live.chat_seen;
     seen.retain(|id, _| live.chats.contains_key(id));
@@ -262,8 +302,26 @@ pub fn draw(app: &mut FigApp, painter: &egui::Painter, ctx: &egui::Context) {
             seen.insert(*id, (text.clone(), now));
         }
     }
+    // Drag previews: remember when each last changed, to hide the ones that stopped refreshing.
+    let drag_seen = &mut app.ui.live.drag_seen;
+    drag_seen.retain(|id, _| live.drags.contains_key(id));
+    for id in live.drags.keys() {
+        let updates = live.drag_updates.get(id).copied().unwrap_or(0);
+        if drag_seen.get(id).is_none_or(|(n, _)| *n != updates) {
+            drag_seen.insert(*id, (updates, now));
+        }
+    }
     let Ok(ds) = app.session.ds() else { return };
     let (doc, page, shared) = (ds.doc.clone(), ds.page, app.session.live_shared());
+    // Someone dragging shows as their layers' boxes where they are being moved to, in their colour
+    // and name, until they drop (the layers move for everyone then) or the preview goes stale.
+    if ds.view.multiplayer_cursors {
+        for (id, boxes) in &live.drags {
+            let fresh = app.ui.live.drag_seen.get(id).is_some_and(|(_, at)| now - at < DRAG_STALE);
+            let Some(peer) = live.peers.get(id).filter(|_| fresh) else { continue };
+            drag_ghosts(app, painter, &doc, page, boxes, color(&peer.color), &peer.name);
+        }
+    }
     let mut cursors = Vec::new();
     for (id, p) in &live.presence {
         let Some(peer) = live.peers.get(id) else { continue };
