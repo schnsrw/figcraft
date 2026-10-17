@@ -1097,11 +1097,17 @@ struct Room {
     guests: u32,
     /// The person hosting (app sessions): their client id and inbox.
     local: Option<(u32, Inbox)>,
+    /// Client id → the link and access it was given with: only the same credential may resume
+    /// it (at most [`MAX_OWNERS`]).
+    owners: BTreeMap<u32, (Option<String>, Access)>,
 }
+
+/// Most client ids a room remembers the credential of (beyond it, only connected ones).
+const MAX_OWNERS: usize = 4096;
 
 impl Room {
     fn new(server: Server) -> Self {
-        Self { server, ids: BTreeMap::new(), throttles: BTreeMap::new(), latest: BTreeMap::new(), guests: 0, local: None }
+        Self { server, ids: BTreeMap::new(), throttles: BTreeMap::new(), latest: BTreeMap::new(), guests: 0, local: None, owners: BTreeMap::new() }
     }
 
     /// Nobody is in it.
@@ -1371,6 +1377,16 @@ impl<B: Backend> Hub<B> {
         }
         let info = if hosting { self.backend.hosting(&file) } else { None };
         let Some(room) = self.rooms.get_mut(&file) else { return };
+        // Resuming takes over a client id (closing its connection): only with the credential it
+        // was given with, and never the hosting person's. Anyone else joins as someone new.
+        let claim = (admission.link.clone(), admission.access);
+        if let Some(r) = hello.resume
+            && (room.owners.get(&r.client_id).is_some_and(|owner| *owner != claim)
+                || room.local.as_ref().is_some_and(|(local, _)| *local == r.client_id))
+        {
+            log::info!("event=resume_refused file={file} client={}", r.client_id);
+            hello.resume = None;
+        }
         // Colours: the first one nobody has.
         let taken: Vec<&str> = room.server.peers().map(|p| p.color.as_str()).collect();
         let color = PEOPLE.iter().find(|c| !taken.contains(c)).copied().unwrap_or(PEOPLE[taken.len() % PEOPLE.len()]);
@@ -1387,6 +1403,11 @@ impl<B: Backend> Hub<B> {
                 // A guest back after a drop keeps its id: its old connection, if the hub hasn't
                 // noticed it's gone yet, is closed without the guest leaving.
                 let old = room.ids.insert(id, conn).filter(|old| *old != conn);
+                if room.owners.len() >= MAX_OWNERS {
+                    let ids = &room.ids;
+                    room.owners.retain(|id, _| ids.contains_key(id));
+                }
+                room.owners.insert(id, claim);
                 self.backend.changed(&file, &mut room.server);
                 // The newcomer learns how it is shown, then where everyone is.
                 let mut more = outs;
