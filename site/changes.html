@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>What We Built</title>
+  <meta name="description" content="What FigCraft Cloud has delivered, milestone by milestone: cloud foundation, PostgreSQL events with commit-before-broadcast and fencing, object storage and migration, browser co-editing, and identity, tenancy and authorization.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/png" href="img/figcraft-64.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- HEADER -->
+<main id="main">
+  <section class="page-hero">
+    <div class="wrap load-in">
+      <p class="eyebrow"><span class="tag">Shipped</span> Every item has evidence in the repository</p>
+      <h1>From a desktop editor to a design cloud.</h1>
+      <p class="lede">Here is what each finished milestone delivered. Only tasks the <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/tracker.md">tracker</a> marks complete are listed, and each chapter links to the design document behind it.</p>
+      <div class="actions" style="margin-top:28px">
+        <a class="btn btn-primary" href="index.html#self-host">Self-host in minutes
+          <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+        <a class="btn btn-ghost" href="roadmap.html">Live progress
+          <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" style="padding-top:24px">
+    <div class="wrap story">
+
+      <article class="chapter" aria-labelledby="s1-h">
+        <div class="chapter-side"><div><p class="chapter-id">S1</p><span class="pill is-done">complete</span><p>Gate: one image starts in every role and the Compose stack comes up healthy.</p></div></div>
+        <div class="reveal">
+          <h2 id="s1-h">Cloud foundation</h2>
+          <p class="lede">One binary, one image and one Compose stack that refuses unsafe configuration.</p>
+          <ul class="deliv">
+            <li>One <code>figcraft-cloud</code> binary with <code>all</code>, <code>api</code>, <code>relay</code> and <code>worker</code> roles</li>
+            <li>Strict configuration that rejects unknown keys, reads mounted secret files and redacts them</li>
+            <li>Production mode refuses insecure development defaults</li>
+            <li>Liveness, readiness and startup endpoints, request IDs and structured logs</li>
+            <li>A multi-stage, non-root, read-only-root container image</li>
+            <li>Compose stack: gateway, web, cloud, PostgreSQL, Redis and SeaweedFS, with health checks and named volumes</li>
+            <li>A React and TypeScript account shell with a versioned bridge to the Rust/WASM editor</li>
+            <li>Cloud, image-build, browser lint, test, advisory and licence checks in CI</li>
+          </ul>
+          <ul class="doclinks">
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/deployment-operations.md">deployment-operations.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/dependency-images.md">dependency-images.md</a></li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="chapter" aria-labelledby="s2-h">
+        <div class="chapter-side"><div><p class="chapter-id">S2</p><span class="pill is-done">complete</span><p>Gate: create, edit, restart and restore a document from PostgreSQL.</p></div></div>
+        <div class="reveal">
+          <h2 id="s2-h">PostgreSQL events, commit before broadcast</h2>
+          <p class="lede">Every accepted edit becomes a checksummed, gap-free event in PostgreSQL before anyone hears about it.</p>
+          <ul class="deliv">
+            <li>SQLx migrations behind an explicit command and an advisory lock; readiness checks the schema version</li>
+            <li>Separate least-privilege database roles for migrations and runtime</li>
+            <li>A tenant-scoped transaction helper that sets context for row-level security</li>
+            <li>Repositories for tenants, workspaces, projects, documents, external mappings, idempotency keys and an append-only audit log</li>
+            <li>Events stored in the existing collaboration wire form with a domain-separated SHA-256 checksum</li>
+            <li>Atomic, gap-free sequence numbers and a monotonic per-document fencing token</li>
+            <li>Bounded, checksum-verified replay; relay batches committed before they are confirmed or broadcast</li>
+            <li>Race tests on real PostgreSQL and failure injection for killed connections, lock waits and lost acknowledgements</li>
+          </ul>
+          <figure class="panel reveal" style="margin:8px 0 22px">
+            <div class="scroll-x">
+              <svg class="ill fence" viewBox="0 0 900 330" role="img" aria-labelledby="fence-t fence-d">
+                <title id="fence-t">Fencing tokens stop a stale relay</title>
+                <desc id="fence-d">Relay A lost its lease and still holds token 7. Its append reaches PostgreSQL, where the document's current token is 8, and is refused. Relay B holds token 8; its append is accepted and a new event row is committed.</desc>
+                <path class="wire" d="M250 85 C420 85 450 165 610 165"/>
+                <path class="wire" d="M250 245 C420 245 450 165 610 165"/>
+                <rect class="node" x="30" y="45" width="220" height="80" rx="14"/>
+                <text class="t" x="50" y="77">Relay A</text><text class="t-s" x="50" y="98">lease lost, token 7</text>
+                <rect class="node" x="30" y="205" width="220" height="80" rx="14" stroke="var(--accent)" stroke-width="1.6"/>
+                <text class="t" x="50" y="237">Relay B</text><text class="t-s" x="50" y="258">current owner, token 8</text>
+                <rect class="node" x="610" y="70" width="260" height="190" rx="16"/>
+                <text class="t" x="632" y="102">PostgreSQL</text>
+                <text class="t-m" x="632" y="124">document fence = 8</text>
+                <rect class="node-2" x="632" y="142" width="216" height="14" rx="4"/>
+                <rect class="node-2" x="632" y="164" width="216" height="14" rx="4"/>
+                <rect class="node-2" x="632" y="186" width="216" height="14" rx="4"/>
+                <rect class="grow acc" x="632" y="208" width="216" height="14" rx="4"/>
+                <text class="t-m" x="632" y="246">append: lock row, check token</text>
+                <g class="pkt-a"><rect x="240" y="72" width="104" height="26" rx="13" fill="var(--ink-3)"/><text x="292" y="89" text-anchor="middle" font-size="11" font-weight="650" fill="var(--bg)">append, 7</text></g>
+                <g class="pkt-b"><rect x="240" y="232" width="104" height="26" rx="13" class="acc"/><text x="292" y="249" text-anchor="middle" font-size="11" font-weight="650" fill="#03140d">append, 8</text></g>
+                <g class="refused"><rect x="440" y="24" width="150" height="28" rx="14" class="danger"/><text x="515" y="43" text-anchor="middle" font-size="12" font-weight="650" fill="#fff">refused: stale fence</text></g>
+                <g class="accepted"><rect x="440" y="278" width="150" height="28" rx="14" class="acc"/><text x="515" y="297" text-anchor="middle" font-size="12" font-weight="650" fill="#03140d">committed</text></g>
+              </svg>
+            </div>
+            <p class="panel-caption">A relay that lost its lease can still try to write. The append checks its token under the document's row lock, so the write is refused and no edit is ever confirmed by a stale owner.</p>
+          </figure>
+          <ul class="doclinks">
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/architecture.md">architecture.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/postgres-client-decision.md">postgres-client-decision.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/filesystem-migration-report.md">filesystem-migration-report.md</a></li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="chapter" aria-labelledby="s3-h">
+        <div class="chapter-side"><div><p class="chapter-id">S3</p><span class="pill is-done">complete</span><p>Gate: no local persistent container directory, verified objects, repeatable migration.</p></div></div>
+        <div class="reveal">
+          <h2 id="s3-h">Object storage, snapshots and migration</h2>
+          <p class="lede">Binary data lives in any S3-compatible store as immutable, verified objects, and existing servers can move in.</p>
+          <ul class="deliv">
+            <li>An S3-compatible client (<code>rusty-s3</code> over <code>reqwest</code> and Rustls) with a signed readiness check</li>
+            <li>Content-addressed objects with SHA-256 read-back verification</li>
+            <li>Upload reservations with size, type and expiry; validated promotion; short-lived presigned downloads</li>
+            <li>Reference accounting and retention holds</li>
+            <li>Document snapshots with snapshot-first room recovery, plus assets, team libraries, plugins, exports and thumbnails</li>
+            <li>Media, archive and expanded-size validation budgets</li>
+            <li>Idempotent bucket, versioning and lifecycle setup; garbage collection with dry run; reconciliation reports</li>
+            <li>A resumable importer from <code>figcraft-server</code> with verification before cutover, and a backup and restore test</li>
+          </ul>
+          <ul class="doclinks">
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/object-store-client-decision.md">object-store-client-decision.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/filesystem-migration-report.md">filesystem-migration-report.md</a></li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="chapter" aria-labelledby="cs-h">
+        <div class="chapter-side"><div><p class="chapter-id">Core</p><span class="pill is-done">complete</span><p>Gate: two browsers co-edit through the gateway and survive a cloud restart.</p></div></div>
+        <div class="reveal">
+          <h2 id="cs-h">Browser co-editing on the cloud stack</h2>
+          <p class="lede">Pulled forward so the product works end to end before the full hardening milestones.</p>
+          <ul class="deliv">
+            <li>Document share links stored as hashed secrets with role, expiry and revocation</li>
+            <li>The cloud relay serves FigCraft's collaboration protocol with commit-before-broadcast and snapshot-first recovery</li>
+            <li>The browser editor is served at <code>/edit/</code> and joins a document straight from a link</li>
+            <li>Two browsers co-edited one cloud document through the gateway, with real-time cursors, confirmed by the product owner</li>
+            <li>Product name, colours, logo, favicon and links set from Docker environment variables, with no rebuild</li>
+          </ul>
+          <figure class="evidence" style="margin-bottom:22px">
+            <img src="img/shot-7-collab.png" width="1440" height="900" loading="lazy" alt="A live FigCraft session: three collaborators' avatars, a spotlight banner with a Follow button, a named cursor on a trail card and a teammate's comment on the Start hike button.">
+            <figcaption>Live sessions: presence, spotlight and comments, on the cloud relay.</figcaption>
+          </figure>
+          <p class="note"><strong>Known gap:</strong> a drag reaches other people when it is dropped, not while it moves, because the protocol syncs committed batches. Streaming in-progress transforms is a follow-up.</p>
+          <ul class="doclinks" style="margin-top:18px">
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/core-slice.md">core-slice.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/branding-and-configuration.md">branding-and-configuration.md</a></li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="chapter" aria-labelledby="s4-h">
+        <div class="chapter-side"><div><p class="chapter-id">S4</p><span class="pill is-done">complete</span><p>Gate: single and multi-tenant modes on one schema; role, cross-tenant and revocation suites pass.</p></div></div>
+        <div class="reveal">
+          <h2 id="s4-h">Identity, tenancy and authorization</h2>
+          <p class="lede">Accounts, teams and roles, isolated per tenant down to the database row, with access that ends the moment it is revoked.</p>
+          <div class="stats">
+            <div class="stat"><b>1,152+</b><span>route and caller cells in the permission matrix</span></div>
+            <div class="stat"><b>115</b><span>figcraft-cloud tests</span></div>
+            <div class="stat"><b>170</b><span>cloud-storage unit tests</span></div>
+            <div class="stat"><b>57</b><span>PostgreSQL and S3 integration suites</span></div>
+          </div>
+          <div class="split even" style="align-items:center">
+            <ul class="deliv" style="grid-template-columns:1fr">
+              <li>OIDC discovery, key rotation and authorization code with PKCE; back-channel logout</li>
+              <li>SAML through an OIDC broker, validated end to end against Keycloak</li>
+              <li>Secure browser sessions, a bootstrap administrator and scoped, rotatable service accounts</li>
+              <li>Tenants with suspension and plans; memberships, teams, invitations and inherited grants</li>
+              <li>Deny-by-default effective roles and explicit sensitive permissions</li>
+              <li>Row-level security on every tenant table and the tenant in every object, cache, lease and job key</li>
+              <li>Revocation that closes sessions and live relay connections; audited support access</li>
+              <li>Tenant, team, workspace, project, document and member APIs with signed cursors</li>
+            </ul>
+            <figure class="panel" style="margin:0">
+              <svg class="ill tenancy" viewBox="0 0 540 450" role="img" aria-labelledby="ten-t ten-d">
+                <title id="ten-t">Tenant isolation</title>
+                <desc id="ten-d">Three tenants are stacked as separate layers over one shared schema. Row-level security keeps each tenant's rows visible only to that tenant.</desc>
+                <polygon points="260,300 470,370 260,440 50,370" fill="none" stroke="var(--diagram-stroke)" stroke-width="1.5" stroke-dasharray="6 6"/>
+                <text class="t-s" x="260" y="374" text-anchor="middle">one schema, RLS on every tenant table</text>
+                <g class="layer layer-3">
+                  <polygon points="260,210 450,275 260,340 70,275" fill="var(--diagram-node)" stroke="var(--diagram-stroke)" stroke-width="1.4"/>
+                  <polygon points="200,262 240,276 200,290 160,276" class="soft"/><polygon points="260,250 300,264 260,278 220,264" class="soft"/>
+                  <text class="t" x="462" y="280">Tenant C</text>
+                </g>
+                <g class="layer layer-2">
+                  <polygon points="260,130 450,195 260,260 70,195" fill="var(--diagram-node)" stroke="var(--diagram-stroke)" stroke-width="1.4"/>
+                  <polygon points="200,182 240,196 200,210 160,196" class="soft"/><polygon points="290,190 330,204 290,218 250,204" class="soft"/>
+                  <text class="t" x="462" y="200">Tenant B</text>
+                </g>
+                <g class="layer">
+                  <polygon points="260,50 450,115 260,180 70,115" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.6"/>
+                  <polygon points="210,100 250,114 210,128 170,114" class="acc" opacity=".8"/><polygon points="280,108 320,122 280,136 240,122" class="acc" opacity=".5"/>
+                  <text class="t" x="462" y="120">Tenant A</text>
+                </g>
+                <g transform="translate(36 22)">
+                  <rect x="0" y="10" width="26" height="20" rx="4" class="acc"/>
+                  <path d="M5 10V6a8 8 0 0 1 16 0v4" fill="none" stroke="var(--accent-ink)" stroke-width="2.4"/>
+                </g>
+                <text class="t-s" x="72" y="46">isolated by tenant id</text>
+              </svg>
+            </figure>
+          </div>
+          <ul class="doclinks" style="margin-top:22px">
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/security.md">security.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/identity-mapping-policy.md">identity-mapping-policy.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/saml-federation.md">saml-federation.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/tenant-key-audit.md">tenant-key-audit.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/data-tenancy-integration.md">data-tenancy-integration.md</a></li>
+          </ul>
+        </div>
+      </article>
+
+      <article class="chapter" aria-labelledby="s5-h">
+        <div class="chapter-side"><div><p class="chapter-id">S5</p><span class="pill is-active">in progress</span><p>Gate: a fenced multi-replica relay passes crash, revocation, compatibility and load tests.</p></div></div>
+        <div class="reveal">
+          <h2 id="s5-h">Distributed relay: the orchestration decision</h2>
+          <p class="lede">We will run room ownership ourselves, with leases in PostgreSQL next to the fencing tokens, rather than adopt Plane or Rivet.</p>
+          <div class="cards">
+            <article class="card"><h3>What it means</h3><p>Any relay accepts a connection and redirects the client to the room's current owner. Draining snapshots rooms and releases their leases. No Redis dependency for ownership.</p></article>
+            <article class="card"><h3>Why</h3><p>Lowest effort and no new dependency to maintain. Fencing tokens already guarantee a single writer even during a partition, and commit-before-broadcast, snapshot recovery and quarantine already exist.</p></article>
+            <article class="card"><h3>Alternatives considered</h3><p>Rivet's scalable self-hosted storage needs FoundationDB under an enterprise licence. Plane (MIT) fits the model, but its long-term maintenance is uncertain.</p></article>
+            <article class="card"><h3>Already in place</h3><p>Fencing tokens, snapshot-plus-replay restore, commit-before-broadcast, quarantine of unrecoverable rooms, compatibility with existing servers and desktop sessions, and per-client admission.</p></article>
+          </div>
+          <ul class="doclinks" style="margin-top:22px">
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/relay-orchestration-decision.md">relay-orchestration-decision.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/relay-performance.md">relay-performance.md</a></li>
+            <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/session-compatibility.md">session-compatibility.md</a></li>
+          </ul>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <section aria-labelledby="close-h">
+    <div class="wrap">
+      <div class="closing reveal">
+        <h2 id="close-h">Try what's built today.</h2>
+        <p>The quick start brings up the whole stack and prints a link you can open in two tabs.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="index.html#self-host">Self-host in minutes
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+          <a class="btn btn-ghost" href="https://github.com/schnsrw/figcraft">Star on GitHub
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.8 9.8 5.5l4 .6-2.9 2.8.7 4L8 11l-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<!-- FOOTER -->
+</body>
+</html>

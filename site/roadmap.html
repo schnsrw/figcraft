@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Roadmap and Progress</title>
+  <meta name="description" content="FigCraft Cloud's roadmap, milestones S0 to S9 and the core slice, with live progress generated from the project tracker.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/png" href="img/figcraft-64.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- HEADER -->
+<main id="main">
+  <section class="page-hero">
+    <div class="wrap load-in">
+      <p class="eyebrow"><span class="tag">Live</span> Updated <!-- UPDATED --></p>
+      <h1>The road to production, in public.</h1>
+      <p class="lede">Ten milestones from documentation to general availability, plus a core slice we pulled forward so co-editing works today. Every number on this page is read from the project tracker when the site is built.</p>
+    </div>
+  </section>
+
+  <section class="section" style="padding-top:0" aria-labelledby="stages-h">
+    <div class="wrap">
+      <h2 id="stages-h" class="visually-hidden">Release stages</h2>
+      <ol class="stages reveal">
+        <li data-ms="S1 S2 S3"><b>Private preview</b><span>One tenant on Docker with PostgreSQL and S3 (S1 to S3)</span></li>
+        <li data-ms="S4"><b>Multi-tenant alpha</b><span>Accounts, workspaces, roles and isolated storage (S4)</span></li>
+        <li data-ms="S5"><b>Collaborative beta</b><span>Horizontally scalable, fenced realtime rooms (S5)</span></li>
+        <li data-ms="S6"><b>Integration beta</b><span>Browser, desktop and embedded hosts on cloud files (S6)</span></li>
+        <li data-ms="S7"><b>AI automation beta</b><span>Governed AI and server-side WASM jobs (S7)</span></li>
+        <li data-ms="S8 S9"><b>Production</b><span>Quotas, billing, operations, security and rollout (S8, S9)</span></li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="section section-tint" aria-labelledby="progress-h">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 id="progress-h">Milestones</h2>
+        <p>Each bar is completed tasks out of planned tasks. A task is ticked only when its acceptance evidence is in the repository.</p>
+      </div>
+<!-- PROGRESS -->
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="next-h">
+    <div class="wrap split">
+      <div class="reveal">
+        <h2 id="next-h">What's next.</h2>
+        <p class="lede">The current focus is the distributed relay, so more than one relay can serve rooms safely.</p>
+        <p>Storage work comes first: the relay load test found that commits and cold restores ran one at a time on the relay's hub thread, so a large restore could stall other rooms for seconds. That work moves off the hub thread before multi-replica work begins.</p>
+      </div>
+      <ul class="checks reveal" style="margin-top:0">
+        <li><span><strong>Room leases in PostgreSQL</strong> beside the existing fencing tokens.</span></li>
+        <li><span><strong>Routing to the room owner</strong>: any relay redirects a client to the current owner.</span></li>
+        <li><span><strong>Graceful drain</strong> that snapshots rooms and signals clients to reconnect during rolling releases.</span></li>
+        <li><span><strong>Viewer and commenter enforcement</strong> at relay message level, plus room, connection and rate quotas.</span></li>
+        <li><span><strong>Two-replica and kill tests</strong>: stale owners fenced, no confirmed edit lost before or after a crash.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section aria-labelledby="close-h">
+    <div class="wrap">
+      <div class="closing reveal">
+        <h2 id="close-h">Follow along, or help build it.</h2>
+        <p>Work is planned task by task in the <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/tracker.md">tracker</a>, with estimates and exit gates in the <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/roadmap.md">roadmap</a>.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="index.html#self-host">Self-host in minutes
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+          <a class="btn btn-ghost" href="https://github.com/schnsrw/figcraft">Star on GitHub
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.8 9.8 5.5l4 .6-2.9 2.8.7 4L8 11l-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<!-- FOOTER -->
+</body>
+</html>

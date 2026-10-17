@@ -1,0 +1,589 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FigCraft Cloud</title>
+  <meta name="description" content="Open-source, self-hostable collaborative interface design. The FigCraft editor in the browser, live co-editing, and every confirmed edit stored in your own PostgreSQL and S3-compatible storage.">
+  <meta name="color-scheme" content="light dark">
+  <meta property="og:title" content="FigCraft Cloud">
+  <meta property="og:description" content="Design together in the browser, on servers you own. Open source, written in Rust.">
+  <link rel="icon" type="image/png" href="img/figcraft-64.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- HEADER -->
+<main id="main">
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-bg" aria-hidden="true"><span class="orb orb-1"></span><span class="orb orb-2"></span><span class="orb orb-3"></span><span class="grid-lines"></span></div>
+    <div class="wrap hero-copy load-in">
+      <a class="announce" href="changes.html"><span class="tag">New</span> Two browsers, one cloud document, every edit durable <span aria-hidden="true">&rarr;</span></a>
+      <h1>The design cloud you <span class="grad">actually own</span>.</h1>
+      <p class="lede">Real-time collaborative interface design in the browser, running on your servers, with every confirmed edit stored in your own database.</p>
+      <div class="actions">
+        <a class="btn btn-primary" href="#self-host">Self-host in minutes
+          <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+        <a class="btn btn-ghost" href="https://github.com/schnsrw/figcraft">Star on GitHub
+          <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.8 9.8 5.5l4 .6-2.9 2.8.7 4L8 11l-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span></a>
+      </div>
+    </div>
+
+    <div class="wrap stage">
+      <div class="browser">
+        <div class="chip chip-presence" aria-hidden="true">
+          <span class="avatars"><i style="--c:#00805a">IN</i><i style="--c:#b4460f">TK</i><i style="--c:#5b4bd6">AL</i></span>
+          <span><strong>3 editing</strong> Ridgeline app</span>
+        </div>
+        <div class="chip chip-commit" aria-hidden="true">
+          <span class="chip-ico"><svg viewBox="0 0 20 20"><ellipse cx="10" cy="5" rx="6" ry="2.3" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M4 5v10c0 1.3 2.7 2.3 6 2.3s6-1 6-2.3V5M4 10c0 1.3 2.7 2.3 6 2.3s6-1 6-2.3" fill="none" stroke="currentColor" stroke-width="1.5"/></svg></span>
+          <span><strong>Committed</strong> before broadcast</span>
+        </div>
+        <div class="chip chip-sso" aria-hidden="true">
+          <span class="chip-ico"><svg viewBox="0 0 20 20"><path d="M10 2.5 16 5v4.6c0 3.5-2.5 6.2-6 7.6-3.5-1.4-6-4.1-6-7.6V5z M7.4 10l1.8 1.8L12.8 8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+          <span><strong>SSO</strong> OIDC and SAML</span>
+        </div>
+        <div class="bezel">
+          <div class="bezel-core">
+            <div class="browser-bar">
+              <span class="browser-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span class="browser-url">design.example.com/edit/#join=…</span>
+              <span class="browser-live">Live</span>
+            </div>
+            <div class="browser-screen">
+              <img src="img/shot-7-collab.png" width="1440" height="900" fetchpriority="high"
+                alt="FigCraft in a live session on the Ridgeline app file: three collaborators' avatars in the top bar, a 'Priya Nair is spotlighting' banner with a Follow button, Priya's named cursor on the featured trail card, and a purple comment from Jonas Ortiz asking whether the Start hike button should stay pinned while scrolling.">
+              <div class="cursor cursor-a" aria-hidden="true">
+                <svg viewBox="0 0 18 18"><path d="M2 1.5 15.5 8 9 9.6 6.4 16z" fill="currentColor" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/></svg>
+                <span>Ines</span>
+              </div>
+              <div class="cursor cursor-b" aria-hidden="true">
+                <svg viewBox="0 0 18 18"><path d="M2 1.5 15.5 8 9 9.6 6.4 16z" fill="currentColor" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/></svg>
+                <span>Tomasz</span>
+              </div>
+              <span class="toast" aria-hidden="true">Edit saved, seq 1,284</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Trust facts -->
+  <section class="trust" aria-label="Project facts">
+    <div class="wrap">
+      <ul>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8.5 7 3.5 12l5 5M15.5 7l5 5-5 5" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>Rust from editor to storage</li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 3.5h7l4 4V20.5H7z M14 3.5v4h4 M10 12h5M10 15.5h5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>MIT OR Apache-2.0</li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4.5" width="16" height="6" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="13.5" width="16" height="6" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M7.5 7.5h.01M7.5 16.5h.01" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/></svg>Self-hosted with Docker</li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7" ry="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 6v12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6M5 12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>PostgreSQL + S3</li>
+        <li><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8.5" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12.5 12h8M17.5 12v3M20.5 12v2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>OIDC + SAML sign-in</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- The problem -->
+  <section class="section">
+    <div class="wrap">
+      <div class="problem">
+      <h2 class="manifesto reveal">Your designs are company assets. <span class="dim">Most design tools keep them in someone else's cloud.</span></h2>
+      <p class="lede reveal">FigCraft Cloud is for product and design teams that want real-time collaboration they can run and own, for companies that need single sign-on, tenancy and control over where data lives, and for platforms that want a design editor inside their own product.</p>
+      </div>
+      <div class="pains">
+        <article class="pain reveal">
+          <span class="pain-num">The lock-in</span>
+          <h3>Files live on the vendor's servers</h3>
+          <p>Your source of truth sits in a format and a cloud you do not control, on terms that can change.</p>
+        </article>
+        <article class="pain reveal">
+          <span class="pain-num">The bill</span>
+          <h3>Pricing grows with every seat</h3>
+          <p>Reviewers, engineers and stakeholders all need access, and each one costs more.</p>
+        </article>
+        <article class="pain reveal">
+          <span class="pain-num">The region</span>
+          <h3>No say over where data lives</h3>
+          <p>Self-hosting is rarely an option, so residency and retention are someone else's decision.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Benefit 1: co-editing -->
+  <section class="section section-tint" id="features">
+    <div class="wrap benefit">
+      <div class="benefit-copy reveal">
+        <h2>Design together, live.</h2>
+        <p>Share a link or sign in, and everyone in the document sees each other's cursors and edits as they happen. It runs FigCraft's own collaboration protocol: one server order, per-property last-writer-wins and undo that only takes back your own changes.</p>
+        <ul class="checks">
+          <li><span><strong>Real-time presence.</strong> Cursors, selections and avatars move live.</span></li>
+          <li><span><strong>Per-person undo.</strong> Your undo never removes a teammate's work.</span></li>
+          <li><span><strong>Viewer and editor links.</strong> Expiring, revocable, stored only as hashes.</span></li>
+        </ul>
+        <figure class="evidence">
+          <img src="img/shot-2-components.png" width="1440" height="900" loading="lazy"
+            alt="The FigCraft Assets panel and a Buttons component set: Start hike buttons in Primary, Tonal and Outline styles across Default, Hover and Disabled states, with the component's variant properties in the right panel.">
+          <figcaption>The full editor runs in the browser: components, variants, auto layout and more.</figcaption>
+        </figure>
+      </div>
+      <figure class="panel reveal" style="margin:0">
+        <svg class="ill coedit" viewBox="0 0 960 560" role="img" aria-labelledby="coedit-t coedit-d">
+          <title id="coedit-t">Two people co-editing one document</title>
+          <desc id="coedit-d">Ines drags a card in her browser. The edit travels to the relay, is committed, and the card moves in Tomasz's browser. Both see each other's named cursors throughout.</desc>
+          <defs>
+            <pattern id="dotgrid" width="16" height="16" patternUnits="userSpaceOnUse"><circle cx="2" cy="2" r="1" fill="var(--diagram-stroke)"/></pattern>
+            <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#7b6cf0"/><stop offset="1" stop-color="#f08a6c"/></linearGradient>
+          </defs>
+          <!-- left window -->
+          <g transform="translate(20 24)">
+            <rect class="node" x="0" y="0" width="440" height="400" rx="16"/>
+            <path class="soft" d="M16 0h408a16 16 0 0 1 16 16v16H0V16A16 16 0 0 1 16 0z"/>
+            <circle class="node-2" cx="20" cy="16" r="4.5"/><circle class="node-2" cx="36" cy="16" r="4.5"/><circle class="node-2" cx="52" cy="16" r="4.5"/>
+            <text class="t-s" x="220" y="20" text-anchor="middle">Ines's browser</text>
+            <rect x="1" y="32" width="438" height="367" fill="url(#dotgrid)"/>
+            <rect class="node-2" x="40" y="70" width="150" height="290" rx="14"/>
+            <rect class="soft" x="56" y="92" width="80" height="10" rx="5"/>
+            <rect class="soft" x="56" y="110" width="118" height="8" rx="4"/>
+            <rect class="soft" x="56" y="250" width="118" height="40" rx="8"/>
+            <rect class="soft" x="56" y="300" width="118" height="40" rx="8"/>
+            <rect class="node-2" x="240" y="70" width="160" height="120" rx="12"/>
+            <rect class="soft" x="256" y="90" width="90" height="10" rx="5"/>
+            <rect x="256" y="110" width="128" height="62" rx="8" fill="url(#sky)"/>
+            <polygon points="256,164 286,136 308,152 330,140 384,166 384,164 384,172 256,172" fill="#2c3f5c" opacity=".55"/><circle cx="352" cy="128" r="9" fill="#ffd3a8"/>
+            <rect class="dropzone" x="240" y="210" width="160" height="110" rx="12" fill="none" stroke="var(--accent)" stroke-width="1.6" stroke-dasharray="6 6"/>
+            <g class="card-local">
+              <rect class="acc" x="56" y="150" width="118" height="80" rx="10"/>
+              <rect x="68" y="164" width="60" height="8" rx="4" fill="#03140d" opacity=".55"/>
+              <rect x="68" y="180" width="90" height="6" rx="3" fill="#03140d" opacity=".3"/>
+            </g>
+            <!-- Tomasz, seen remotely by Ines -->
+            <g class="cur-tomasz" transform="translate(286 118)">
+              <path d="M0 0 13 6.5 6.8 8 4.4 14.4z" class="p2" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>
+              <rect x="12" y="12" width="58" height="20" rx="10" fill="#b4460f"/><text x="41" y="26" text-anchor="middle" fill="#fff" font-size="11" font-weight="650">Tomasz</text>
+            </g>
+            <!-- Ines, local -->
+            <g class="cur-ines" transform="translate(300 320)">
+              <path d="M0 0 13 6.5 6.8 8 4.4 14.4z" class="acc" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>
+              <rect x="12" y="12" width="44" height="20" rx="10" fill="#00805a"/><text x="34" y="26" text-anchor="middle" fill="#fff" font-size="11" font-weight="650">Ines</text>
+            </g>
+          </g>
+          <!-- right window -->
+          <g transform="translate(500 24)">
+            <rect class="node" x="0" y="0" width="440" height="400" rx="16"/>
+            <path class="soft" d="M16 0h408a16 16 0 0 1 16 16v16H0V16A16 16 0 0 1 16 0z"/>
+            <circle class="node-2" cx="20" cy="16" r="4.5"/><circle class="node-2" cx="36" cy="16" r="4.5"/><circle class="node-2" cx="52" cy="16" r="4.5"/>
+            <text class="t-s" x="220" y="20" text-anchor="middle">Tomasz's browser</text>
+            <rect x="1" y="32" width="438" height="367" fill="url(#dotgrid)"/>
+            <rect class="node-2" x="40" y="70" width="150" height="290" rx="14"/>
+            <rect class="soft" x="56" y="92" width="80" height="10" rx="5"/>
+            <rect class="soft" x="56" y="110" width="118" height="8" rx="4"/>
+            <rect class="soft" x="56" y="250" width="118" height="40" rx="8"/>
+            <rect class="soft" x="56" y="300" width="118" height="40" rx="8"/>
+            <rect class="node-2" x="240" y="70" width="160" height="120" rx="12"/>
+            <rect class="soft" x="256" y="90" width="90" height="10" rx="5"/>
+            <rect x="256" y="110" width="128" height="62" rx="8" fill="url(#sky)"/>
+            <polygon points="256,164 286,136 308,152 330,140 384,166 384,164 384,172 256,172" fill="#2c3f5c" opacity=".55"/><circle cx="352" cy="128" r="9" fill="#ffd3a8"/>
+            <rect x="240" y="210" width="160" height="110" rx="12" fill="none" stroke="var(--diagram-stroke)" stroke-width="1.2" stroke-dasharray="6 6"/>
+            <g class="card-remote">
+              <rect class="acc" x="56" y="150" width="118" height="80" rx="10"/>
+              <rect x="68" y="164" width="60" height="8" rx="4" fill="#03140d" opacity=".55"/>
+              <rect x="68" y="180" width="90" height="6" rx="3" fill="#03140d" opacity=".3"/>
+            </g>
+            <g class="cur-ines-remote" transform="translate(300 320)">
+              <path d="M0 0 13 6.5 6.8 8 4.4 14.4z" class="acc" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>
+              <rect x="12" y="12" width="44" height="20" rx="10" fill="#00805a"/><text x="34" y="26" text-anchor="middle" fill="#fff" font-size="11" font-weight="650">Ines</text>
+            </g>
+            <g class="cur-tomasz" transform="translate(286 118)">
+              <path d="M0 0 13 6.5 6.8 8 4.4 14.4z" class="p2" stroke="#fff" stroke-width="1.2" stroke-linejoin="round"/>
+              <rect x="12" y="12" width="58" height="20" rx="10" fill="#b4460f"/><text x="41" y="26" text-anchor="middle" fill="#fff" font-size="11" font-weight="650">Tomasz</text>
+            </g>
+          </g>
+          <!-- relay link -->
+          <path class="wire" d="M240 424 C240 470 300 474 480 474 C660 474 720 470 720 424"/>
+          <circle class="relay-ring" cx="480" cy="474" r="22" fill="none" stroke="var(--accent)" stroke-width="2"/>
+          <rect class="node" x="400" y="452" width="160" height="44" rx="22"/>
+          <text class="t" x="480" y="479" text-anchor="middle">Relay + PostgreSQL</text>
+          <circle class="hop-1 acc" cx="240" cy="424" r="6"/>
+          <circle class="hop-2 acc" cx="480" cy="474" r="6"/>
+          <text class="t-s" x="480" y="530" text-anchor="middle">Cursors stream live. Edits are committed, then broadcast.</text>
+        </svg>
+      </figure>
+    </div>
+  </section>
+
+  <!-- Benefit 2: never lose an edit -->
+  <section class="section">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2>Never lose a confirmed edit.</h2>
+        <p>The relay writes each batch of edits to PostgreSQL before it confirms or broadcasts it. If a server dies mid-edit, nobody was told the edit happened, so nobody loses it.</p>
+      </div>
+      <figure class="panel panel-dark reveal" style="margin:0">
+        <div class="scroll-x">
+          <svg class="ill arch" viewBox="0 0 1000 400" role="img" aria-labelledby="arch-t arch-d">
+            <title id="arch-t">FigCraft Cloud architecture</title>
+            <desc id="arch-d">Browser editors connect through a gateway to the cloud relay. The relay appends each edit to the PostgreSQL event log and commits it, then broadcasts it to the other browsers. Snapshots are stored in S3-compatible object storage.</desc>
+            <!-- base wires -->
+            <path class="wire" d="M220 80 C260 80 260 200 300 200"/>
+            <path class="wire" d="M220 200 H300"/>
+            <path class="wire" d="M220 320 C260 320 260 200 300 200"/>
+            <path class="wire" d="M450 200 H520"/>
+            <path class="wire" d="M680 186 C730 186 730 110 780 110"/>
+            <path class="wire" d="M680 214 C730 214 730 300 780 300"/>
+            <!-- nodes -->
+            <g>
+              <rect class="node" x="40" y="44" width="180" height="72" rx="14"/>
+              <text class="t" x="60" y="76">Browser editor</text><text class="t-s" x="60" y="98">Ines, sending an edit</text>
+              <rect class="node recv" x="40" y="164" width="180" height="72" rx="14"/>
+              <text class="t" x="60" y="196">Browser editor</text><text class="t-s" x="60" y="218">Tomasz</text>
+              <rect class="node recv" x="40" y="284" width="180" height="72" rx="14"/>
+              <text class="t" x="60" y="316">Browser editor</text><text class="t-s" x="60" y="338">Ada, viewing</text>
+            </g>
+            <rect class="node" x="300" y="164" width="150" height="72" rx="14"/>
+            <text class="t" x="320" y="196">Gateway</text><text class="t-s" x="320" y="218">HTTPS + WebSocket</text>
+            <rect class="node" x="520" y="156" width="160" height="88" rx="14" stroke="#02da96" stroke-width="1.6"/>
+            <text class="t" x="540" y="190">Cloud relay</text><text class="t-s" x="540" y="211">one owner per room</text>
+            <text class="t-m" x="540" y="231">fencing token 8</text>
+            <!-- PostgreSQL -->
+            <circle class="pulse" cx="870" cy="110" r="70" fill="none" stroke="#02da96" stroke-width="2"/>
+            <rect class="node" x="780" y="44" width="180" height="132" rx="14"/>
+            <text class="t" x="800" y="74">PostgreSQL</text><text class="t-s" x="800" y="93">ordered event log</text>
+            <rect class="node-2" x="800" y="106" width="140" height="10" rx="3"/>
+            <rect class="node-2" x="800" y="122" width="140" height="10" rx="3"/>
+            <rect class="node-2" x="800" y="138" width="140" height="10" rx="3"/>
+            <rect class="newrow" x="800" y="154" width="140" height="10" rx="3" fill="#02da96"/>
+            <g class="commit-badge"><rect x="842" y="16" width="112" height="24" rx="12" fill="#02da96"/><text x="898" y="32" text-anchor="middle" font-size="12" font-weight="650" fill="#03140d">committed</text></g>
+            <!-- S3 -->
+            <rect class="node" x="780" y="250" width="180" height="104" rx="14"/>
+            <text class="t" x="800" y="280">S3-compatible store</text><text class="t-s" x="800" y="299">verified snapshots</text>
+            <rect class="node-2" x="800" y="314" width="36" height="26" rx="5"/><rect class="node-2" x="844" y="314" width="36" height="26" rx="5"/><rect class="node-2" x="888" y="314" width="36" height="26" rx="5"/>
+            <!-- flows: edit -->
+            <path class="flow ph-edit" d="M220 80 C260 80 260 200 300 200"/>
+            <path class="flow ph-edit" d="M450 200 H520"/>
+            <!-- flows: commit -->
+            <path class="flow ph-commit" d="M680 186 C730 186 730 110 780 110"/>
+            <!-- flows: broadcast (reverse direction) -->
+            <path class="flow ph-cast" d="M520 200 H450"/>
+            <path class="flow ph-cast" d="M300 200 H220"/>
+            <path class="flow ph-cast" d="M300 200 C260 200 260 320 220 320"/>
+            <!-- snapshots -->
+            <path class="flow flow-slow" d="M680 214 C730 214 730 300 780 300"/>
+          </svg>
+        </div>
+        <ol class="steps">
+          <li><strong>1. Edit</strong>A browser sends a batch of changes through the gateway to the relay that owns the document.</li>
+          <li><strong>2. Commit</strong>The relay appends it to PostgreSQL under its fencing token. A stale relay's write is refused.</li>
+          <li><strong>3. Broadcast</strong>Only after the commit does anyone see it. Documents restore from a snapshot plus later events.</li>
+        </ol>
+      </figure>
+    </div>
+  </section>
+
+  <!-- Benefit 3/4: bento -->
+  <section class="section section-tint">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2>Your data, your servers, your sign-in.</h2>
+        <p>One Compose stack runs everything. Identity, tenancy and permissions are built in, not bolted on.</p>
+      </div>
+      <div class="bento">
+        <article class="cell b-wide reveal">
+          <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="4.5" width="16" height="6" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><rect x="4" y="13.5" width="16" height="6" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></div>
+          <h3>Your data, your servers</h3>
+          <p>The cloud service, PostgreSQL, Redis, SeaweedFS (or any S3-compatible store), the web editor and a Caddy gateway, started with one command. On hardware you choose.</p>
+          <svg class="ill stack" viewBox="0 0 640 250" role="img" aria-labelledby="stack-t">
+            <title id="stack-t">The self-hosted stack: gateway, web editor, cloud service, PostgreSQL, Redis and SeaweedFS on your own server</title>
+            <rect class="node-2" x="8" y="8" width="624" height="234" rx="18"/>
+            <text class="t-m" x="28" y="34">your-server: docker compose up</text>
+            <g class="box" style="--d:0"><rect class="node" x="28" y="50" width="286" height="50" rx="12"/><text class="t" x="48" y="80">Caddy gateway</text><circle class="health acc" style="--d:0" cx="292" cy="75" r="5"/></g>
+            <g class="box" style="--d:1"><rect class="node" x="326" y="50" width="286" height="50" rx="12"/><text class="t" x="346" y="80">Web editor (WASM)</text><circle class="health acc" style="--d:1" cx="590" cy="75" r="5"/></g>
+            <g class="box" style="--d:2"><rect class="node" x="28" y="112" width="584" height="50" rx="12" stroke="var(--accent)" stroke-width="1.6"/><text class="t" x="48" y="142">figcraft-cloud</text><text class="t-s" x="168" y="142">api · relay · worker roles, one image</text><circle class="health acc" style="--d:2" cx="590" cy="137" r="5"/></g>
+            <g class="box" style="--d:3"><rect class="node" x="28" y="174" width="188" height="50" rx="12"/><text class="t" x="48" y="204">PostgreSQL</text><circle class="health acc" style="--d:3" cx="194" cy="199" r="5"/></g>
+            <g class="box" style="--d:4"><rect class="node" x="226" y="174" width="188" height="50" rx="12"/><text class="t" x="246" y="204">Redis</text><circle class="health acc" style="--d:4" cx="392" cy="199" r="5"/></g>
+            <g class="box" style="--d:5"><rect class="node" x="424" y="174" width="188" height="50" rx="12"/><text class="t" x="444" y="204">SeaweedFS (S3)</text><circle class="health acc" style="--d:5" cx="590" cy="199" r="5"/></g>
+          </svg>
+        </article>
+        <article class="cell b-tall cell-ink reveal">
+          <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="8.5" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12.5 12h8M17.5 12v3M20.5 12v2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div>
+          <h3>Enterprise-ready identity</h3>
+          <p>OIDC login with PKCE and back-channel logout, SAML through a broker such as Keycloak, service accounts with scoped credentials, and revocation that ends live sessions.</p>
+          <svg class="ill ident" viewBox="0 0 360 250" role="img" aria-labelledby="ident-t">
+            <title id="ident-t">Sign-in flows from your identity provider through OIDC to a FigCraft session, which resolves to a role</title>
+            <path d="M40 60 H320" stroke="rgba(255,255,255,.18)" stroke-width="1.6"/>
+            <circle cx="40" cy="60" r="22" fill="#18211b" stroke="rgba(255,255,255,.2)"/><text x="40" y="100" text-anchor="middle" font-size="11" fill="#a9b6ad">Your IdP</text>
+            <circle cx="180" cy="60" r="22" fill="#18211b" stroke="rgba(255,255,255,.2)"/><text x="180" y="100" text-anchor="middle" font-size="11" fill="#a9b6ad">OIDC + PKCE</text>
+            <circle cx="320" cy="60" r="22" fill="#18211b" stroke="#02da96" stroke-width="1.6"/><text x="320" y="100" text-anchor="middle" font-size="11" fill="#a9b6ad">Session</text>
+            <g class="token"><rect x="28" y="52" width="24" height="16" rx="4" fill="#02da96"/></g>
+            <g font-size="12" font-weight="650">
+              <g class="role" style="--d:0"><rect x="20" y="140" width="96" height="30" rx="15" fill="#18211b" stroke="#02da96"/><text x="68" y="160" text-anchor="middle" fill="#eef4ef">Owner</text></g>
+              <g class="role" style="--d:1"><rect x="128" y="140" width="96" height="30" rx="15" fill="#18211b" stroke="#02da96"/><text x="176" y="160" text-anchor="middle" fill="#eef4ef">Admin</text></g>
+              <g class="role" style="--d:2"><rect x="236" y="140" width="104" height="30" rx="15" fill="#18211b" stroke="#02da96"/><text x="288" y="160" text-anchor="middle" fill="#eef4ef">Team manager</text></g>
+              <g class="role" style="--d:3"><rect x="20" y="182" width="96" height="30" rx="15" fill="#18211b" stroke="#02da96"/><text x="68" y="202" text-anchor="middle" fill="#eef4ef">Editor</text></g>
+              <g class="role" style="--d:4"><rect x="128" y="182" width="104" height="30" rx="15" fill="#18211b" stroke="#02da96"/><text x="180" y="202" text-anchor="middle" fill="#eef4ef">Commenter</text></g>
+              <g class="role" style="--d:5"><rect x="244" y="182" width="96" height="30" rx="15" fill="#18211b" stroke="#02da96"/><text x="292" y="202" text-anchor="middle" fill="#eef4ef">Viewer</text></g>
+            </g>
+          </svg>
+        </article>
+        <article class="cell b-third cell-accent reveal">
+          <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 20 8l-8 4.5L4 8z M4 12l8 4.5 8-4.5 M4 16l8 4.5 8-4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div>
+          <h3>One team or many</h3>
+          <p>Single-tenant installs and multi-tenant SaaS share one schema, with PostgreSQL row-level security on every tenant table.</p>
+        </article>
+        <article class="cell b-third reveal">
+          <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.5c0 4.2-3 7.4-7 9-4-1.6-7-4.8-7-9V6z M9 12l2.2 2.2L15.5 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round"/></svg></div>
+          <h3>Permissions that hold</h3>
+          <p>Tenant, team, workspace and document roles, deny by default, audited support access. Tested across a 1,152-cell route and caller matrix.</p>
+        </article>
+        <article class="cell b-third reveal">
+          <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 12h11M11 7.5 15.5 12 11 16.5M19.5 4v16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg></div>
+          <h3>Bring existing work</h3>
+          <p>A resumable importer moves documents, libraries and plugins from a self-hosted <code>figcraft-server</code> and verifies them before cutover.</p>
+        </article>
+        <article class="cell b-half reveal">
+          <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5" fill="none" stroke="currentColor" stroke-width="1.6"/><circle cx="9" cy="9.5" r="1.4" fill="currentColor"/><circle cx="14.5" cy="8.5" r="1.4" fill="currentColor"/><circle cx="16" cy="13" r="1.4" fill="currentColor"/></svg></div>
+          <h3>Your brand on it</h3>
+          <p>Product name, colours, logo, favicon and links come from environment variables. Restart the web container; no rebuild.</p>
+        </article>
+        <article class="cell b-half reveal">
+          <div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div>
+          <h3>Works with what's already there</h3>
+          <p>The desktop app, the CLI and upstream's self-hosted <code>figcraft-server</code> still work. The cloud relay speaks the same protocol.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Proof in numbers -->
+  <section class="section stats-band" aria-labelledby="stats-h">
+    <div class="wrap">
+      <h2 id="stats-h" class="visually-hidden">Verified so far</h2>
+      <ul class="kpis">
+        <li class="kpi reveal"><b>1,152</b><span>route and caller cells in the permission test matrix</span></li>
+        <li class="kpi reveal"><b>57</b><span>PostgreSQL and S3 integration suites green at the identity gate</span></li>
+        <li class="kpi reveal"><b>25 / 25</b><span>identity, tenancy and authorization tasks complete</span></li>
+        <li class="kpi reveal"><b>1</b><span>Compose file for the whole stack</span></li>
+      </ul>
+      <p class="footnote center">Figures from the S4 gate evidence in the <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/tracker.md">project tracker</a>.</p>
+    </div>
+  </section>
+
+  <!-- Deployment options -->
+  <section class="section section-tint" aria-labelledby="plans-h">
+    <div class="wrap">
+      <div class="section-head center reveal">
+        <h2 id="plans-h">One product. Three ways to run it.</h2>
+        <p>Every mode uses the same image, the same protocols and the same tenant-aware schema, so you can start small and grow without migrating.</p>
+      </div>
+      <div class="plans">
+        <article class="plan reveal">
+          <h3>Single team</h3>
+          <p class="plan-price">Free <span>self-hosted</span></p>
+          <p>One organization runs a private FigCraft service on its own infrastructure.</p>
+          <ul class="checks">
+            <li><span>Browser co-editing with share links</span></li>
+            <li><span>Bootstrap administrator and OIDC sign-in</span></li>
+            <li><span>Your PostgreSQL, your bucket</span></li>
+          </ul>
+          <span class="plan-status is-done">Available in alpha</span>
+        </article>
+        <article class="plan plan-featured reveal">
+          <h3>Multi-tenant SaaS</h3>
+          <p class="plan-price">Free <span>you operate it</span></p>
+          <p>One deployment serves many isolated organizations, with their own teams, roles and documents.</p>
+          <ul class="checks">
+            <li><span>Row-level security on every tenant table</span></li>
+            <li><span>Tenant suspension, plans and support access</span></li>
+            <li><span>SAML through an identity broker</span></li>
+          </ul>
+          <span class="plan-status is-done">Identity and tenancy complete</span>
+        </article>
+        <article class="plan reveal">
+          <h3>Embedded</h3>
+          <p class="plan-price">Free <span>in your product</span></p>
+          <p>Another product offers FigCraft inside its own workspace, delegating identity through signed integration tokens.</p>
+          <ul class="checks">
+            <li><span>Host registration and embed tokens</span></li>
+            <li><span>API and lifecycle webhooks</span></li>
+            <li><span>Permission mapping</span></li>
+          </ul>
+          <span class="plan-status">On the roadmap (S6)</span>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <!-- Gallery -->
+  <section class="section" aria-labelledby="gallery-h">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 id="gallery-h">A complete design editor, not a demo.</h2>
+        <p>The cloud is new. The editor is FigCraft's: auto layout, components and variants, variables, prototyping, Dev Mode and vector editing, in Rust and WebAssembly.</p>
+      </div>
+    </div>
+    <div class="gallery" tabindex="0" role="region" aria-label="Editor screenshots, scroll sideways">
+      <figure class="slide">
+        <div class="bezel"><div class="bezel-core"><img src="img/shot-1-hero.png" width="1440" height="900" loading="lazy" alt="The FigCraft editor with three phone frames for a hiking app, a featured trail card selected and the right panel showing auto layout, dimensions, corner radius and a surface fill variable."></div></div>
+        <figcaption><strong>Auto layout and variables</strong>Frames that hug and fill, with colours bound to variables and theme modes.</figcaption>
+      </figure>
+      <figure class="slide">
+        <div class="bezel"><div class="bezel-core"><img src="img/shot-3-prototype.png" width="1440" height="900" loading="lazy" alt="A four-screen onboarding prototype (Welcome, Interests, Location, All set) connected by blue interaction arrows, with an On click, Navigate to Interests interaction in the Prototype panel."></div></div>
+        <figcaption><strong>Prototyping</strong>Connect screens with interactions, then present them.</figcaption>
+      </figure>
+      <figure class="slide">
+        <div class="bezel"><div class="bezel-core"><img src="img/shot-4-devmode.png" width="1440" height="900" loading="lazy" alt="Dev Mode on a trail list row: a development annotation on the canvas and generated React and CSS code for a TrailRow component in the right panel."></div></div>
+        <figcaption><strong>Dev Mode</strong>Annotations, measurements and code where component properties become props.</figcaption>
+      </figure>
+      <figure class="slide">
+        <div class="bezel"><div class="bezel-core"><img src="img/shot-5-vector.png" width="1440" height="900" loading="lazy" alt="Vector editing: a gradient-stroked wave path with its bezier handles shown, beside a boolean ring shape, a mountain icon and a four-point star."></div></div>
+        <figcaption><strong>Vector networks</strong>Pen tool, booleans, gradient fills and strokes.</figcaption>
+      </figure>
+      <figure class="slide">
+        <div class="bezel"><div class="bezel-core"><img src="img/shot-6-dashboard-light.png" width="1440" height="900" loading="lazy" alt="The editor in its light theme showing a park operations dashboard design with KPI cards, a bar chart of hikes per day, a difficulty donut chart and a top trails table, overlaid with a layout grid."></div></div>
+        <figcaption><strong>Light and dark</strong>The editor itself follows your system theme.</figcaption>
+      </figure>
+      <figure class="slide contain">
+        <div class="bezel"><div class="bezel-core"><img src="img/art-dashboard.png" width="2880" height="1920" loading="lazy" alt="A finished dashboard design made in FigCraft: weekly hikers, check-ins, rating and incident cards with sparklines, a grouped bar chart, a difficulty mix donut, a top trails table and a 30-day visitors line chart."></div></div>
+        <figcaption><strong>Made in FigCraft</strong>An operations dashboard exported straight from the editor.</figcaption>
+      </figure>
+      <figure class="slide contain">
+        <div class="bezel"><div class="bezel-core"><img src="img/art-glass-weather.png" width="2400" height="1520" loading="lazy" alt="A frosted-glass weather card for Lake Louise showing 14 degrees and partly cloudy, with a six-day forecast row and smaller glass cards for air quality, wind and humidity on a dark background with coloured glows."></div></div>
+        <figcaption><strong>Effects</strong>Background blur, layered glass and soft gradients.</figcaption>
+      </figure>
+      <figure class="slide contain">
+        <div class="bezel"><div class="bezel-core"><img src="img/art-ds-colour.png" width="2784" height="1098" loading="lazy" alt="A design-system colour page with three six-step ramps, Pine, Sunset and Slate, each swatch labelled with its name and hex value."></div></div>
+        <figcaption><strong>Design systems</strong>Colour ramps and tokens that components share.</figcaption>
+      </figure>
+    </div>
+    <div class="wrap"><p class="gallery-hint">Scroll sideways for more. Every image is a real screenshot or export of the editor.</p></div>
+  </section>
+
+  <!-- Comparison -->
+  <section class="section section-tint" aria-labelledby="compare-h">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 id="compare-h">Own the tool, not just a seat in it.</h2>
+        <p>How FigCraft Cloud differs from closed, hosted design tools as a category.</p>
+      </div>
+      <div class="compare-wrap reveal">
+        <table class="compare">
+          <thead>
+            <tr><th scope="col"><span class="visually-hidden">Question</span></th><th scope="col" class="us">FigCraft Cloud</th><th scope="col">Closed hosted design tools</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">Where your files live</th><td class="us">Your PostgreSQL and your S3-compatible bucket</td><td class="them">The vendor's cloud</td></tr>
+            <tr><th scope="row">Self-hosting</th><td class="us">Yes: one Docker Compose stack, or your own cluster</td><td class="them">Rarely offered</td></tr>
+            <tr><th scope="row">Source code</th><td class="us">Open, MIT OR Apache-2.0</td><td class="them">Closed</td></tr>
+            <tr><th scope="row">Data residency and retention</th><td class="us">Wherever you deploy it, on your policy</td><td class="them">The vendor's regions and terms</td></tr>
+            <tr><th scope="row">Sign-in</th><td class="us">Your own OIDC or SAML identity provider</td><td class="them">Often limited to higher tiers</td></tr>
+            <tr><th scope="row">Cost model</th><td class="us">Free software; you pay for your own infrastructure</td><td class="them">Subscription, usually per seat</td></tr>
+            <tr><th scope="row">Maturity</th><td class="us">Early alpha, built in public</td><td class="them">Mature, production-proven</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="footnote">"Closed hosted design tools" describes a common pattern, not any one product. Terms vary by vendor and plan.</p>
+    </div>
+  </section>
+
+  <!-- Built in the open -->
+  <section class="section" aria-labelledby="open-h">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2 id="open-h">Built in the open, one checked box at a time.</h2>
+        <p>Every task has acceptance evidence in the repository before it is ticked. These numbers are generated from the project tracker each time the site is built.</p>
+      </div>
+      <!-- PROGRESS_STRIP -->
+      <p style="margin-top:22px"><a class="textlink" href="roadmap.html">See the full roadmap</a></p>
+    </div>
+  </section>
+
+  <!-- Quick start -->
+  <section class="section section-tint" id="self-host" aria-labelledby="qs-h">
+    <div class="wrap qs-grid">
+      <div class="reveal">
+        <h2 id="qs-h">Self-host in minutes.</h2>
+        <p class="lede">You need Docker with Compose, and about 8 GB of free RAM and 20 GB of disk for the first image build.</p>
+        <ol class="qs-list">
+          <li><span><strong>Clone the repository</strong>Everything, including the Compose stack, lives in one repo.</span></li>
+          <li><span><strong>Create the secret files</strong>The stack reads secrets from files; <a href="https://github.com/schnsrw/figcraft/blob/main/deploy/saas/README.md">deploy/saas/README.md</a> lists them.</span></li>
+          <li><span><strong>Start the stack and make a link</strong>Open the printed <code>http://127.0.0.1:8080/edit/#join=…</code> link in two tabs and co-edit.</span></li>
+        </ol>
+        <p style="margin-top:24px"><a class="textlink" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/core-slice.md">Walk through the demo</a></p>
+      </div>
+      <div class="terminal reveal">
+        <div class="terminal-bar" aria-hidden="true"><i></i><i></i><i></i><span>bash</span></div>
+<pre><code><span class="p">$ </span>git clone https://github.com/schnsrw/figcraft.git
+<span class="p">$ </span>cd figcraft
+<span class="c"># Create the secret files the stack expects (see deploy/saas/README.md), then:</span>
+<span class="p">$ </span>docker compose --env-file deploy/saas/env.example -f deploy/saas/compose.yaml up --build -d
+<span class="c"># Create a document and print a link that opens it in the browser editor:</span>
+<span class="p">$ </span>docker compose -f deploy/saas/compose.yaml exec cloud figcraft-cloud --create-share-link</code></pre>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section class="section" aria-labelledby="faq-h">
+    <div class="wrap">
+      <div class="section-head reveal"><h2 id="faq-h">Questions, answered honestly.</h2></div>
+      <div class="faq">
+        <details>
+          <summary>Is it ready for production?</summary>
+          <div class="answer">
+            <p>Not yet. FigCraft Cloud is an early alpha. Browser co-editing on the cloud stack works end to end, and identity, tenancy and authorization are complete with their test gates passing.</p>
+            <p>Running several relay replicas, embedding in other products, AI features and production operations (quotas, billing, observability, restore drills) are on the roadmap and not finished. Try it, but don't put irreplaceable work in it yet.</p>
+          </div>
+        </details>
+        <details>
+          <summary>How does it relate to FigCraft?</summary>
+          <div class="answer">
+            <p>FigCraft Cloud is an independent fork of <a href="https://github.com/storytold/figcraft">FigCraft</a>, the open-source Rust design editor. It keeps FigCraft's editor, renderer and command model unchanged, adds the cloud platform in separate crates, and merges upstream regularly so editor improvements keep flowing in. <a href="why.html">Read why the fork exists.</a></p>
+          </div>
+        </details>
+        <details>
+          <summary>Can I run it on my own servers?</summary>
+          <div class="answer">
+            <p>Yes, that is the point. The whole stack is one Docker Compose file: the cloud service, PostgreSQL, Redis, SeaweedFS or any S3-compatible store, the web editor and a Caddy gateway. Production settings, backups and upgrades are covered in <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/deployment-operations.md">deployment and operations</a>.</p>
+          </div>
+        </details>
+        <details>
+          <summary>What's the licence?</summary>
+          <div class="answer">
+            <p>Code and original assets are dual-licensed under MIT or Apache-2.0, at your option. There is no paid edition and no licence key.</p>
+          </div>
+        </details>
+        <details>
+          <summary>What's next?</summary>
+          <div class="answer">
+            <p>The distributed relay: room leases in PostgreSQL beside the existing fencing tokens, routing clients to a room's owner, graceful drain for rolling releases, and multi-replica crash tests. After that come browser, desktop and embedded integration, an AI gateway, and production operations. <a href="roadmap.html">See the live roadmap.</a></p>
+          </div>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- Closing CTA -->
+  <section aria-labelledby="close-h">
+    <div class="wrap">
+      <div class="closing reveal">
+        <svg class="closing-art" viewBox="0 0 400 400" aria-hidden="true">
+          <g fill="none" stroke="#02da96" stroke-width="1.5" opacity=".7">
+            <circle cx="200" cy="200" r="60"/><circle cx="200" cy="200" r="110" stroke-dasharray="4 8"/><circle cx="200" cy="200" r="160" opacity=".5"/>
+          </g>
+          <circle cx="200" cy="200" r="10" fill="#02da96"/>
+        </svg>
+        <h2 id="close-h">Run your own design cloud.</h2>
+        <p>Clone it, start it, and open the same document in two tabs. Then tell us what broke: issues and pull requests are welcome.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="#self-host">Self-host in minutes
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+          <a class="btn btn-ghost" href="https://github.com/schnsrw/figcraft">Star on GitHub
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.8 9.8 5.5l4 .6-2.9 2.8.7 4L8 11l-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<!-- FOOTER -->
+</body>
+</html>

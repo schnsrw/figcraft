@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Why a Fork</title>
+  <meta name="description" content="Why FigCraft Cloud exists: upstream FigCraft is a native-first editor; teams that want a hosted, multi-user, multi-tenant product need a platform around it. The fork adds that platform and keeps merging upstream.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/png" href="img/figcraft-64.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- HEADER -->
+<main id="main">
+  <section class="page-hero">
+    <div class="wrap load-in">
+      <p class="eyebrow"><span class="tag">Why a fork</span> The short version</p>
+      <h1>Same editor. A cloud platform around it.</h1>
+      <p class="lede">FigCraft is a great design editor that runs on your machine. FigCraft Cloud makes it something a whole company can run, sign in to and trust with its files, without changing the editor underneath.</p>
+    </div>
+  </section>
+
+  <section class="section" style="padding-top:0">
+    <div class="wrap">
+      <figure class="panel reveal" style="margin:0">
+        <div class="scroll-x">
+          <svg class="ill fork" viewBox="0 0 1000 300" role="img" aria-labelledby="fork-t fork-d">
+            <title id="fork-t">How the fork relates to upstream</title>
+            <desc id="fork-d">The upstream FigCraft line continues along the top. FigCraft Cloud branches from it and adds cloud work on its own line. Regular upstream syncs merge new upstream work down into the fork.</desc>
+            <text class="t" x="30" y="52">storytold/figcraft</text><text class="t-s" x="170" y="52">upstream: the editor</text>
+            <text class="t" x="300" y="264">schnsrw/figcraft</text><text class="t-s" x="430" y="264">FigCraft Cloud: editor + platform</text>
+            <!-- upstream -->
+            <path class="draw" pathLength="1" d="M30 90 H970" fill="none" stroke="var(--ink-3)" stroke-width="3" stroke-linecap="round"/>
+            <!-- fork branch -->
+            <path class="draw draw-2" pathLength="1" d="M200 90 C250 90 250 210 300 210 H970" fill="none" stroke="var(--accent)" stroke-width="3.5" stroke-linecap="round"/>
+            <!-- syncs -->
+            <path class="draw draw-3" pathLength="1" d="M440 90 C480 90 470 210 520 210" fill="none" stroke="var(--accent-ink)" stroke-width="2" stroke-linecap="round"/>
+            <path class="draw draw-4" pathLength="1" d="M640 90 C680 90 670 210 720 210" fill="none" stroke="var(--accent-ink)" stroke-width="2" stroke-linecap="round"/>
+            <path class="draw draw-5" pathLength="1" d="M840 90 C880 90 870 210 920 210" fill="none" stroke="var(--accent-ink)" stroke-width="2" stroke-linecap="round"/>
+            <!-- upstream commits -->
+            <g class="ink">
+              <circle class="pop" style="--d:0" cx="80" cy="90" r="7"/><circle class="pop" style="--d:1" cx="140" cy="90" r="7"/><circle class="pop" style="--d:2" cx="200" cy="90" r="7"/>
+              <circle class="pop" style="--d:3" cx="320" cy="90" r="7"/><circle class="pop" style="--d:4" cx="380" cy="90" r="7"/><circle class="pop" style="--d:5" cx="440" cy="90" r="7"/>
+              <circle class="pop" style="--d:6" cx="540" cy="90" r="7"/><circle class="pop" style="--d:7" cx="640" cy="90" r="7"/><circle class="pop" style="--d:8" cx="740" cy="90" r="7"/>
+              <circle class="pop" style="--d:9" cx="840" cy="90" r="7"/><circle class="pop" style="--d:10" cx="930" cy="90" r="7"/>
+            </g>
+            <!-- fork commits -->
+            <g>
+              <circle class="pop acc" style="--d:3" cx="360" cy="210" r="8"/><text class="t-s" x="360" y="186" text-anchor="middle">PostgreSQL events</text>
+              <circle class="pop acc" style="--d:5" cx="440" cy="210" r="8"/>
+              <circle class="pop acc" style="--d:6" cx="600" cy="210" r="8"/><text class="t-s" x="600" y="186" text-anchor="middle">S3 snapshots</text>
+              <circle class="pop acc" style="--d:8" cx="800" cy="210" r="8"/><text class="t-s" x="790" y="186" text-anchor="middle">identity and tenancy</text>
+            </g>
+            <!-- merge points -->
+            <g>
+              <circle cx="520" cy="210" r="9" fill="var(--surface)" stroke="var(--accent-ink)" stroke-width="2.5"/>
+              <circle class="sync-pulse" style="--d:0" cx="520" cy="210" r="9" fill="none" stroke="var(--accent)" stroke-width="2"/>
+              <circle cx="720" cy="210" r="9" fill="var(--surface)" stroke="var(--accent-ink)" stroke-width="2.5"/>
+              <circle class="sync-pulse" style="--d:1" cx="720" cy="210" r="9" fill="none" stroke="var(--accent)" stroke-width="2"/>
+              <circle cx="920" cy="210" r="9" fill="var(--surface)" stroke="var(--accent-ink)" stroke-width="2.5"/>
+              <circle class="sync-pulse" style="--d:2" cx="920" cy="210" r="9" fill="none" stroke="var(--accent)" stroke-width="2"/>
+              <text class="t-m" x="720" y="140" text-anchor="middle">upstream syncs</text>
+            </g>
+          </svg>
+        </div>
+        <p class="panel-caption">The fork branches from upstream and merges it back in regularly. The latest sync brought in 266 upstream commits.</p>
+      </figure>
+    </div>
+  </section>
+
+  <section class="section section-tint">
+    <div class="wrap split">
+      <div class="reveal">
+        <h2>What upstream FigCraft is.</h2>
+        <p class="lede">An open-source, clean-room Rust reimplementation of the modern interface-design workflow, native first, that also runs in the browser through WebAssembly.</p>
+        <p>Its collaboration is a first preview: live sessions hosted from the desktop app, or a self-hosted <code>figcraft-server</code> that keeps a team's files on disk and hands out share links. That design is right for a native-first editor and small self-hosted teams.</p>
+      </div>
+      <blockquote class="quote reveal">
+        <p>"…has only a first preview of multiplayer (live sessions hosted from the app or a self-hosted server, with per-person undo and share links to edit or to view; no accounts, teams or cloud yet)…"</p>
+        <cite>Upstream FigCraft README, Status section (<a href="https://github.com/schnsrw/figcraft/blob/main/docs/UPSTREAM-README.md">docs/UPSTREAM-README.md</a>)</cite>
+      </blockquote>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2>What a hosted product needs on top.</h2>
+        <p>A company running one design service for many people, or many organizations, needs a different set of guarantees. The <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/architecture.md">architecture review</a> puts it plainly: one data-directory lock, in-process room ownership and filesystem metadata are fine for self-hosting, but prevent horizontal SaaS scaling.</p>
+      </div>
+      <div class="cards c3">
+        <article class="card reveal"><div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="7" ry="2.6" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M5 6v12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6V6M5 12c0 1.4 3.1 2.6 7 2.6s7-1.2 7-2.6" fill="none" stroke="currentColor" stroke-width="1.6"/></svg></div><h3>Durable edit history</h3><p>An ordered event log in a transactional database, with sequence numbers, checksums and fencing, instead of files on one disk.</p></article>
+        <article class="card reveal"><div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 8h16v11H4zM8 8V5h8v3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div><h3>Object storage</h3><p>Snapshots, images, libraries, plugins and exports as verified, immutable objects in any S3-compatible store.</p></article>
+        <article class="card reveal"><div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="8.5" cy="12" r="4" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M12.5 12h8M17.5 12v3M20.5 12v2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></div><h3>Accounts and SSO</h3><p>OIDC and SAML sign-in, browser sessions, service accounts and a bootstrap administrator, not just links.</p></article>
+        <article class="card reveal"><div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 19 6v5.5c0 4.2-3 7.4-7 9-4-1.6-7-4.8-7-9V6z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div><h3>Permissions</h3><p>Tenant, team, workspace and document roles, deny by default, with revocation that ends live sessions.</p></article>
+        <article class="card reveal"><div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 3.5 20 8l-8 4.5L4 8z M4 12l8 4.5 8-4.5 M4 16l8 4.5 8-4.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div><h3>Tenancy isolation</h3><p>Many organizations in one deployment, isolated by row-level security and tenant-scoped keys.</p></article>
+        <article class="card reveal"><div class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 6h16v12H4z M4 10h16 M9 10v8" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg></div><h3>Embedding and operations</h3><p>Signed embed tokens for host products, plus quotas, backups, observability and rolling releases.</p></article>
+      </div>
+      <p class="note reveal" style="margin-top:22px">That is a different product with different trade-offs from a native-first editor. It belongs in a fork, so upstream can stay focused on the editor and the fork can take on servers, databases and accounts.</p>
+    </div>
+  </section>
+
+  <section class="section section-tint">
+    <div class="wrap">
+      <div class="section-head reveal">
+        <h2>Add around the editor, never through it.</h2>
+        <p>The fork's rules are written down as architecture decisions in <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/README.md">docs/saas/README.md</a>. These are the ones that keep it close to upstream.</p>
+      </div>
+      <div class="scope reveal" style="margin-bottom:16px">
+        <div class="scope-col">
+          <h3>Unchanged from upstream</h3>
+          <ul>
+            <li>The editor, renderer and command model, running locally in every client</li>
+            <li>The collaboration protocol and its per-person undo</li>
+            <li>The desktop app, the CLI and the filesystem <code>figcraft-server</code></li>
+          </ul>
+        </div>
+        <div class="scope-col ours">
+          <h3>Added by FigCraft Cloud</h3>
+          <ul>
+            <li><code>apps/figcraft-cloud</code>: one binary with api, relay and worker roles</li>
+            <li><code>crates/cloud-*</code>: storage, relay, auth and domain crates</li>
+            <li><code>webapp/</code>, <code>deploy/saas/</code> and <code>docs/saas/</code></li>
+          </ul>
+        </div>
+      </div>
+      <div class="adr">
+        <article class="reveal"><code>SAAS-ADR-001</code><h3>Keep the engine in the client</h3><p>The Rust engine and renderer stay in clients, so editing remains responsive and offline-capable. The server never becomes a remote-rendered editor.</p></article>
+        <article class="reveal"><code>SAAS-ADR-013</code><h3>Additive directories and adapter seams</h3><p>Fork-owned work lives in its own directories, so regular upstream merges do not keep conflicting with editor files.</p></article>
+        <article class="reveal"><code>SAAS-ADR-003</code><h3>Keep the filesystem server</h3><p><code>figcraft-server</code> remains the low-dependency option for offline and small-team users.</p></article>
+        <article class="reveal"><code>SAAS-ADR-004 to 008</code><h3>Durability first</h3><p>PostgreSQL is the source of truth, objects go to S3-compatible storage, Redis holds only rebuildable state, and one fenced relay owns each document at a time.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="wrap split">
+      <div class="reveal">
+        <h2>Upstream keeps flowing in.</h2>
+        <p class="lede">The fork is only worth having if it keeps getting upstream's editor improvements. The <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/upstream-sync.md">sync policy</a> makes that routine.</p>
+      </div>
+      <ul class="checks reveal" style="margin-top:0">
+        <li><span><strong>Fetch upstream at least weekly</strong> during active development, and integrate security fixes promptly.</span></li>
+        <li><span><strong>Merge commits, never rebases</strong>, so each sync records the exact upstream boundary.</span></li>
+        <li><span><strong>A patch ledger</strong> lists every change the fork makes to an upstream-owned file.</span></li>
+        <li><span><strong>One sync, one merge</strong>: upstream merges are never mixed with feature work.</span></li>
+        <li><span><strong>Upstream checks and cloud checks</strong> both pass before a sync lands.</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <section aria-labelledby="close-h">
+    <div class="wrap">
+      <div class="closing reveal">
+        <h2 id="close-h">See what the fork has built so far.</h2>
+        <p>Four milestones and a pulled-forward core slice are complete, each with evidence in the repository.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="changes.html">What we built
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M3 8h10M9 4l4 4-4 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+          <a class="btn btn-ghost" href="index.html#self-host">Self-host in minutes
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<!-- FOOTER -->
+</body>
+</html>

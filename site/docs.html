@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Documentation</title>
+  <meta name="description" content="Every FigCraft Cloud document, grouped: getting started, architecture, operations, security and identity, decisions, progress, and the upstream editor docs.">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" type="image/png" href="img/figcraft-64.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<!-- HEADER -->
+<main id="main">
+  <section class="page-hero">
+    <div class="wrap load-in">
+      <p class="eyebrow"><span class="tag">Docs</span> Written alongside the code</p>
+      <h1>Everything we know, written down.</h1>
+      <p class="lede">Requirements, architecture, operations, security and every decision, kept in the repository and updated in the same commits as the code. Each link opens the file on GitHub.</p>
+    </div>
+  </section>
+
+  <section class="section" style="padding-top:8px">
+    <div class="wrap docgroups">
+      <section class="docgroup reveal" aria-labelledby="g0">
+        <div class="docgroup-head"><h2 id="g0">Getting started</h2><p>Start here: what the cloud is, and how to run it.</p></div>
+        <div class="doclist">
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/README.md"><strong>Project overview</strong><span>What FigCraft Cloud does, the quick start and how it is built.</span><code>README.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/README.md"><strong>Cloud platform overview</strong><span>The three product modes and the architecture decisions SAAS-ADR-001 to 016.</span><code>docs/saas/README.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/core-slice.md"><strong>Core slice demo</strong><span>Two browser tabs co-editing one cloud document through the Compose stack, step by step.</span><code>docs/saas/core-slice.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/product-requirements.md"><strong>Product requirements</strong><span>Personas, deployment modes, functional requirements, non-goals and acceptance journeys.</span><code>docs/saas/product-requirements.md</code></a>
+        </div>
+      </section>
+      <section class="docgroup reveal" aria-labelledby="g1">
+        <div class="docgroup-head"><h2 id="g1">Architecture</h2><p>How the pieces fit, and why they hold together.</p></div>
+        <div class="doclist">
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/architecture.md"><strong>Architecture</strong><span>Topology, service boundaries, the collaboration consistency model and failure handling.</span><code>docs/saas/architecture.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/data-tenancy-integration.md"><strong>Data, tenancy and integration</strong><span>PostgreSQL model, S3 object layout, identity, permissions, API and embedding contracts.</span><code>docs/saas/data-tenancy-integration.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/session-compatibility.md"><strong>Session compatibility</strong><span>How the cloud relay stays compatible with figcraft-server and desktop-hosted sessions.</span><code>docs/saas/session-compatibility.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/ai-wasm.md"><strong>AI and server-side WASM</strong><span>Provider-neutral AI gateway, command-based mutations and isolated WASM automation (target design).</span><code>docs/saas/ai-wasm.md</code></a>
+        </div>
+      </section>
+      <section class="docgroup reveal" aria-labelledby="g2">
+        <div class="docgroup-head"><h2 id="g2">Operations</h2><p>Deploying, configuring, sizing and upgrading.</p></div>
+        <div class="doclist">
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/deployment-operations.md"><strong>Deployment and operations</strong><span>Docker profiles, configuration, migrations, scaling, backup, restore and observability.</span><code>docs/saas/deployment-operations.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/branding-and-configuration.md"><strong>Branding and configuration</strong><span>Set the product name, colours, logos and links from environment variables, with no rebuild.</span><code>docs/saas/branding-and-configuration.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/dependency-images.md"><strong>Dependency image review</strong><span>The pinned PostgreSQL, Redis and SeaweedFS images and how they were reviewed.</span><code>docs/saas/dependency-images.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/relay-performance.md"><strong>Relay performance</strong><span>First measured relay load, latency and sizing numbers, and what they do not cover yet.</span><code>docs/saas/relay-performance.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/filesystem-migration-report.md"><strong>Filesystem migration report</strong><span>Scanning a figcraft-server data directory and the report format the importer uses.</span><code>docs/saas/filesystem-migration-report.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/upstream-sync.md"><strong>Upstream synchronization</strong><span>How the fork merges upstream FigCraft: branches, cadence, patch ledger and gates.</span><code>docs/saas/upstream-sync.md</code></a>
+        </div>
+      </section>
+      <section class="docgroup reveal" aria-labelledby="g3">
+        <div class="docgroup-head"><h2 id="g3">Security and identity</h2><p>Isolation, sign-in and the controls that enforce them.</p></div>
+        <div class="doclist">
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/security.md"><strong>Security model</strong><span>Threat boundaries, tenant isolation, secret handling, abuse controls and release gates.</span><code>docs/saas/security.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/identity-mapping-policy.md"><strong>Identity mapping policy</strong><span>How external identities, organizations, domains and group claims map to tenants and teams.</span><code>docs/saas/identity-mapping-policy.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/saml-federation.md"><strong>SAML federation</strong><span>Enterprise SAML through an OIDC broker, validated end to end against Keycloak.</span><code>docs/saas/saml-federation.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/tenant-key-audit.md"><strong>Tenant key audit</strong><span>Every stored or cached key family and why it cannot cross tenants.</span><code>docs/saas/tenant-key-audit.md</code></a>
+        </div>
+      </section>
+      <section class="docgroup reveal" aria-labelledby="g4">
+        <div class="docgroup-head"><h2 id="g4">Decisions</h2><p>The choices we made, with the alternatives we rejected.</p></div>
+        <div class="doclist">
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/postgres-client-decision.md"><strong>PostgreSQL client</strong><span>SQLx 0.9 with embedded SQL migrations and advisory locking.</span><code>docs/saas/postgres-client-decision.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/object-store-client-decision.md"><strong>Object store client</strong><span>rusty-s3 signing over reqwest and Rustls, with licences and alternatives.</span><code>docs/saas/object-store-client-decision.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/relay-orchestration-decision.md"><strong>Relay orchestration</strong><span>Our own PostgreSQL room leases beside the fencing tokens, rather than Plane or Rivet.</span><code>docs/saas/relay-orchestration-decision.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/proposal-review.md"><strong>Enterprise proposal review</strong><span>A source-audited review of the original enterprise PRD, HLD and LLD against this repository.</span><code>docs/saas/proposal-review.md</code></a>
+        </div>
+      </section>
+      <section class="docgroup reveal" aria-labelledby="g5">
+        <div class="docgroup-head"><h2 id="g5">Progress</h2><p>Where things stand, task by task.</p></div>
+        <div class="doclist">
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/roadmap.md"><strong>Roadmap</strong><span>Milestones S0 to S9 with dependencies, estimates, deliverables and exit gates.</span><code>docs/saas/roadmap.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/tracker.md"><strong>Task tracker</strong><span>Every task with its acceptance evidence. The source of this site&#x27;s progress numbers.</span><code>docs/saas/tracker.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/CODEX.md"><strong>Agent handoff</strong><span>The current resume point and working notes for contributors and agents.</span><code>CODEX.md</code></a>
+        </div>
+      </section>
+      <section class="docgroup reveal" aria-labelledby="g6">
+        <div class="docgroup-head"><h2 id="g6">The FigCraft editor</h2><p>The editor itself comes from upstream FigCraft.</p></div>
+        <div class="doclist">
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/UPSTREAM-README.md"><strong>Editor features</strong><span>Upstream FigCraft&#x27;s README: features, status and how to build and run the apps.</span><code>docs/UPSTREAM-README.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/ROADMAP.md"><strong>Editor roadmap</strong><span>Upstream&#x27;s stage, headline numbers and estimates for the editor.</span><code>ROADMAP.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/collab-protocol.md"><strong>Collaboration protocol</strong><span>The wire protocol that the desktop app, figcraft-server and the cloud relay share.</span><code>docs/collab-protocol.md</code></a>
+          <a class="doc" href="https://github.com/schnsrw/figcraft/blob/main/docs/server.md"><strong>figcraft-server</strong><span>Upstream&#x27;s self-hosted filesystem server and how to deploy it.</span><code>docs/server.md</code></a>
+        </div>
+      </section>
+    </div>
+  </section>
+
+  <section aria-labelledby="close-h">
+    <div class="wrap">
+      <div class="closing reveal">
+        <h2 id="close-h">Ready to run it?</h2>
+        <p>The quick start takes you from a clone to two co-editing tabs. <a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/deployment-operations.md">Deployment and operations</a> covers the rest.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="index.html#self-host">Self-host in minutes
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4 12 12 4M6 4h6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span></a>
+          <a class="btn btn-ghost" href="https://github.com/schnsrw/figcraft">Star on GitHub
+            <span class="btn-ico" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M8 1.8 9.8 5.5l4 .6-2.9 2.8.7 4L8 11l-3.6 1.9.7-4-2.9-2.8 4-.6z" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span></a>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+<!-- FOOTER -->
+</body>
+</html>
