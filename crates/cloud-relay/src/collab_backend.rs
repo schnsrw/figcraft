@@ -219,7 +219,7 @@ impl CloudBackend {
         let (pool, store, tenant, document) = (&self.pool, &self.store, doc.tenant, doc.document);
         let stored = self.block(async move {
             let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| ())?;
-            store_snapshot(&mut transaction, store, document, &state, PRODUCER).await.map_err(|_| ())?;
+            store_snapshot(pool, &mut transaction, store, document, &state, PRODUCER).await.map_err(|_| ())?;
             transaction.commit().await.map_err(|_| ())
         });
         if matches!(stored, Some(Ok(()))) {
