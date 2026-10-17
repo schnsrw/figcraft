@@ -144,6 +144,8 @@ pub struct CredentialRecord {
     pub failed_attempts: u32,
     /// Seconds until the lock ends; zero when not locked.
     pub locked_for_secs: i64,
+    /// An administrator set the current password: the person must choose their own at sign-in.
+    pub must_change_password: bool,
 }
 
 impl fmt::Debug for CredentialRecord {
@@ -156,26 +158,27 @@ impl fmt::Debug for CredentialRecord {
             .field("state", &self.state)
             .field("failed_attempts", &self.failed_attempts)
             .field("locked_for_secs", &self.locked_for_secs)
+            .field("must_change_password", &self.must_change_password)
             .finish()
     }
 }
 
-type Row = (String, String, String, String, i32, i64);
+type Row = (String, String, String, String, i32, i64, bool);
 
 const BY_LOGIN_SQL: &str = concat!(
     "SELECT principal_id::text, login, password_hash, state, failed_attempts, ",
-    "GREATEST(0, ceil(extract(epoch FROM COALESCE(locked_until, now()) - now())))::bigint FROM local_credentials ",
+    "GREATEST(0, ceil(extract(epoch FROM COALESCE(locked_until, now()) - now())))::bigint, must_change_password FROM local_credentials ",
     "WHERE tenant_id = $1::uuid AND login = $2"
 );
 
 const BY_PRINCIPAL_SQL: &str = concat!(
     "SELECT principal_id::text, login, password_hash, state, failed_attempts, ",
-    "GREATEST(0, ceil(extract(epoch FROM COALESCE(locked_until, now()) - now())))::bigint FROM local_credentials ",
+    "GREATEST(0, ceil(extract(epoch FROM COALESCE(locked_until, now()) - now())))::bigint, must_change_password FROM local_credentials ",
     "WHERE tenant_id = $1::uuid AND principal_id = $2::uuid"
 );
 
 fn parse(row: Row) -> Result<CredentialRecord, CredentialError> {
-    let (principal, login, password_hash, state, failed, locked) = row;
+    let (principal, login, password_hash, state, failed, locked, must_change_password) = row;
     Ok(CredentialRecord {
         principal_id: principal.parse().map_err(|_| CredentialError::CorruptRow)?,
         login,
@@ -183,6 +186,7 @@ fn parse(row: Row) -> Result<CredentialRecord, CredentialError> {
         state: CredentialState::parse(&state)?,
         failed_attempts: u32::try_from(failed).map_err(|_| CredentialError::CorruptRow)?,
         locked_for_secs: locked.max(0),
+        must_change_password,
     })
 }
 
@@ -312,6 +316,9 @@ pub enum PasswordChange {
     Change,
     /// A reset link was used (audited as `credential.password_reset`).
     Reset,
+    /// An administrator set it (audited as `credential.password_admin_set`, never with the value):
+    /// temporary, the person must choose their own at the next sign-in.
+    AdminSet,
 }
 
 /// Replace the password hash of `principal_id` (a new password): clears the counters and any lock
@@ -328,11 +335,13 @@ pub async fn set_password(
     }
     let updated = sqlx::query(concat!(
         "UPDATE local_credentials SET password_hash = $3, password_changed_at = clock_timestamp(), updated_at = clock_timestamp(), ",
-        "failed_attempts = 0, last_failed_at = NULL, locked_until = NULL WHERE tenant_id = $1::uuid AND principal_id = $2::uuid"
+        "failed_attempts = 0, last_failed_at = NULL, locked_until = NULL, must_change_password = $4 ",
+        "WHERE tenant_id = $1::uuid AND principal_id = $2::uuid"
     ))
     .bind(transaction.tenant_id().to_string())
     .bind(principal_id.to_string())
     .bind(password_hash)
+    .bind(kind == PasswordChange::AdminSet)
     .execute(transaction.connection())
     .await
     .map_err(|error| database_error(&error))?;
@@ -342,6 +351,7 @@ pub async fn set_password(
     let action = match kind {
         PasswordChange::Change => "credential.password_change",
         PasswordChange::Reset => "credential.password_reset",
+        PasswordChange::AdminSet => "credential.password_admin_set",
     };
     audit_success(transaction, actor, action, "principal", Some(principal_id.as_uuid()), &serde_json::json!({}))
         .await
@@ -372,6 +382,19 @@ pub async fn upgrade_hash(
     .await
     .map_err(|error| database_error(&error))?;
     Ok(updated.rows_affected() == 1)
+}
+
+/// Mark `principal_id`'s current password temporary (or not). Used when an administrator creates an
+/// account with an initial password (TS-013); no audit of its own (the creation is audited).
+pub async fn set_must_change(transaction: &mut TenantTransaction<'_>, principal_id: PrincipalId, must_change: bool) -> Result<(), CredentialError> {
+    let updated = sqlx::query("UPDATE local_credentials SET must_change_password = $3, updated_at = clock_timestamp() WHERE tenant_id = $1::uuid AND principal_id = $2::uuid")
+        .bind(transaction.tenant_id().to_string())
+        .bind(principal_id.to_string())
+        .bind(must_change)
+        .execute(transaction.connection())
+        .await
+        .map_err(|error| database_error(&error))?;
+    if updated.rows_affected() == 1 { Ok(()) } else { Err(CredentialError::NotFound) }
 }
 
 /// Record a password sign-in outcome for `principal_id` (`auth.password_login`, outcome
@@ -477,6 +500,7 @@ mod tests {
             state: CredentialState::Active,
             failed_attempts: 0,
             locked_for_secs: 0,
+            must_change_password: false,
         };
         assert!(!format!("{record:?}").contains("argon2id"));
     }

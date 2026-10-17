@@ -131,10 +131,16 @@ pub struct InvitedAccount {
     pub accepted: AcceptedInvitation,
 }
 
-/// Sign up with the invitation `token`: create the person, their credential (login = the invited
-/// address) and the memberships the invitation grants, atomically. Every problem with the token is
+/// Sign up with the invitation `token`: create the person, their credential (the `login` they chose,
+/// or the invited address when the invitation noted one and none was given) and the memberships the invitation grants, atomically. Every problem with the token is
 /// [`AccountError::Refused`]; a tenant that disallows passwords is [`AccountError::Closed`].
-pub async fn register_with_invitation(pool: &PgPool, token: &str, display_name: &str, password_hash: &str) -> Result<InvitedAccount, AccountError> {
+pub async fn register_with_invitation(
+    pool: &PgPool,
+    token: &str,
+    login: Option<&str>,
+    display_name: &str,
+    password_hash: &str,
+) -> Result<InvitedAccount, AccountError> {
     if !well_formed(token) {
         return Err(AccountError::Refused);
     }
@@ -151,7 +157,7 @@ pub async fn register_with_invitation(pool: &PgPool, token: &str, display_name: 
     let mut transaction = begin_tenant_transaction(pool, tenant_id).await.map_err(|_| AccountError::Database)?;
     // Lock the pending invitation first: concurrent sign-ups with one token queue here and every
     // later one finds it accepted.
-    let email: Option<String> = sqlx::query_scalar(concat!(
+    let email: Option<Option<String>> = sqlx::query_scalar(concat!(
         "SELECT email FROM team_invitations WHERE tenant_id = $1::uuid AND token_hash = $2 ",
         "AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now() FOR UPDATE"
     ))
@@ -161,12 +167,18 @@ pub async fn register_with_invitation(pool: &PgPool, token: &str, display_name: 
     .await
     .map_err(|_| AccountError::Database)?;
     let email = email.ok_or(AccountError::Refused)?;
+    // The person chooses their login; without one an invitation that noted an address uses it.
+    let login = match (login, email.as_deref()) {
+        (Some(login), _) => login.to_string(),
+        (None, Some(email)) => email.to_string(),
+        (None, None) => return Err(AccountError::InvalidLogin),
+    };
     require_active_tenant(&mut transaction).await?;
     if !get_settings(&mut transaction).await.map_err(|_| AccountError::Database)?.password_enabled {
         return Err(AccountError::Closed);
     }
-    let principal = create_account(&mut transaction, display_name, &email, password_hash, None).await?;
-    let accepted = accept_in(&mut transaction, &hash, principal, Some(&email)).await.map_err(|error| match error {
+    let principal = create_account(&mut transaction, display_name, &login, password_hash, None).await?;
+    let accepted = accept_in(&mut transaction, &hash, principal, None).await.map_err(|error| match error {
         InvitationError::Refused => AccountError::Refused,
         InvitationError::TenantInactive => AccountError::TenantInactive,
         InvitationError::TeamUnavailable => AccountError::Refused,

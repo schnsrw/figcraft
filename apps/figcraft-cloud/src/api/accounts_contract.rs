@@ -38,6 +38,8 @@ pub(crate) const ACCOUNT_ROUTES: &[AccountRoute] = &[
     route("POST", "/auth/password/login", "passwordLogin", "none"),
     route("GET", "/tenants/{tenant}/users", "listUsers", "member.view"),
     route("POST", "/tenants/{tenant}/users", "createUser", "member.manage"),
+    route("POST", "/tenants/{tenant}/users/{principal}/password", "setUserPassword", "member.manage"),
+    route("POST", "/tenants/{tenant}/teams/{team}/invitations", "createTeamInvitation", "team.manage"),
     route("POST", "/tenants/{tenant}/users/{principal}/disable", "disableUser", "member.manage"),
     route("POST", "/tenants/{tenant}/users/{principal}/enable", "enableUser", "member.manage"),
     route("POST", "/tenants/{tenant}/users/{principal}/reset-link", "issueResetLink", "member.manage"),
@@ -54,7 +56,7 @@ pub(crate) const ACCOUNT_ROUTES: &[AccountRoute] = &[
 ];
 
 /// Routes under `/api/v1/auth`.
-pub(crate) fn routes() -> Router<AppState> {
+pub(crate) fn contract_routes() -> Router<AppState> {
     Router::new().route("/openapi.json", get(openapi))
 }
 

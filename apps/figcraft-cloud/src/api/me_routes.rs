@@ -38,7 +38,7 @@ use super::tenants_api::storage_unavailable;
 /// Longest password accepted in a body.
 const MAX_PASSWORD_BYTES: usize = figcraft_cloud_auth::password::MAX_PASSWORD_INPUT_BYTES;
 
-pub(crate) fn routes() -> Router<AppState> {
+pub(crate) fn self_service_routes() -> Router<AppState> {
     Router::new()
         .route("/me", get(read_profile).patch(update_profile))
         .route("/me/password", post(change_password))
@@ -54,9 +54,16 @@ struct Me {
     session_id: Uuid,
 }
 
-async fn me(state: &AppState, method: &Method, headers: &HeaderMap) -> Result<Me, ApiError> {
+/// Routes a person with a temporary password may use before choosing their own: reading the profile
+/// and changing the password (sign-out and `auth/session` live elsewhere).
+const RESTRICTED_OK: &[&str] = &["profile", "password"];
+
+async fn me(state: &AppState, method: &Method, headers: &HeaderMap, area: &str) -> Result<Me, ApiError> {
     match authenticator(state)?.identify(method, headers).await.map_err(ApiError::from)? {
         Caller::Browser(session) if session.embed.is_some() => Err(ApiError::forbidden()),
+        Caller::Browser(session) if session.password_change_required && !RESTRICTED_OK.contains(&area) => {
+            Err(ApiError::forbidden().with_note("password_change_required", "Choose a new password before continuing."))
+        }
         Caller::Browser(session) => Ok(Me { principal: session.principal_id, session_id: session.id }),
         Caller::ServiceAccount(_) | Caller::Share(_) => Err(ApiError::forbidden()),
     }
@@ -87,7 +94,7 @@ fn selected(state: &AppState, uri_path: &str, headers: &HeaderMap) -> Result<Opt
 }
 
 async fn read_profile(State(state): State<AppState>, method: Method, uri: axum::http::Uri, headers: HeaderMap) -> Result<Response, ApiError> {
-    let me = me(&state, &method, &headers).await?;
+    let me = me(&state, &method, &headers, "profile").await?;
     let profile = profiles::get_profile(state.pool(), me.principal).await.map_err(profile_error)?;
     let mut body = profile_body(&profile);
     if let Some(tenant) = selected(&state, uri.path(), &headers)? {
@@ -95,6 +102,7 @@ async fn read_profile(State(state): State<AppState>, method: Method, uri: axum::
         let record = credentials::find_for_principal(&mut transaction, me.principal).await.map_err(storage_unavailable)?;
         transaction.rollback().await.map_err(storage_unavailable)?;
         body["tenant_id"] = json!(tenant.to_string());
+        body["must_change_password"] = json!(record.as_ref().is_some_and(|record| record.must_change_password));
         body["login"] = record.map_or(Value::Null, |record| json!(record.login));
     }
     respond(StatusCode::OK, &[], None, Some(body))
@@ -108,7 +116,7 @@ struct ProfileBody {
 }
 
 async fn update_profile(State(state): State<AppState>, headers: HeaderMap, ApiJson(body): ApiJson<ProfileBody>) -> Result<Response, ApiError> {
-    let me = me(&state, &Method::PATCH, &headers).await?;
+    let me = me(&state, &Method::PATCH, &headers, "profile").await?;
     if body.display_name.is_none() && body.color.is_none() {
         return Err(ApiError::new(ErrorCode::InvalidRequest));
     }
@@ -131,7 +139,7 @@ async fn change_password(
     headers: HeaderMap,
     ApiJson(body): ApiJson<PasswordBody>,
 ) -> Result<Response, ApiError> {
-    let me = me(&state, &Method::POST, &headers).await?;
+    let me = me(&state, &Method::POST, &headers, "password").await?;
     let identity = identity(&state)?;
     let service = state.passwords().ok_or(ApiError::unavailable())?;
     if body.current_password.len() > MAX_PASSWORD_BYTES || body.new_password.len() > MAX_PASSWORD_BYTES {
@@ -176,7 +184,7 @@ async fn change_password(
 }
 
 async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
-    let me = me(&state, &Method::GET, &headers).await?;
+    let me = me(&state, &Method::GET, &headers, "sessions").await?;
     let sessions = profiles::list_sessions(state.pool(), me.principal).await.map_err(profile_error)?;
     let items: Vec<Value> = sessions
         .iter()
@@ -195,7 +203,7 @@ async fn list_sessions(State(state): State<AppState>, headers: HeaderMap) -> Res
 }
 
 async fn revoke_session(State(state): State<AppState>, headers: HeaderMap, Path(id): Path<String>) -> Result<Response, ApiError> {
-    let me = me(&state, &Method::DELETE, &headers).await?;
+    let me = me(&state, &Method::DELETE, &headers, "sessions").await?;
     let id = Uuid::parse_str(&id).map_err(|_| ApiError::not_found())?;
     if !profiles::revoke_session(state.pool(), me.principal, id).await.map_err(profile_error)? {
         return Err(ApiError::not_found());
@@ -205,7 +213,7 @@ async fn revoke_session(State(state): State<AppState>, headers: HeaderMap, Path(
 }
 
 async fn revoke_others(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, ApiError> {
-    let me = me(&state, &Method::POST, &headers).await?;
+    let me = me(&state, &Method::POST, &headers, "sessions").await?;
     let revoked = profiles::revoke_other_sessions(state.pool(), me.principal, me.session_id).await.map_err(profile_error)?;
     respond(StatusCode::OK, &[], None, Some(json!({ "revoked": revoked })))
 }

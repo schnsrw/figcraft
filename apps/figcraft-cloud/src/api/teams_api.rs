@@ -533,7 +533,8 @@ async fn disown_project(
 struct InvitationBody {
     id: Uuid,
     team_id: Uuid,
-    email: String,
+    /// The address noted on the invitation; absent for a link-only invitation (TS-014).
+    email: Option<String>,
     role: &'static str,
     invited_by: PrincipalId,
     expires_in_secs: i64,
@@ -589,7 +590,10 @@ async fn list_team_invitations(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CreateInvitation {
-    email: String,
+    /// Optional (TS-014): without one the invitation is a link anyone can accept by choosing a login
+    /// name and password; with one it is only noted (it enables sending, and the verified-email check
+    /// at OIDC acceptance).
+    email: Option<String>,
     role: String,
     expires_in_secs: Option<u64>,
 }
@@ -611,7 +615,7 @@ async fn create_invitation(
     let mut call = open(&state, &caller, &tenant).await?;
     let id = authorize_team(&mut call, &team, Action::TeamManage).await?;
     require_tenant(&call.subject, Action::MemberManage)?;
-    let created = invitations::create_invitation(&mut call.transaction, id, &body.email, role, call.principal, body.expires_in_secs)
+    let created = invitations::create_link_invitation(&mut call.transaction, id, body.email.as_deref(), role, call.principal, body.expires_in_secs)
         .await
         .map_err(invitation_error)?;
     commit(call.transaction).await?;

@@ -493,6 +493,9 @@ impl CredentialAuthenticator {
         let selected = selected_tenant(&self.identity, request.path, request.headers)?;
         match caller {
             Caller::Browser(session) => {
+                if session.password_change_required {
+                    return Err(AuthRejection::PasswordChangeRequired);
+                }
                 let grant = match &session.embed {
                     None => Grant::Member,
                     Some(embed) => {

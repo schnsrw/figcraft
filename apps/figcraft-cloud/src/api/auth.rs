@@ -115,6 +115,9 @@ pub(crate) enum AuthRejection {
     Inactive,
     /// The credential store could not be reached: `503`.
     Unavailable,
+    /// The session belongs to a person who must first choose their own password (TS-013): `403`
+    /// with `error.reason = "password_change_required"`; only `/me/password` and sign-out are open.
+    PasswordChangeRequired,
 }
 
 impl From<AuthRejection> for ApiError {
@@ -124,6 +127,9 @@ impl From<AuthRejection> for ApiError {
             AuthRejection::Forbidden => ApiError::forbidden(),
             AuthRejection::Inactive => ApiError::new(ErrorCode::ResourceInactive),
             AuthRejection::Unavailable => ApiError::unavailable(),
+            AuthRejection::PasswordChangeRequired => {
+                ApiError::forbidden().with_note("password_change_required", "Choose a new password before continuing.")
+            }
         }
     }
 }

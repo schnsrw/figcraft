@@ -288,6 +288,7 @@ async fn session(State(state): State<AppState>, method: Method, uri: Uri, header
                 "principal_id": session.principal_id.to_string(),
                 "tenant": tenant,
                 "session_expires_in": session.absolute_remaining_secs,
+                "password_change_required": session.password_change_required,
             })
         }
         Caller::ServiceAccount(account) => json!({

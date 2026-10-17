@@ -101,7 +101,8 @@ impl fmt::Debug for CreatedInvitation {
 pub struct InvitationRecord {
     pub id: Uuid,
     pub team_id: Uuid,
-    pub email: String,
+    /// The address noted on the invitation, if any (link-only invitations have none).
+    pub email: Option<String>,
     pub role: TeamRole,
     pub invited_by: PrincipalId,
     /// Seconds until the invitation expires (at least zero).
@@ -163,6 +164,35 @@ pub async fn create_invitation(
     expires_in_secs: Option<u64>,
 ) -> Result<CreatedInvitation, InvitationError> {
     let email = normalize_email(email).ok_or(InvitationError::InvalidEmail)?;
+    create_inner(transaction, team_id, Some(email), role, invited_by, expires_in_secs).await
+}
+
+/// Like [`create_invitation`] but not bound to any email address (TS-014): whoever holds the link
+/// can accept it, by signing in or by choosing a login name and password. `email`, when given, is
+/// only noted (it enables sending the link and the verified-email check at OIDC acceptance).
+pub async fn create_link_invitation(
+    transaction: &mut TenantTransaction<'_>,
+    team_id: Uuid,
+    email: Option<&str>,
+    role: TeamRole,
+    invited_by: PrincipalId,
+    expires_in_secs: Option<u64>,
+) -> Result<CreatedInvitation, InvitationError> {
+    let email = match email {
+        Some(email) => Some(normalize_email(email).ok_or(InvitationError::InvalidEmail)?),
+        None => None,
+    };
+    create_inner(transaction, team_id, email, role, invited_by, expires_in_secs).await
+}
+
+async fn create_inner(
+    transaction: &mut TenantTransaction<'_>,
+    team_id: Uuid,
+    email: Option<String>,
+    role: TeamRole,
+    invited_by: PrincipalId,
+    expires_in_secs: Option<u64>,
+) -> Result<CreatedInvitation, InvitationError> {
     let lifetime = expires_in_secs.unwrap_or(DEFAULT_LIFETIME_SECS);
     if lifetime == 0 || lifetime > MAX_LIFETIME_SECS {
         return Err(InvitationError::InvalidLifetime);
@@ -192,7 +222,7 @@ pub async fn create_invitation(
     .bind(id.to_string())
     .bind(transaction.tenant_id().to_string())
     .bind(team_id.to_string())
-    .bind(&email)
+    .bind(email.as_deref())
     .bind(role.as_str())
     .bind(invitation_token_hash(&token).to_vec())
     .bind(invited_by.to_string())
@@ -237,7 +267,7 @@ pub async fn list_pending_invitations(
     after: Option<Uuid>,
     size: PageSize,
 ) -> Result<Page<InvitationRecord, Uuid>, InvitationError> {
-    let rows: Vec<(String, String, String, String, String, i64)> = sqlx::query_as(
+    let rows: Vec<(String, String, Option<String>, String, String, i64)> = sqlx::query_as(
         "SELECT id::text, team_id::text, email, role, invited_by::text, \
                 GREATEST(0, floor(extract(epoch FROM expires_at - now())))::bigint \
          FROM team_invitations WHERE tenant_id = $1::uuid AND ($2::uuid IS NULL OR team_id = $2::uuid) \
@@ -303,7 +333,7 @@ pub(crate) async fn accept_in(
     principal: PrincipalId,
     verified_email: Option<&str>,
 ) -> Result<AcceptedInvitation, InvitationError> {
-    let invitation: Option<(String, String, String, String)> = sqlx::query_as(
+    let invitation: Option<(String, String, Option<String>, String)> = sqlx::query_as(
         "SELECT id::text, team_id::text, email, role FROM team_invitations \
          WHERE tenant_id = $1::uuid AND token_hash = $2 AND accepted_at IS NULL AND revoked_at IS NULL AND expires_at > now() \
          FOR UPDATE",
@@ -344,8 +374,8 @@ pub(crate) async fn accept_in(
     if principal_ok != Some(true) {
         return Err(InvitationError::PrincipalUnavailable);
     }
-    if let Some(verified) = verified_email
-        && normalize_email(verified).as_deref() != Some(email.as_str())
+    if let (Some(verified), Some(invited)) = (verified_email, email.as_deref())
+        && normalize_email(verified).as_deref() != Some(invited)
     {
         return Err(InvitationError::EmailMismatch);
     }

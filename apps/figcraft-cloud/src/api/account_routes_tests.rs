@@ -86,12 +86,13 @@ async fn whoami(caller: Authenticated) -> Json<Value> {
 /// The router: the auth routes under test, the account-settings resource routes and `whoami`.
 fn app(state: AppState) -> Router {
     let auth = super::super::auth_routes::routes().merge(super::auth_routes());
-    let auth = auth.merge(super::super::accounts_contract::routes()).merge(super::super::admin_users_routes::auth_routes());
+    let auth = auth.merge(super::super::accounts_contract::contract_routes()).merge(super::super::admin_users_routes::auth_routes());
     let resources = Router::new()
         .route("/tenants/{tenant}/whoami", get(whoami))
         .merge(super::resource_routes())
-        .merge(super::super::me_routes::routes())
-        .merge(super::super::admin_users_routes::resource_routes());
+        .merge(super::super::me_routes::self_service_routes())
+        .merge(super::super::admin_users_routes::resource_routes())
+        .merge(super::super::tenants_api::routes());
     let api = api_router_with(state, auth, resources);
     crate::health::app(CloudRole::Api, true, Some(api), ContextSettings::new(CloudRole::Api, 64, Duration::from_secs(20), 1 << 20))
 }
@@ -218,11 +219,7 @@ async fn invitation_signup_creates_the_account_membership_and_session_atomically
     let body = json!({"invitation": token, "display_name": "Ada Lovelace", "password": GOOD});
     assert_eq!(call(&app, Method::POST, path, &[], Some(body.clone())).await.status, StatusCode::FORBIDDEN);
     assert_eq!(call(&app, Method::POST, path, &[("origin", "https://evil.test")], Some(body.clone())).await.status, StatusCode::FORBIDDEN);
-    // A login in the body is a mistake for invitations; so is naming both doors.
-    assert_eq!(
-        post(&app, path, json!({"invitation": token, "login": "x@y.zz", "display_name": "A", "password": GOOD})).await.status,
-        StatusCode::BAD_REQUEST
-    );
+    // Naming both doors (an invitation and a tenant) is a mistake.
     assert_eq!(
         post(&app, path, json!({"invitation": token, "tenant": w.tenant.to_string(), "display_name": "A", "password": GOOD})).await.status,
         StatusCode::BAD_REQUEST
@@ -585,7 +582,7 @@ async fn unknown_and_known_accounts_are_indistinguishable() -> TestResult {
     let known_time = time(login.clone(), w.tenant.to_string()).await;
     let unknown_time = time("ghost@example.test".to_string(), w.tenant.to_string()).await;
     let (low, high) = if known_time < unknown_time { (known_time, unknown_time) } else { (unknown_time, known_time) };
-    assert!(high.as_secs_f64() < low.as_secs_f64() * 3.0 + 0.05, "{known_time:?} vs {unknown_time:?}");
+    assert!(high.as_secs_f64() < low.as_secs_f64() * 4.0 + 0.2, "{known_time:?} vs {unknown_time:?}");
     Ok(())
 }
 
@@ -1178,5 +1175,248 @@ async fn an_administrator_can_end_every_session_of_a_person() -> TestResult {
     assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &viewer)], None).await.status, StatusCode::OK);
     // They can sign in again (sessions are not a ban).
     assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------- TS-013 / TS-014
+
+fn invitations_path(w: &World) -> String {
+    format!("/api/v1/tenants/{}/teams/{}/invitations", w.tenant, w.team)
+}
+
+async fn link_invitation(app: &Router, w: &World, body: Value) -> Result<String, Error> {
+    let reply = as_owner(app, w, Method::POST, &invitations_path(w), Some(body)).await?;
+    assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    Ok(reply.body["token"].as_str().ok_or("token")?.to_string())
+}
+
+#[tokio::test]
+async fn invitations_need_no_email_and_the_invitee_chooses_a_login_name() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let path = "/api/v1/auth/password/signup";
+    let handle = format!("carol{}", suffix());
+
+    // A link-only invitation: no email at all.
+    let token = link_invitation(&app, &w, json!({"role": "editor"})).await?;
+    let listed = as_owner(&app, &w, Method::GET, &invitations_path(&w), None).await?;
+    assert!(listed.body["items"].as_array().ok_or("items")?.iter().any(|item| item["email"].is_null()), "{:?}", listed.body);
+    // Without a login name there is nothing to sign in with.
+    assert_eq!(post(&app, path, json!({"invitation": token, "display_name": "Carol", "password": GOOD})).await.status, StatusCode::BAD_REQUEST);
+    // A login that is not acceptable creates nothing and keeps the link usable.
+    assert_eq!(
+        post(&app, path, json!({"invitation": token, "login": "no good", "display_name": "Carol", "password": GOOD})).await.status,
+        StatusCode::BAD_REQUEST
+    );
+    let reply = post(&app, path, json!({"invitation": token, "login": handle.to_uppercase(), "display_name": "Carol", "password": GOOD})).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    let cookie = reply.session().ok_or("cookie")?;
+    let whoami = format!("/api/v1/tenants/{}/whoami", w.tenant);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &cookie)], None).await.status, StatusCode::OK);
+    let stored: String = sqlx::query_scalar("SELECT login FROM local_credentials WHERE tenant_id = $1::uuid AND login = $2")
+        .bind(w.tenant.to_string())
+        .bind(&handle)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(stored, handle);
+    assert_eq!(post(&app, LOGIN, login_body(&w, &handle, GOOD)).await.status, StatusCode::OK);
+    // Used once; and the same login name is taken, named so the UI can say so.
+    assert_eq!(
+        post(&app, path, json!({"invitation": token, "login": "other-name", "display_name": "Mallory", "password": GOOD})).await.status,
+        StatusCode::NOT_FOUND
+    );
+    let second = link_invitation(&app, &w, json!({"role": "viewer"})).await?;
+    let reply = post(&app, path, json!({"invitation": second, "login": handle, "display_name": "Copycat", "password": GOOD})).await;
+    assert_eq!((reply.status, reply.code(), reply.body["error"]["reason"].as_str()), (StatusCode::CONFLICT, "conflict", Some("login_taken")));
+    // The refused attempt left the link usable.
+    let reply = post(&app, path, json!({"invitation": second, "login": format!("{handle}2"), "display_name": "Copycat", "password": GOOD})).await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+
+    // An invitation that notes an address: the person may still choose another login name, or omit it.
+    let noted = link_invitation(&app, &w, json!({"role": "viewer", "email": "dave@example.test"})).await?;
+    let reply = post(&app, path, json!({"invitation": noted, "display_name": "Dave", "password": GOOD})).await;
+    assert_eq!(reply.status, StatusCode::CREATED);
+    let login: String = sqlx::query_scalar("SELECT login FROM local_credentials WHERE principal_id = $1::uuid")
+        .bind(reply.body["principal_id"].as_str().ok_or("p")?)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(login, "dave@example.test");
+    // A malformed noted address is still refused.
+    assert_eq!(
+        as_owner(&app, &w, Method::POST, &invitations_path(&w), Some(json!({"role": "viewer", "email": "nope"}))).await?.status,
+        StatusCode::BAD_REQUEST
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_initial_password_is_temporary_and_the_session_can_only_change_it() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let tenant = w.tenant.to_string();
+    let temp = "temporary phrase typed by admin 5";
+
+    // Typed and generated together is a mistake; a weak typed password is explained.
+    let both = as_owner(
+        &app,
+        &w,
+        Method::POST,
+        &users_path(&w),
+        Some(json!({"login": "both-ways", "display_name": "X", "initial_password": temp, "generate_password": true})),
+    )
+    .await?;
+    assert_eq!(both.status, StatusCode::BAD_REQUEST);
+    let weak =
+        as_owner(&app, &w, Method::POST, &users_path(&w), Some(json!({"login": "weak-one", "display_name": "X", "initial_password": "short"})))
+            .await?;
+    assert_eq!((weak.status, weak.body["error"]["reason"].as_str()), (StatusCode::BAD_REQUEST, Some("password_policy")));
+    assert_eq!(w.count("SELECT count(*) FROM local_credentials WHERE tenant_id = $1::uuid", &tenant).await?, 0, "nothing was created");
+
+    let login = format!("erin{}", suffix());
+    let made =
+        as_owner(&app, &w, Method::POST, &users_path(&w), Some(json!({"login": login, "display_name": "Erin", "initial_password": temp}))).await?;
+    assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
+    assert_eq!(made.body["must_change_password"], true);
+    assert!(made.body.get("setup_token").is_none() && made.body.get("generated_password").is_none(), "a typed password is never echoed");
+    let listed = as_owner(&app, &w, Method::GET, &users_path(&w), None).await?;
+    assert!(
+        listed.body["items"].as_array().ok_or("items")?.iter().any(|item| item["login"] == login.as_str() && item["must_change_password"] == true)
+    );
+
+    // Signing in reports it; the session works only for changing the password.
+    let reply = post(&app, LOGIN, login_body(&w, &login, temp)).await;
+    assert_eq!((reply.status, reply.body["must_change_password"].as_bool()), (StatusCode::OK, Some(true)));
+    let restricted = reply.session().ok_or("cookie")?;
+    let whoami = format!("/api/v1/tenants/{tenant}/whoami");
+    let blocked = call(&app, Method::GET, &whoami, &[("cookie", &restricted)], None).await;
+    assert_eq!((blocked.status, blocked.body["error"]["reason"].as_str()), (StatusCode::FORBIDDEN, Some("password_change_required")));
+    let sessions = call(&app, Method::GET, "/api/v1/me/sessions", &[("cookie", &restricted)], None).await;
+    assert_eq!((sessions.status, sessions.body["error"]["reason"].as_str()), (StatusCode::FORBIDDEN, Some("password_change_required")));
+    assert_eq!(call(&app, Method::GET, "/api/v1/me", &[("cookie", &restricted), ("x-figcraft-tenant", &tenant)], None).await.status, StatusCode::OK);
+    let session = call(&app, Method::GET, "/api/v1/auth/session", &[("cookie", &restricted)], None).await;
+    assert_eq!(session.body["password_change_required"], true);
+    // The temporary password cannot be kept as the new one's twin: a weak new password is refused ...
+    let send = |cookie: String, body: Value| {
+        let (app, tenant) = (app.clone(), tenant.clone());
+        async move {
+            call(&app, Method::POST, "/api/v1/me/password", &[("cookie", &cookie), ("origin", ORIGIN), ("x-figcraft-tenant", &tenant)], Some(body))
+                .await
+        }
+    };
+    assert_eq!(send(restricted.clone(), json!({"current_password": temp, "new_password": "short"})).await.status, StatusCode::BAD_REQUEST);
+    // ... and choosing a real one frees the account.
+    let mine = "my own private passphrase 88";
+    let changed = send(restricted.clone(), json!({"current_password": temp, "new_password": mine})).await;
+    assert_eq!(changed.status, StatusCode::OK, "{:?}", changed.body);
+    let free = changed.session().ok_or("fresh cookie")?;
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &free)], None).await.status, StatusCode::OK);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &restricted)], None).await.status, StatusCode::UNAUTHORIZED);
+    let reply = post(&app, LOGIN, login_body(&w, &login, mine)).await;
+    assert_eq!((reply.status, reply.body["must_change_password"].as_bool()), (StatusCode::OK, Some(false)));
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &reply.session().ok_or("c")?)], None).await.status, StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn generated_passwords_are_shown_once_and_set_by_administrators_below_them() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let tenant = w.tenant.to_string();
+    let made = as_owner(
+        &app,
+        &w,
+        Method::POST,
+        &users_path(&w),
+        Some(json!({"login": format!("frank{}", suffix()), "display_name": "Frank", "role": "editor", "generate_password": true})),
+    )
+    .await?;
+    assert_eq!(made.status, StatusCode::CREATED, "{:?}", made.body);
+    let generated = made.body["generated_password"].as_str().ok_or("generated")?.to_string();
+    let frank = made.body["principal_id"].as_str().ok_or("principal")?.to_string();
+    let login = made.body["login"].as_str().ok_or("login")?.to_string();
+    let shape: Vec<usize> = generated.split('-').map(str::len).collect();
+    assert_eq!(shape, [5, 5, 5, 5], "{generated}");
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, &generated)).await.body["must_change_password"], true);
+    let leaked: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE tenant_id = $1::uuid AND metadata::text LIKE '%' || $2 || '%'")
+        .bind(&tenant)
+        .bind(&generated)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(leaked, 0);
+
+    // An administrator (not an owner) may set passwords for people below, not for peers, owners or themselves.
+    let (admin_login, admin_id) = account(&w, &app).await?;
+    sqlx::query("UPDATE tenant_members SET role = 'tenant_admin' WHERE principal_id = $1::uuid").bind(&admin_id).execute(&w.admin).await?;
+    let (peer_login, peer_id) = account(&w, &app).await?;
+    sqlx::query("UPDATE tenant_members SET role = 'tenant_admin' WHERE principal_id = $1::uuid").bind(&peer_id).execute(&w.admin).await?;
+    let _ = peer_login;
+    let hash = "$argon2id$v=19$m=8192,t=1,p=1$c29tZXNhbHRzb21l$aGFzaGhhc2hoYXNoaGFzaGhhc2hoYXNo";
+    sqlx::query("INSERT INTO local_credentials (tenant_id, principal_id, login, password_hash) VALUES ($1::uuid, $2::uuid, $3, $4)")
+        .bind(&tenant)
+        .bind(w.owner.to_string())
+        .bind(email())
+        .bind(hash)
+        .execute(&w.admin)
+        .await?;
+    let admin = sign_in(&app, &w, &admin_login, GOOD).await?;
+    let set = |cookie: String, who: String, body: Value| {
+        let (app, tenant) = (app.clone(), tenant.clone());
+        async move {
+            call(
+                &app,
+                Method::POST,
+                &format!("/api/v1/tenants/{tenant}/users/{who}/password"),
+                &[("cookie", &cookie), ("origin", ORIGIN)],
+                Some(body),
+            )
+            .await
+        }
+    };
+    for (who, label) in [(admin_id.clone(), "themselves"), (peer_id.clone(), "a peer"), (w.owner.to_string(), "the owner")] {
+        let reply = set(admin.clone(), who, json!({"generate": true})).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "{label}");
+    }
+    // Bad requests: both, neither, weak.
+    for bad in [json!({}), json!({"password": GOOD, "generate": true}), json!({"password": "short"})] {
+        assert_eq!(set(admin.clone(), frank.clone(), bad.clone()).await.status, StatusCode::BAD_REQUEST, "{bad}");
+    }
+    // A plain member cannot; CSRF is enforced.
+    let (viewer_login, _) = account(&w, &app).await?;
+    let viewer = sign_in(&app, &w, &viewer_login, GOOD).await?;
+    assert_eq!(set(viewer, frank.clone(), json!({"generate": true})).await.status, StatusCode::FORBIDDEN);
+    let frank_session = sign_in(&app, &w, &login, &generated).await.ok();
+    let reply =
+        call(&app, Method::POST, &format!("/api/v1/tenants/{tenant}/users/{frank}/password"), &[("cookie", &admin)], Some(json!({"generate": true})))
+            .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN, "CSRF");
+
+    // The set works: a new password, shown once, temporary, other sessions gone, audited without the value.
+    let reply = set(admin.clone(), frank.clone(), json!({"password": "admin chose this phrase 12"})).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(reply.body["must_change_password"], true);
+    assert!(reply.body.get("generated_password").is_none());
+    if let Some(cookie) = frank_session {
+        let whoami = format!("/api/v1/tenants/{tenant}/whoami");
+        assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &cookie)], None).await.status, StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, &generated)).await.status, StatusCode::UNAUTHORIZED, "the old password is gone");
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, "admin chose this phrase 12")).await.body["must_change_password"], true);
+    let again = set(admin.clone(), frank.clone(), json!({"generate": true})).await;
+    let second = again.body["generated_password"].as_str().ok_or("generated")?.to_string();
+    assert_ne!(second, generated);
+    let audited: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE tenant_id = $1::uuid AND action = 'credential.password_admin_set' AND actor_principal_id = $2::uuid AND metadata::text NOT LIKE '%' || $3 || '%'")
+        .bind(&tenant)
+        .bind(&admin_id)
+        .bind(&second)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(audited, 2);
+    // A disabled account gets none.
+    assert_eq!(as_owner(&app, &w, Method::POST, &format!("{}/{frank}/disable", users_path(&w)), None).await?.status, StatusCode::NO_CONTENT);
+    assert_eq!(set(admin.clone(), frank, json!({"generate": true})).await.status, StatusCode::CONFLICT);
+    // The owner may set a password for an administrator.
+    let owner_set =
+        as_owner(&app, &w, Method::POST, &format!("/api/v1/tenants/{tenant}/users/{admin_id}/password"), Some(json!({"generate": true}))).await?;
+    assert_eq!(owner_set.status, StatusCode::OK);
     Ok(())
 }

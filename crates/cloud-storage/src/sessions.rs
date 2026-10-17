@@ -169,6 +169,9 @@ pub struct ResolvedSession {
     pub absolute_remaining_secs: i64,
     /// Set for a session opened by an embed-token exchange.
     pub embed: Option<EmbedBinding>,
+    /// An administrator set this person's password: until they choose their own, the API accepts
+    /// this session only on the routes that change the password or sign out (TS-013).
+    pub password_change_required: bool,
 }
 
 /// The SHA-256 stored for `token`.
@@ -198,18 +201,30 @@ pub(crate) fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     std::hint::black_box(difference) == 0
 }
 
-type SessionRow = (String, String, i64, i64, bool, Option<String>, Option<String>, Option<String>, Option<String>);
+type SessionRow = (String, String, i64, i64, bool, Option<String>, Option<String>, Option<String>, Option<String>, bool);
 
 const LIVE_SESSION_SQL: &str = concat!(
     "SELECT s.id::text, s.principal_id::text, ",
     "extract(epoch FROM now() - s.created_at)::bigint, ",
     "extract(epoch FROM s.absolute_expires_at - now())::bigint, ",
     "s.last_seen_at <= now() - make_interval(secs => $2::bigint), ",
-    "s.embed_tenant_id::text, s.embed_system_id, s.embed_document_id::text, s.embed_role ",
+    "s.embed_tenant_id::text, s.embed_system_id, s.embed_document_id::text, s.embed_role, s.password_change_required ",
     "FROM browser_sessions s JOIN principals p ON p.id = s.principal_id ",
     "WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND s.idle_expires_at > now() ",
     "AND s.absolute_expires_at > now() AND p.state = 'active'"
 );
+
+/// [`create_session`] for a person who signed in with a temporary (administrator-set) password: the
+/// session works only for changing the password and signing out until they choose their own.
+pub async fn create_password_change_session(pool: &PgPool, principal_id: PrincipalId, limits: SessionLimits) -> Result<CreatedSession, SessionError> {
+    let created = create_session(pool, principal_id, limits).await?;
+    sqlx::query("UPDATE browser_sessions SET password_change_required = TRUE WHERE id = $1::uuid")
+        .bind(created.id.to_string())
+        .execute(pool)
+        .await
+        .map_err(|_| SessionError::Database)?;
+    Ok(created)
+}
 
 /// Create a session for `principal_id`, which must be an `active` principal.
 pub async fn create_session(pool: &PgPool, principal_id: PrincipalId, limits: SessionLimits) -> Result<CreatedSession, SessionError> {
@@ -318,7 +333,18 @@ pub async fn revoke_embedded_sessions(
 }
 
 fn parse_row(row: SessionRow) -> Result<(ResolvedSession, bool), SessionError> {
-    let (id, principal_id, age_secs, absolute_remaining_secs, stale, embed_tenant, embed_system, embed_document, embed_role) = row;
+    let (
+        id,
+        principal_id,
+        age_secs,
+        absolute_remaining_secs,
+        stale,
+        embed_tenant,
+        embed_system,
+        embed_document,
+        embed_role,
+        password_change_required,
+    ) = row;
     // The columns are all set or all null (a table constraint); anything else is a broken row.
     let embed = match (embed_tenant, embed_system, embed_document, embed_role) {
         (None, None, None, None) => None,
@@ -337,6 +363,7 @@ fn parse_row(row: SessionRow) -> Result<(ResolvedSession, bool), SessionError> {
             age_secs: age_secs.max(0),
             absolute_remaining_secs: absolute_remaining_secs.max(0),
             embed,
+            password_change_required,
         },
         stale,
     ))
@@ -418,10 +445,10 @@ pub async fn rotate_session(pool: &PgPool, token: &str, limits: SessionLimits) -
         .map_err(|_| SessionError::Database)?;
     sqlx::query(concat!(
         "INSERT INTO browser_sessions (id, principal_id, token_hash, rotated_from, idle_expires_at, absolute_expires_at, ",
-        "embed_tenant_id, embed_system_id, embed_document_id, embed_role) ",
+        "embed_tenant_id, embed_system_id, embed_document_id, embed_role, password_change_required) ",
         "SELECT $1::uuid, o.principal_id, $2, o.id, ",
         "least(o.absolute_expires_at, now() + make_interval(secs => $4::bigint)), o.absolute_expires_at, ",
-        "o.embed_tenant_id, o.embed_system_id, o.embed_document_id, o.embed_role ",
+        "o.embed_tenant_id, o.embed_system_id, o.embed_document_id, o.embed_role, o.password_change_required ",
         "FROM browser_sessions o WHERE o.id = $3::uuid"
     ))
     .bind(new_id.to_string())
@@ -548,6 +575,7 @@ mod tests {
             system,
             document,
             role,
+            false,
         )
     }
 

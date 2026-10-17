@@ -109,12 +109,18 @@ pub(crate) async fn start_session(
     principal: PrincipalId,
     status: StatusCode,
     body: Value,
+    password_change_required: bool,
 ) -> Result<Response, ApiError> {
     let identity = identity(state)?;
     if let Some(previous) = cookie(headers, COOKIE_NAME) {
         revoke_best_effort(state, previous).await?;
     }
-    let created = sessions::create_session(state.pool(), principal, identity.limits()).await.map_err(session_error)?;
+    let created = if password_change_required {
+        sessions::create_password_change_session(state.pool(), principal, identity.limits()).await
+    } else {
+        sessions::create_session(state.pool(), principal, identity.limits()).await
+    }
+    .map_err(session_error)?;
     respond(status, &[session_cookie(identity, &created)?], None, Some(body))
 }
 
@@ -124,7 +130,7 @@ fn account_error(error: AccountError) -> ApiError {
         // Token holders cannot tell an unknown token from any other refusal.
         AccountError::Refused | AccountError::TenantInactive => ApiError::not_found(),
         AccountError::Closed => ApiError::forbidden(),
-        AccountError::LoginTaken => ApiError::new(ErrorCode::Conflict),
+        AccountError::LoginTaken => ApiError::new(ErrorCode::Conflict).with_note("login_taken", "That login name is already taken."),
         AccountError::Database => ApiError::unavailable(),
         AccountError::Audit | AccountError::CorruptRow => ApiError::new(ErrorCode::Internal),
     }
@@ -171,6 +177,8 @@ async fn methods(State(state): State<AppState>, Query(query): Query<MethodsQuery
         "oidc": settings.oidc_enabled && state.oidc().is_some(),
         "open_registration": password && settings.open_registration,
         "bootstrap_required": bootstrap_required,
+        // Outgoing mail is not configured in this build: links are shown to administrators to copy.
+        "mail_configured": false,
     });
     respond(StatusCode::OK, &[], None, Some(body))
 }
@@ -195,14 +203,16 @@ async fn signup(State(state): State<AppState>, headers: HeaderMap, ApiJson(body)
     }
     match (body.invitation, body.tenant) {
         (Some(token), None) => {
-            // An invitation fixes the login (the invited address): a login in the body is a mistake.
-            if body.login.is_some() || token.is_empty() || token.len() > MAX_TOKEN_CHARS {
+            // The person chooses a login name; an invitation that noted an address falls back to it.
+            if token.is_empty() || token.len() > MAX_TOKEN_CHARS {
                 return Err(invalid());
             }
-            let hash = hash_password(service, body.password, None).await?;
-            let account = accounts::register_with_invitation(state.pool(), &token, &body.display_name, &hash).await.map_err(account_error)?;
+            let hash = hash_password(service, body.password, body.login.clone()).await?;
+            let account = accounts::register_with_invitation(state.pool(), &token, body.login.as_deref(), &body.display_name, &hash)
+                .await
+                .map_err(account_error)?;
             let reply = json!({ "principal_id": account.principal_id.to_string(), "tenant_id": account.tenant_id.to_string() });
-            start_session(&state, &headers, account.principal_id, StatusCode::CREATED, reply).await
+            start_session(&state, &headers, account.principal_id, StatusCode::CREATED, reply, false).await
         }
         (None, Some(reference)) => {
             let login = body.login.ok_or_else(invalid)?;
@@ -219,7 +229,7 @@ async fn signup(State(state): State<AppState>, headers: HeaderMap, ApiJson(body)
             let principal = accounts::register_open(&mut transaction, &body.display_name, &login, &hash).await.map_err(account_error)?;
             transaction.commit().await.map_err(storage_unavailable)?;
             let reply = json!({ "principal_id": principal.to_string(), "tenant_id": tenant.to_string() });
-            start_session(&state, &headers, principal, StatusCode::CREATED, reply).await
+            start_session(&state, &headers, principal, StatusCode::CREATED, reply, false).await
         }
         _ => Err(invalid()),
     }
@@ -263,7 +273,7 @@ async fn bootstrap_password(State(state): State<AppState>, headers: HeaderMap, A
     transaction.commit().await.map_err(storage_unavailable)?;
     identity.mark_bootstrap_done();
     let reply = json!({ "tenant_id": tenant.to_string(), "principal_id": principal.to_string(), "role": "tenant_owner" });
-    start_session(&state, &headers, principal, StatusCode::OK, reply).await
+    start_session(&state, &headers, principal, StatusCode::OK, reply, false).await
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -355,8 +365,12 @@ async fn password_login(State(state): State<AppState>, headers: HeaderMap, ApiJs
     credentials::record_login_audit(&mut transaction, record.principal_id, true, "password").await.map_err(storage_unavailable)?;
     transaction.commit().await.map_err(storage_unavailable)?;
     state.login_throttle().succeeded(tenant, &throttle_login);
-    let reply = json!({ "principal_id": record.principal_id.to_string(), "tenant_id": tenant.to_string() });
-    start_session(&state, &headers, record.principal_id, StatusCode::OK, reply).await.map_err(|error| {
+    let reply = json!({
+        "principal_id": record.principal_id.to_string(),
+        "tenant_id": tenant.to_string(),
+        "must_change_password": record.must_change_password,
+    });
+    start_session(&state, &headers, record.principal_id, StatusCode::OK, reply, record.must_change_password).await.map_err(|error| {
         // A principal that cannot hold a session is indistinguishable from a bad password.
         if error.code() == ErrorCode::ResourceInactive { ApiError::unauthenticated() } else { error }
     })

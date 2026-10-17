@@ -14,10 +14,10 @@
     "/auth/methods": {
       "get": {
         "operationId": "getSignInMethods",
-        "summary": "Sign-in methods the workspace offers; bootstrap_required is true only while a single-tenant deployment awaits its first owner",
+        "summary": "Sign-in methods the workspace offers; bootstrap_required is true only while a single-tenant deployment awaits its first owner; mail_configured says whether the server can send email (false: show copyable links only)",
         "responses": {
           "200": {
-            "description": "Sign-in methods the workspace offers; bootstrap_required is true only while a single-tenant deployment awaits its first owner",
+            "description": "Sign-in methods the workspace offers; bootstrap_required is true only while a single-tenant deployment awaits its first owner; mail_configured says whether the server can send email (false: show copyable links only)",
             "content": {
               "application/json": {
                 "schema": {
@@ -37,6 +37,9 @@
                       "type": "boolean"
                     },
                     "bootstrap_required": {
+                      "type": "boolean"
+                    },
+                    "mail_configured": {
                       "type": "boolean"
                     }
                   },
@@ -89,10 +92,10 @@
     "/auth/password/signup": {
       "post": {
         "operationId": "passwordSignUp",
-        "summary": "Create a password account from an invitation, or by open registration; signs the person in",
+        "summary": "Create a password account from an invitation (link-only invitations need no email: the person chooses login, display name and password; without login an invitation that noted an address uses it) or by open registration; signs the person in. 409 with error.reason 'login_taken' when the login name is in use",
         "responses": {
           "201": {
-            "description": "Create a password account from an invitation, or by open registration; signs the person in",
+            "description": "Create a password account from an invitation (link-only invitations need no email: the person chooses login, display name and password; without login an invitation that noted an address uses it) or by open registration; signs the person in. 409 with error.reason 'login_taken' when the login name is in use",
             "content": {
               "application/json": {
                 "schema": {
@@ -474,10 +477,10 @@
     "/auth/password/login": {
       "post": {
         "operationId": "passwordLogin",
-        "summary": "Sign in with a login and password; every failure is the same 401, repeated failures 429 with Retry-After; passwords disabled for the workspace is 403; rotates the session",
+        "summary": "Sign in with a login and password; every failure is the same 401, repeated failures 429 with Retry-After; passwords disabled for the workspace is 403; rotates the session. must_change_password true means an administrator set the password: the session can only change it (POST /me/password) until then; other routes answer 403 with error.reason 'password_change_required'",
         "responses": {
           "200": {
-            "description": "Sign in with a login and password; every failure is the same 401, repeated failures 429 with Retry-After; passwords disabled for the workspace is 403; rotates the session",
+            "description": "Sign in with a login and password; every failure is the same 401, repeated failures 429 with Retry-After; passwords disabled for the workspace is 403; rotates the session. must_change_password true means an administrator set the password: the session can only change it (POST /me/password) until then; other routes answer 403 with error.reason 'password_change_required'",
             "content": {
               "application/json": {
                 "schema": {
@@ -490,12 +493,16 @@
                     "tenant_id": {
                       "type": "string",
                       "format": "uuid"
+                    },
+                    "must_change_password": {
+                      "type": "boolean"
                     }
                   },
                   "additionalProperties": false,
                   "required": [
                     "principal_id",
-                    "tenant_id"
+                    "tenant_id",
+                    "must_change_password"
                   ]
                 }
               }
@@ -595,10 +602,10 @@
     "/me": {
       "get": {
         "operationId": "getMe",
-        "summary": "The signed-in person's profile (login only when they have a password account in the selected tenant)",
+        "summary": "The signed-in person's profile (login and must_change_password only when they have a password account in the selected tenant)",
         "responses": {
           "200": {
-            "description": "The signed-in person's profile (login only when they have a password account in the selected tenant)",
+            "description": "The signed-in person's profile (login and must_change_password only when they have a password account in the selected tenant)",
             "content": {
               "application/json": {
                 "schema": {
@@ -1106,10 +1113,10 @@
       },
       "post": {
         "operationId": "createUser",
-        "summary": "Create a password account and membership; returns a one-time setup token (shown once) for the person to choose their password via /auth/password/reset",
+        "summary": "Create a password account and membership. Give initial_password (typed) or generate_password:true for a temporary password the person must change at first sign-in (a generated one is returned once as generated_password); give neither to receive a one-time setup_token link instead. 409 error.reason 'login_taken'",
         "responses": {
           "201": {
-            "description": "Create a password account and membership; returns a one-time setup token (shown once) for the person to choose their password via /auth/password/reset",
+            "description": "Create a password account and membership. Give initial_password (typed) or generate_password:true for a temporary password the person must change at first sign-in (a generated one is returned once as generated_password); give neither to receive a one-time setup_token link instead. 409 error.reason 'login_taken'",
             "content": {
               "application/json": {
                 "schema": {
@@ -1125,11 +1132,17 @@
                     "role": {
                       "type": "string"
                     },
+                    "must_change_password": {
+                      "type": "boolean"
+                    },
                     "setup_token": {
                       "type": "string"
                     },
                     "expires_in_secs": {
                       "type": "integer"
+                    },
+                    "generated_password": {
+                      "type": "string"
                     }
                   },
                   "additionalProperties": false,
@@ -1137,8 +1150,7 @@
                     "principal_id",
                     "login",
                     "role",
-                    "setup_token",
-                    "expires_in_secs"
+                    "must_change_password"
                   ]
                 }
               }
@@ -1230,6 +1242,12 @@
                   },
                   "setup_lifetime_secs": {
                     "type": "integer"
+                  },
+                  "initial_password": {
+                    "type": "string"
+                  },
+                  "generate_password": {
+                    "type": "boolean"
                   }
                 },
                 "additionalProperties": false,
@@ -1659,6 +1677,253 @@
           }
         }
       }
+    },
+    "/tenants/{tenant}/users/{principal}/password": {
+      "post": {
+        "operationId": "setUserPassword",
+        "summary": "Set a temporary password for a person ranked below the caller (never an owner, a peer or yourself): give password or generate:true (returned once); the person must change it at next sign-in, their sessions end, audited without the value",
+        "responses": {
+          "200": {
+            "description": "Set a temporary password for a person ranked below the caller (never an owner, a peer or yourself): give password or generate:true (returned once); the person must change it at next sign-in, their sessions end, audited without the value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "must_change_password": {
+                      "type": "boolean"
+                    },
+                    "generated_password": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "must_change_password"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-required-permission": "member.manage",
+        "x-auth": "member.manage",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "principal",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "password": {
+                    "type": "string"
+                  },
+                  "generate": {
+                    "type": "boolean"
+                  }
+                },
+                "additionalProperties": false,
+                "required": []
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tenants/{tenant}/teams/{team}/invitations": {
+      "post": {
+        "operationId": "createTeamInvitation",
+        "summary": "Create a team invitation link. email is optional: without it anyone holding the link can accept it by choosing a login name and password (POST /auth/password/signup); with it the address is only noted. The token is returned once",
+        "responses": {
+          "201": {
+            "description": "Create a team invitation link. email is optional: without it anyone holding the link can accept it by choosing a login name and password (POST /auth/password/signup); with it the address is only noted. The token is returned once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": {
+                      "type": "string",
+                      "format": "uuid"
+                    },
+                    "token": {
+                      "type": "string"
+                    }
+                  },
+                  "additionalProperties": false,
+                  "required": [
+                    "id",
+                    "token"
+                  ]
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "sessionCookie": []
+          }
+        ],
+        "x-required-permission": "team.manage",
+        "x-auth": "team.manage",
+        "parameters": [
+          {
+            "name": "tenant",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "team",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string"
+                  },
+                  "role": {
+                    "type": "string"
+                  },
+                  "expires_in_secs": {
+                    "type": "integer"
+                  }
+                },
+                "additionalProperties": false,
+                "required": [
+                  "role"
+                ]
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1752,6 +2017,9 @@
                 "type": "null"
               }
             ]
+          },
+          "must_change_password": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false,
@@ -1820,6 +2088,9 @@
           },
           "locked": {
             "type": "boolean"
+          },
+          "must_change_password": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false,
@@ -1830,7 +2101,8 @@
           "role",
           "member_state",
           "state",
-          "locked"
+          "locked",
+          "must_change_password"
         ]
       }
     },
