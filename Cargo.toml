@@ -50,6 +50,9 @@ tokio = { version = "1", features = ["net", "rt", "time"] }
 # S4 API (A1): HTTP API server and middleware (MIT).
 axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "matched-path", "query", "tokio", "ws"] }
 tower = { version = "0.5", default-features = false, features = ["util"] }
+# S4-001: OpenID Connect discovery, PKCE and ID-token validation (MIT). Default features off: its
+# HTTP client is our own reqwest 0.13 adapter over rustls/ring (crates/cloud-auth/src/oidc_http.rs).
+openidconnect = { version = "4", default-features = false }
 
 # rendering / formats
 tiny-skia = "0.12"

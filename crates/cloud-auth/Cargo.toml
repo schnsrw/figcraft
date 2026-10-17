@@ -6,5 +6,29 @@ license.workspace = true
 publish = false
 description = "Authentication and authorization adapters for FigCraft Cloud"
 
+[dependencies]
+figcraft-cloud-domain = { path = "../cloud-domain" }
+# S4-001: the OIDC login flow records attempts and resolves identities through the storage
+# repositories (documented same-layer edge in xtask/src/layers.rs).
+figcraft-cloud-storage = { path = "../cloud-storage" }
+openidconnect = { workspace = true }
+reqwest = { workspace = true }
+rustls = { version = "0.23", default-features = false, features = ["std", "ring", "tls12", "logging"] }
+webpki-roots = "1"
+url = "2"
+sqlx = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+# Already built for openidconnect: the ID-token verifier's clock is a chrono time.
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json", "form"] }
+rsa = { version = "0.9", features = ["sha2", "getrandom"] }
+ring = "0.17"
+
 [lints]
 workspace = true

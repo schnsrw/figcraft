@@ -84,12 +84,14 @@ pub fn check(root: &std::path::Path) -> bool {
 fn same_layer_ok(from: &str, to: &str) -> bool {
     // Within L0: color uses geom types; within L2: text/layout/pathops/collab are independent;
     // within L6 the MCP server joins live sessions through collab-net; within L8 the cloud relay
-    // commits accepted batches through the storage adapter before confirming them.
+    // commits accepted batches through the storage adapter before confirming them, and the auth
+    // adapter records OIDC login attempts and resolves identities through its repositories.
     matches!(
         (from, to),
         ("figcraft-color", "figcraft-geom")
             | ("figcraft-render", "figcraft-format")
             | ("figcraft-mcp", "figcraft-collab-net")
             | ("figcraft-cloud-relay", "figcraft-cloud-storage")
+            | ("figcraft-cloud-auth", "figcraft-cloud-storage")
     )
 }
