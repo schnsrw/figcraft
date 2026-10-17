@@ -8,7 +8,9 @@ use figcraft_cloud_domain::{TenantId, Uuid};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::embed_tokens::{EmbedTokenStoreError, consume_embed_jti, sweep_embed_jtis};
 use figcraft_cloud_storage::host_mappings::{MappingKind, map_external_resource};
-use figcraft_cloud_storage::host_systems::{HostRole, KeyAlgorithm, NewHostKey, NewHostSystem, add_host_key, register_host_system, set_host_enabled};
+use figcraft_cloud_storage::host_systems::{
+    HostRole, KeyAlgorithm, NewHostKey, NewHostSystem, add_host_key, register_host_system, retire_host_key, set_host_enabled,
+};
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::{Value, json};
@@ -318,6 +320,97 @@ async fn a_token_cannot_reach_unmapped_or_foreign_resources() -> TestResult {
         .await?;
     tx.commit().await?;
     assert_eq!(exchange_embed_token(&pool, &token(&host, &jti(), |_| {}), now()).await.err(), Some(boundary));
+    Ok(())
+}
+
+// ---- S6-005: key rotation and issuer disable ----
+
+/// A token signed at time `t` with an arbitrary key and kid.
+fn token_at(host: &Host, key: &Ed25519KeyPair, kid: &str, t: i64) -> String {
+    let claims = json!({"iss": host.issuer, "aud": "figcraft", "sub": "user-1", "jti": jti(), "exp": t + 120, "nbf": t - 5, "iat": t - 5,
+        "tenant": "t1", "workspace": "w1", "document": "d1", "role": "viewer"});
+    let input = format!("{}.{}", b64(&json!({"alg": "EdDSA", "kid": kid})), b64(&claims));
+    format!("{input}.{}", URL_SAFE_NO_PAD.encode(key.sign(input.as_bytes()).as_ref()))
+}
+
+fn new_key() -> TestResult<Ed25519KeyPair> {
+    let rng = SystemRandom::new();
+    Ok(Ed25519KeyPair::from_pkcs8(Ed25519KeyPair::generate_pkcs8(&rng).map_err(|_| "keygen")?.as_ref()).map_err(|_| "pkcs8")?)
+}
+
+#[tokio::test]
+async fn keys_rotate_with_overlap_then_the_old_key_stops_verifying() -> TestResult {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let host = host(&pool).await?;
+    let t0 = now();
+    let refused_key = EmbedError::Refused(Refusal::UnknownKey);
+
+    // Rotation: the new key becomes valid at t0 + 1000; the old key (k1) is limited to t0 + 2000.
+    let next = new_key()?;
+    let mut tx = begin_tenant_transaction(&pool, host.tenant).await.map_err(|e| format!("{e:?}"))?;
+    sqlx::query("UPDATE host_system_keys SET expires_at = $2 WHERE tenant_id = $1::uuid AND kid = 'k1'")
+        .bind(host.tenant.to_string())
+        .bind(t0 + 2_000)
+        .execute(tx.connection())
+        .await?;
+    add_host_key(
+        &mut tx,
+        "host-a",
+        &NewHostKey {
+            kid: "k2".into(),
+            alg: KeyAlgorithm::EdDsa,
+            public_key: next.public_key().as_ref().to_vec(),
+            not_before: t0 + 1_000,
+            expires_at: None,
+        },
+    )
+    .await?;
+    tx.commit().await?;
+
+    // Before the new key's start only the old key works.
+    assert_eq!(exchange_embed_token(&pool, &token_at(&host, &next, "k2", t0), t0).await.err(), Some(refused_key));
+    exchange_embed_token(&pool, &token_at(&host, &host.key, "k1", t0), t0).await?;
+    // During the overlap both verify.
+    exchange_embed_token(&pool, &token_at(&host, &host.key, "k1", t0 + 1_500), t0 + 1_500).await?;
+    exchange_embed_token(&pool, &token_at(&host, &next, "k2", t0 + 1_500), t0 + 1_500).await?;
+    // After the old key's expiry only the new key works.
+    assert_eq!(exchange_embed_token(&pool, &token_at(&host, &host.key, "k1", t0 + 2_000), t0 + 2_000).await.err(), Some(refused_key));
+    exchange_embed_token(&pool, &token_at(&host, &next, "k2", t0 + 2_000), t0 + 2_000).await?;
+
+    // Retiring a key refuses its tokens immediately, ahead of any expiry.
+    let mut tx = begin_tenant_transaction(&pool, host.tenant).await.map_err(|e| format!("{e:?}"))?;
+    assert!(retire_host_key(&mut tx, "host-a", "k2", t0 + 2_100).await?);
+    tx.commit().await?;
+    exchange_embed_token(&pool, &token_at(&host, &next, "k2", t0 + 2_050), t0 + 2_050).await?;
+    assert_eq!(exchange_embed_token(&pool, &token_at(&host, &next, "k2", t0 + 2_100), t0 + 2_100).await.err(), Some(refused_key));
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabling_an_issuer_refuses_its_tokens_immediately_and_enabling_restores_them() -> TestResult {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let host = host(&pool).await?;
+    let unused = token(&host, &jti(), |_| {});
+    let issuer_gone = EmbedError::Refused(Refusal::UnknownIssuer);
+
+    let mut tx = begin_tenant_transaction(&pool, host.tenant).await.map_err(|e| format!("{e:?}"))?;
+    assert!(set_host_enabled(&mut tx, "host-a", false).await?);
+    tx.commit().await?;
+    // A token minted before the disable is refused now, and so is a fresh one.
+    assert_eq!(exchange_embed_token(&pool, &unused, now()).await.err(), Some(issuer_gone));
+    assert_eq!(exchange_embed_token(&pool, &token(&host, &jti(), |_| {}), now()).await.err(), Some(issuer_gone));
+
+    // The refused token was not spent: once the host is enabled again it exchanges once.
+    let mut tx = begin_tenant_transaction(&pool, host.tenant).await.map_err(|e| format!("{e:?}"))?;
+    assert!(set_host_enabled(&mut tx, "host-a", true).await?);
+    tx.commit().await?;
+    exchange_embed_token(&pool, &unused, now()).await?;
+
+    // A suspended tenant behaves like a disabled issuer.
+    let mut tx = begin_tenant_transaction(&pool, host.tenant).await.map_err(|e| format!("{e:?}"))?;
+    sqlx::query("UPDATE tenants SET state = 'suspended' WHERE id = $1::uuid").bind(host.tenant.to_string()).execute(tx.connection()).await?;
+    tx.commit().await?;
+    assert_eq!(exchange_embed_token(&pool, &token(&host, &jti(), |_| {}), now()).await.err(), Some(issuer_gone));
     Ok(())
 }
 

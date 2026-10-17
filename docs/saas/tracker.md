@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (20/25); S6 in progress (4/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (20/25); S6 in progress (5/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 20 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 4 / 31 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 5 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2418,7 +2418,8 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   Evidence: migration `20261018000002_embed_token_uses.sql`, `crates/cloud-auth/src/embed_token.rs` (pure `verify_embed_token`, `exchange_embed_token`), `crates/cloud-storage/src/embed_tokens.rs`, tests `embed_token` unit tests (6) and `crates/cloud-auth/tests/embed_exchange.rs` (4, live PostgreSQL). Covered: valid EdDSA and ES256 tokens; wrong issuer, audience, expired, not-yet-valid, over-long lifetime, bad or missing claims, bad signature, tampered claims, unknown or missing kid, alg none/HS256/RS256/case variants and key-algorithm mismatch, crit headers, oversize and malformed tokens; key not-before, expiry and retirement; replay refused; ten concurrent exchanges of one token give exactly one success; refused tokens do not burn their jti; disabled host refused; expired jti rows swept; RLS isolation. All refusals share the public message 'embed token refused'. Algorithms are EdDSA and ES256 only (no HMAC, no RSA); clock skew is a fixed 30 s and token lifetime at most 300 s. Not done: the role ceiling and mapped boundary (S6-004); the HTTP exchange endpoint and session minting (later S6 tasks); no per-host rate limit on exchanges yet.
 - [x] **S6-004** Enforce host maximum role and mapped resource boundary.
   Evidence: `verify_embed_token` refuses a role above the host's registered maximum (unit test `role_never_exceeds_the_hosts_maximum`), and `exchange_embed_token` resolves the token's external tenant, workspace, document and subject through that host's mappings (`host_mappings::embed_boundary_holds`) before the jti is consumed. Live tests in `crates/cloud-auth/tests/embed_exchange.rs`: role escalation refused for viewer, commenter and editor ceilings without spending the jti, unknown role names refused; unmapped tenant, workspace, document and subject, raw internal UUIDs, a document in another workspace, an archived document, a suspended member and a tenant mapping pointing at another tenant all give the single Boundary refusal; two tenants with identical system and external ids resolve to their own rows only, and a cross-tenant issuer forgery fails the signature. Not done: the effective role is not yet intersected with the principal's own tenant/document grants (that belongs to the session minting step); principals are not auto-provisioned.
-- [ ] **S6-005** Add key rotation and issuer-disable behavior.
+- [x] **S6-005** Add key rotation and issuer-disable behavior.
+  Evidence: live tests in `crates/cloud-auth/tests/embed_exchange.rs`: rotation with overlap (new key refused before its not-before, both keys verify during the overlap, the old key refused from its expiry, the new key still works); retiring a key refuses its tokens from the retire instant; disabling a host refuses both unused and fresh tokens immediately (the issuer lookup hides disabled hosts, so no key is read) and re-enabling restores an unspent token exactly once; a suspended tenant behaves like a disabled issuer. Repository behaviour (overlap, retire, live-key cap of 8) is in `tests/host_systems.rs`. Not done: no admin API or UI to rotate keys (S6-012); no audit event is written for key changes or disables yet; verification keys are read per exchange with no cache, so there is no stale-key window but also no caching.
 
 ### Embed behavior
 
@@ -2720,3 +2721,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-002: host-managed external id mappings (tenant, workspace, project, document, principal) that require a registered host and a same-tenant internal resource, with bounds and cross-tenant refusal. S6 reaches 2/31. |
 | 2026-10-18 | S6-003: embed-token validation (EdDSA/ES256 against registered rotating keys, issuer, audience, expiry, not-before, skew, lifetime and size bounds) and atomic one-use jti consumption in PostgreSQL (schema 20261018000002). S6 reaches 3/31. |
 | 2026-10-18 | S6-004: embed exchange enforces the host's maximum role and resolves tenant, workspace, document and subject only through that host's mappings inside its own tenant (active document in the mapped workspace, active member). S6 reaches 4/31. |
+| 2026-10-18 | S6-005: key rotation (overlap, expiry, retirement) and issuer disable verified end to end through the embed exchange against PostgreSQL. S6 reaches 5/31 and the first S6 block (host registration and tokens) is complete except the unstarted embed behaviour tasks. |
