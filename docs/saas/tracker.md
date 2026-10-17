@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (10/57) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (11/57) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 10 / 57 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 11 / 57 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2495,8 +2495,10 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 - [ ] **S6-020** Build React/TypeScript navigation for recents, projects, libraries, search,
   notifications and settings inside `webapp/`.
-- [ ] **S6-021** Implement stable `/workspace/{workspace_id}/file/{document_id}` routing and deep
+  Progress (not complete): sign-in, first-run and organisation screens; workspace home with workspaces, projects and files (create, rename, archive, restore), recents (this browser only), people (members, roles, teams), invitations and a share dialog (`webapp/saas/src/screens/*`, docs/saas/web-workspace.md). Libraries, search, notifications and settings are not built, so this stays open.
+- [x] **S6-021** Implement stable `/workspace/{workspace_id}/file/{document_id}` routing and deep
   links.
+  Evidence: `webapp/saas/src/router.tsx` (stable URLs `/`, `/workspace/{id}`, `/workspace/{id}/file/{id}`, `/people`, `/invite`; UUID-only ids, anything else is the not-found page without an API call), `api/client.ts` and `session.tsx` (typed client; 401, 403 `bootstrap_required`, 503 and network states), `screens/file.tsx` (the file page: role, Open in editor from `GET /documents/{id}/collab-link`, Share). Deep links survive sign-in through the server-validated `return_to` (only a same-origin absolute path is sent; open-redirect shapes fall back to `/`); an invitation token is parked in session storage across the round trip and stripped from the address bar. Tests: `router.test.tsx`, `App.test.tsx`, `screens/workspace.test.tsx` (96 vitest tests in `webapp/saas`, `npm run check` green). Not done: the editor does not mount inside the page yet (Open in editor navigates to `/edit/#join=…`, S6-022); no screen-reader audit (S6-025); the full browser flow through a real identity provider was not exercised (see docs/saas/web-workspace.md).
 - [ ] **S6-022** Implement the typed editor mount, open, close, local-change, remote-change,
   connection-state, selection and export bridge.
 - [ ] **S6-023** Keep snapshots and collaboration batches opaque to TypeScript and add tests that
@@ -2891,3 +2893,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | Core slice follow-up closed: a drag is now visible to others while it moves. The mover's engine sends the dragged layers' boxes as a throttled `drag` signal (about 20 a second, repeated while held, an empty one on drop); everyone else sees ghosts at the live position with "<name> is moving" until the drop commits the real batch. No protocol change (a new signal kind; the server relays it to signal readers and drops it from viewers). Tested in collab, engine, the headless UI and the live relay matrix. |
 | 2026-10-18 | S6 scope: built-in accounts, edit attribution and history added as S6-032 to S6-043 (S6 is now 43 tasks): local accounts beside OIDC, a person-versus-team attribution record, a history API, named versions with restore, and relay-authenticated collaborator names. Requested by the owner; the design docs already allowed local accounts and required restore-without-losing-history. |
 | 2026-10-18 | S6 scope: the platform layer (operator realm, platform API, workspace lifecycle, plans, provisioning, self-hosted bootstrap) and the organisation hierarchy rules (project level, authorization matrix, delegation, policies, SSO sync) added as S6-044 to S6-057 (S6 is now 57 tasks; the terminology note in that section maps the product's workspace to the tenants table). |
+| 2026-10-18 | S6-021 and part of S6-020: the browser workspace. Typed API client and session states, stable routes with deep links through sign-in, first-run (setup token) and sign-in problem screens, workspace home with files, people, invitations and a share dialog; additive `can` summaries on workspace, project and document reads. First TypeScript tests with jsdom and Testing Library (96). S6-020 stays open (libraries, search, notifications, settings). |
