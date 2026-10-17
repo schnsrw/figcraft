@@ -17,3 +17,8 @@ INSERT INTO public.workspaces (id, tenant_id, name) VALUES
 INSERT INTO public.projects (id, tenant_id, workspace_id, name) VALUES
     ('aa200000-0000-4000-8000-000000000001', 'aa000000-0000-4000-8000-000000000001', 'aa100000-0000-4000-8000-000000000001', 'Export project'),
     ('aa200000-0000-4000-8000-000000000002', 'aa000000-0000-4000-8000-000000000002', 'aa100000-0000-4000-8000-000000000002', 'Export other project');
+-- S4-013: completing an export re-checks that the requester may still export the document, so
+-- each probe member is a viewer of its tenant's export workspace.
+INSERT INTO public.workspace_members (tenant_id, workspace_id, principal_id, role) VALUES
+    ('aa000000-0000-4000-8000-000000000001', 'aa100000-0000-4000-8000-000000000001', 'aa000000-0000-4000-8000-000000000009', 'viewer'),
+    ('aa000000-0000-4000-8000-000000000002', 'aa100000-0000-4000-8000-000000000002', 'aa000000-0000-4000-8000-00000000000a', 'viewer');

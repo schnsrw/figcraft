@@ -3,7 +3,10 @@
 //!
 //! - **Joining.** A hello's `file` is the cloud document's UUID and its `token` a share-link secret
 //!   ([`figcraft_cloud_storage::share_links`]). The link must be live and name that document; an
-//!   editor link joins with [`Access::Edit`], a viewer link with [`Access::View`]. Every refusal
+//!   editor link joins with [`Access::Edit`], a viewer link with [`Access::View`]. A signed-in
+//!   member joins with a `member.<tenant>.<session token>` token
+//!   ([`figcraft_cloud_storage::revocation::admit_member`]): the session must be live and the
+//!   member's effective role on the document at least `viewer` (`editor` to edit). Every refusal
 //!   reads the same.
 //! - **Opening.** A document that isn't open is recovered like [`DurableRoom::recover`]: the
 //!   sequencer is claimed (fencing every earlier owner), the latest verified snapshot is restored
@@ -25,7 +28,11 @@
 //!   (told [`STOPPED`](figcraft_collab_net::hub::STOPPED)) and a new hello with it is refused at
 //!   [`Backend::admit`]. The backend re-checks the link before acting, so the key can't disconnect
 //!   anyone whose link still works. A revoked link, archived document or suspended tenant therefore closes its
-//!   sessions within one interval plus one database round trip.
+//!   sessions within one interval plus one database round trip. Member admissions are watched the
+//!   same way, with the admitted principal, session and access recorded: the sweep re-resolves
+//!   each member's effective role ([`dead_member_admissions`]) and disconnects a member whose
+//!   session was revoked, who was removed from the tenant, a team or a grant, or whose editor
+//!   access was downgraded. Each member connection's revocation key is `session:<session id>`.
 //!
 //! The hub calls the backend on its own thread and the backend is synchronous, so the backend owns
 //! a small tokio runtime and blocks on each storage call, every one bounded by a timeout.
@@ -43,6 +50,10 @@ use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::document_snapshots::store_snapshot;
 use figcraft_cloud_storage::events::{MAX_APPEND_BATCHES, append_events};
 use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
+use figcraft_cloud_storage::revocation::{
+    MAX_CHECKED_MEMBERS, MemberAdmission, RevocationError, admit_member, dead_member_admissions, parse_member_token,
+};
+use figcraft_cloud_storage::sessions::SessionLimits;
 use figcraft_cloud_storage::share_links::{MAX_CHECKED_LINKS, ShareRole, dead_share_links, resolve_share_link};
 use figcraft_collab::message::{Access, Admin, AdminReply};
 use figcraft_collab::{Accepted, Document, Journal, Limits, Server};
@@ -73,6 +84,8 @@ pub const REVOCATION_INTERVAL: Duration = Duration::from_secs(5);
 const MIN_REVOCATION_INTERVAL: Duration = Duration::from_millis(50);
 /// Revocations sent to the hub on one managing connection.
 const REVOKES_PER_REQUEST: usize = 64;
+/// The revocation key prefix of a member connection (followed by its session id).
+pub const MEMBER_LINK_PREFIX: &str = "session:";
 /// What a managing connection without this process's sweep key is told.
 const NOT_MANAGED: &str = "this relay is managed by FigCraft Cloud: there is nothing to manage here";
 
@@ -128,8 +141,28 @@ pub fn base_document() -> Document {
     Document::new(BASE_NAME)
 }
 
-/// Each watched file's tenant and the links admitted to it.
-type WatchedFiles = HashMap<String, (TenantId, HashSet<Uuid>)>;
+/// One watched file: its tenant, the share links and the member sessions admitted to it.
+struct WatchedFile {
+    tenant: TenantId,
+    links: HashSet<Uuid>,
+    members: HashMap<Uuid, MemberAdmission>,
+}
+
+impl WatchedFile {
+    fn new(tenant: TenantId) -> Self {
+        Self { tenant, links: HashSet::new(), members: HashMap::new() }
+    }
+
+    fn len(&self) -> usize {
+        self.links.len() + self.members.len()
+    }
+}
+
+type WatchedFiles = HashMap<String, WatchedFile>;
+
+fn member_link(session: Uuid) -> String {
+    format!("{MEMBER_LINK_PREFIX}{session}")
+}
 
 /// The links admitted to each open document, shared between a [`CloudBackend`] and its
 /// [`RevocationSweeper`], and the key the sweeper manages the hub with (never printed).
@@ -159,7 +192,7 @@ impl RevocationWatch {
     /// Links watched now.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.lock().values().map(|(_, links)| links.len()).sum()
+        self.lock().values().map(WatchedFile::len).sum()
     }
 
     #[must_use]
@@ -167,23 +200,45 @@ impl RevocationWatch {
         self.len() == 0
     }
 
+    /// The watched entry for `file` in `tenant` (a file id names one document in one tenant; a
+    /// different tenant starts over rather than mixing tenants).
+    fn entry<'a>(files: &'a mut WatchedFiles, file: &str, tenant: TenantId) -> &'a mut WatchedFile {
+        let watched = files.entry(file.to_string()).or_insert_with(|| WatchedFile::new(tenant));
+        if watched.tenant != tenant {
+            *watched = WatchedFile::new(tenant);
+        }
+        watched
+    }
+
     /// Watch `link` for `file`; false when the file already has
-    /// [`MAX_WATCHED_LINKS_PER_FILE`] other links watched.
+    /// [`MAX_WATCHED_LINKS_PER_FILE`] other links and members watched.
     fn watch(&self, file: &str, tenant: TenantId, link: Uuid) -> bool {
         let mut files = self.lock();
-        let (owner, links) = files.entry(file.to_string()).or_insert_with(|| (tenant, HashSet::new()));
-        if *owner != tenant {
-            // A file id names one document in one tenant; start over rather than mix tenants.
-            *owner = tenant;
-            links.clear();
-        }
-        if links.contains(&link) {
+        let watched = Self::entry(&mut files, file, tenant);
+        if watched.links.contains(&link) {
             return true;
         }
-        if links.len() >= MAX_WATCHED_LINKS_PER_FILE {
+        if watched.len() >= MAX_WATCHED_LINKS_PER_FILE {
             return false;
         }
-        links.insert(link);
+        watched.links.insert(link);
+        true
+    }
+
+    /// Watch a member admission for `file` (keyed by session); false past the per-file cap.
+    fn watch_member(&self, file: &str, admission: MemberAdmission) -> bool {
+        let mut files = self.lock();
+        let watched = Self::entry(&mut files, file, admission.tenant);
+        let full = watched.len() >= MAX_WATCHED_LINKS_PER_FILE;
+        match watched.members.get_mut(&admission.session) {
+            // One revocation key per session: keep the widest access admitted, so a downgrade
+            // still disconnects the connection that joined with edit access.
+            Some(existing) => existing.edit |= admission.edit,
+            None if full => return false,
+            None => {
+                watched.members.insert(admission.session, admission);
+            }
+        }
         true
     }
 
@@ -193,12 +248,31 @@ impl RevocationWatch {
 
     fn unwatch(&self, file: &str, link: Uuid) {
         let mut files = self.lock();
-        if let Some((_, links)) = files.get_mut(file) {
-            links.remove(&link);
-            if links.is_empty() {
+        if let Some(watched) = files.get_mut(file) {
+            watched.links.remove(&link);
+            if watched.len() == 0 {
                 files.remove(file);
             }
         }
+    }
+
+    fn unwatch_member(&self, file: &str, session: Uuid) {
+        let mut files = self.lock();
+        if let Some(watched) = files.get_mut(file) {
+            watched.members.remove(&session);
+            if watched.len() == 0 {
+                files.remove(file);
+            }
+        }
+    }
+
+    fn member(&self, file: &str, session: Uuid) -> Option<MemberAdmission> {
+        self.lock().get(file).and_then(|watched| watched.members.get(&session).copied())
+    }
+
+    /// Every watched `(file, member admission)`.
+    fn members(&self) -> Vec<(String, MemberAdmission)> {
+        self.lock().iter().flat_map(|(file, watched)| watched.members.values().map(|admission| (file.clone(), *admission))).collect()
     }
 
     fn retain(&self, keep: impl Fn(&str) -> bool) {
@@ -206,12 +280,12 @@ impl RevocationWatch {
     }
 
     fn tenant(&self, file: &str) -> Option<TenantId> {
-        self.lock().get(file).map(|(tenant, _)| *tenant)
+        self.lock().get(file).map(|watched| watched.tenant)
     }
 
     /// Every watched `(file, tenant, link)`.
     fn links(&self) -> Vec<(String, TenantId, Uuid)> {
-        self.lock().iter().flat_map(|(file, (tenant, links))| links.iter().map(|link| (file.clone(), *tenant, *link))).collect()
+        self.lock().iter().flat_map(|(file, watched)| watched.links.iter().map(|link| (file.clone(), watched.tenant, *link))).collect()
     }
 
     /// Whether `key` is the sweep key (compared in constant time).
@@ -221,11 +295,12 @@ impl RevocationWatch {
     }
 }
 
-/// Who may open a document, from the link a hello was admitted with.
+/// Who may open a document, from the link or session a hello was admitted with.
 #[derive(Clone, Copy, Debug)]
 struct Admitted {
     tenant: TenantId,
-    /// Whom accepted batches are recorded as made by (the link's creator until people sign in).
+    /// Whom accepted batches are recorded as made by: the signed-in member, or a share link's
+    /// creator.
     actor: PrincipalId,
 }
 
@@ -394,11 +469,46 @@ impl CloudBackend {
     }
 }
 
+impl CloudBackend {
+    /// Forget admissions of documents that aren't open when the admitted map is full.
+    fn make_room(&mut self, file: &str) {
+        if self.admitted.len() >= MAX_ADMITTED && !self.admitted.contains_key(file) {
+            let open = &self.open;
+            self.admitted.retain(|file, _| open.contains_key(file));
+            self.watch.retain(|file| open.contains_key(file));
+        }
+    }
+
+    /// Admit a signed-in member (a `member.<tenant>.<session>` hello token).
+    fn admit_member(&mut self, file: &str, tenant: TenantId, session: &str, document: CloudDocumentId) -> Result<Admission, String> {
+        let pool = &self.pool;
+        let admission = match self.block(admit_member(pool, tenant, session, document, SessionLimits::default())) {
+            Some(Ok(admission)) => admission,
+            Some(Err(RevocationError::Refused)) => return Err(REFUSED.into()),
+            Some(Err(_)) | None => {
+                log::error!("document {file}: a member couldn't be checked (storage unavailable)");
+                return Err(UNAVAILABLE.into());
+            }
+        };
+        self.make_room(file);
+        if !self.watch.watch_member(file, admission) {
+            log::warn!("document {file}: too many links and members in use to watch another; hello refused");
+            return Err(UNAVAILABLE.into());
+        }
+        self.admitted.insert(file.to_string(), Admitted { tenant: admission.tenant, actor: admission.principal });
+        let access = if admission.edit { Access::Edit } else { Access::View };
+        Ok(Admission { access, link: Some(member_link(admission.session)) })
+    }
+}
+
 impl Backend for CloudBackend {
     fn admit(&mut self, file: &str, token: &str) -> Result<Admission, String> {
         let Ok(document) = file.parse::<CloudDocumentId>() else {
             return Err(REFUSED.into());
         };
+        if let Some((tenant, session)) = parse_member_token(token) {
+            return self.admit_member(file, tenant, session, document);
+        }
         let pool = &self.pool;
         let link = match self.block(resolve_share_link(pool, token)) {
             Some(Ok(link)) => link,
@@ -411,11 +521,7 @@ impl Backend for CloudBackend {
         if link.document_id != document {
             return Err(REFUSED.into());
         }
-        if self.admitted.len() >= MAX_ADMITTED && !self.admitted.contains_key(file) {
-            let open = &self.open;
-            self.admitted.retain(|file, _| open.contains_key(file));
-            self.watch.retain(|file| open.contains_key(file));
-        }
+        self.make_room(file);
         if !self.watch.watch(file, link.tenant_id, link.id) {
             log::warn!("document {file}: too many share links in use to watch another; hello refused");
             return Err(UNAVAILABLE.into());
@@ -508,12 +614,28 @@ impl Backend for CloudBackend {
         if self.watch.opens(key) { Ok(()) } else { Err(NOT_MANAGED.into()) }
     }
 
-    /// Only revocations, and only of links that really no longer work (checked again here).
+    /// Only revocations, and only of links (or member sessions) that really no longer work
+    /// (checked again here).
     fn admin(&mut self, req: Admin, _open: &dyn Fn(&str) -> Option<OpenFile>) -> Handled {
         let failed = |reason: &str| Handled::from(AdminReply::Failed { reason: reason.into() });
         let Admin::Revoke { file, link } = req else {
             return failed("nothing to manage here");
         };
+        if let Some(session) = link.strip_prefix(MEMBER_LINK_PREFIX) {
+            let Some(admission) = session.parse::<Uuid>().ok().and_then(|session| self.watch.member(&file, session)) else {
+                return failed("no such member in use");
+            };
+            let pool = &self.pool;
+            return match self.block(dead_member_admissions(pool, &[admission])) {
+                Some(Ok(dead)) if !dead.is_empty() => {
+                    self.watch.unwatch_member(&file, admission.session);
+                    log::info!("document {file}: a member lost access (session {}); disconnecting them", admission.session);
+                    Handled { reply: AdminReply::Done, revoked: Some((file, link)), removed: None, blocked: None }
+                }
+                Some(Ok(_)) => failed("that member still has access"),
+                Some(Err(_)) | None => failed("the member couldn't be checked"),
+            };
+        }
         let (Ok(id), Some(tenant)) = (link.parse::<Uuid>(), self.watch.tenant(&file)) else {
             return failed("no such link in use");
         };
@@ -618,12 +740,34 @@ fn sweep(runtime: &tokio::runtime::Runtime, pool: &PgPool, watch: &RevocationWat
                 .map(|(file, _, link)| Admin::Revoke { file: file.clone(), link: link.to_string() }),
         );
     }
+    let members = watch.members();
+    for chunk in members.chunks(MAX_CHECKED_MEMBERS) {
+        let admissions: Vec<MemberAdmission> = chunk.iter().map(|(_, admission)| *admission).collect();
+        let dead = match runtime.block_on(async { tokio::time::timeout(timeout, dead_member_admissions(pool, &admissions)).await }) {
+            Ok(Ok(dead)) => dead,
+            Ok(Err(error)) => {
+                log::warn!("revocation sweep: members couldn't be checked ({error}); retrying next sweep");
+                break;
+            }
+            Err(_) => {
+                log::warn!("revocation sweep: checking members timed out; retrying next sweep");
+                break;
+            }
+        };
+        let dead: HashSet<MemberAdmission> = dead.into_iter().collect();
+        revokes.extend(
+            chunk
+                .iter()
+                .filter(|(_, admission)| dead.contains(admission))
+                .map(|(file, admission)| Admin::Revoke { file: file.clone(), link: member_link(admission.session) }),
+        );
+    }
     let limits = NetLimits::default();
     for requests in revokes.chunks(REVOKES_PER_REQUEST) {
         match figcraft_collab_net::manage::request(hub, &watch.key, requests.to_vec(), &limits, timeout) {
             Ok(replies) => {
                 let done = replies.iter().filter(|reply| matches!(reply, AdminReply::Done)).count();
-                log::info!("revocation sweep: {done} of {} dead share links disconnected", requests.len());
+                log::info!("revocation sweep: {done} of {} dead share links and members disconnected", requests.len());
             }
             Err(_) => log::warn!("revocation sweep: the hub couldn't be reached; retrying next sweep"),
         }

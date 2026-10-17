@@ -55,6 +55,7 @@ use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
 use sha2::{Digest, Sha256};
 
 use crate::TenantTransaction;
+use crate::job_authorization::{JobAuthorization, JobAuthorizationError, JobPermission, recheck_before_commit};
 use crate::object_metadata::{
     NewObject, ObjectKind, ObjectRecord, ObjectRepositoryError, Verification, get_object, keys, register_object, verify_object,
 };
@@ -241,6 +242,10 @@ pub enum ExportError {
     ObjectConflict,
     /// The stored bytes' read-back did not match what was written.
     VerificationFailed,
+    /// The requester lost `document.export` on the document since the export was requested
+    /// (S4-013): roll back, then [`fail_export`] with
+    /// [`AUTHORIZATION_REVOKED`](crate::job_authorization::AUTHORIZATION_REVOKED).
+    AuthorizationRevoked,
     /// A unique violation or a serialization failure; the caller may retry.
     Conflict,
     Constraint,
@@ -805,7 +810,10 @@ pub struct CompletedExport {
 /// ([`sanitize_filename`]) into the key `tenants/<tenant>/exports/<export>/<filename>`. The bytes
 /// are written, registered as an `export` object, verified by reading them back, referenced by the
 /// export, and the export becomes `succeeded` with its job. Only a `running` export completes;
-/// completing it twice is `InvalidState`. On any `Err` roll back: bytes already written under the
+/// completing it twice is `InvalidState`. Before anything is written the requester's access is
+/// re-checked ([`recheck_before_commit`], S4-013): a requester who lost `document.export` since
+/// the request gets `AuthorizationRevoked`, and the worker rolls back and calls [`fail_export`]
+/// with `authorization_revoked`. On any `Err` roll back: bytes already written under the
 /// export's own key are overwritten by a retry or reclaimed with the export prefix.
 pub async fn complete_export(
     transaction: &mut TenantTransaction<'_>,
@@ -822,6 +830,12 @@ pub async fn complete_export(
     if export.state != ExportState::Running {
         return Err(ExportError::InvalidState);
     }
+    // S4-013: the requester must still be allowed to export the document now, at commit time.
+    let job = JobAuthorization { requested_by: export.requested_by, document: export.document_id, permission: JobPermission::DocumentExport };
+    recheck_before_commit(transaction, &job).await.map_err(|error| match error {
+        JobAuthorizationError::Revoked => ExportError::AuthorizationRevoked,
+        JobAuthorizationError::Database => ExportError::Database,
+    })?;
     check_export_content(export.format, &bytes)?;
     let filename = sanitize_filename(filename, export.format);
     let object_key = export_key(transaction.tenant_id(), export.id, &filename).ok_or(ExportError::InvalidKey)?;
