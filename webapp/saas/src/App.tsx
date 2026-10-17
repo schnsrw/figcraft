@@ -12,6 +12,7 @@ import {
   UnsupportedScreen,
 } from "./screens/entry";
 import { BootstrapScreen } from "./screens/bootstrap";
+import { ResetScreen } from "./screens/reset";
 import { InvitedSignUp, SetupScreen, SignInScreen } from "./screens/signin";
 import { InviteScreen, captureInviteToken } from "./screens/invite";
 import { ReadyRoutes } from "./screens/routes";
@@ -128,6 +129,10 @@ function Body({ branding }: { branding: Branding }) {
     if (route.name === "invite") captureInviteToken();
   }, [route.name]);
 
+  // A password link works the same signed in or out.
+  if (route.name === "reset" && state.kind !== "loading")
+    return <ResetScreen />;
+
   switch (state.kind) {
     case "loading":
       return (
@@ -183,6 +188,7 @@ const TITLES: Record<string, string> = {
   invite: "Invitation",
   setup: "Set up",
   account: "Your account",
+  reset: "Choose a password",
   not_found: "Page not found",
 };
 

@@ -4,6 +4,7 @@ import { FileScreen } from "./file";
 import { HomeScreen } from "./home";
 import { InviteScreen } from "./invite";
 import { PeopleScreen } from "./people";
+import { ResetScreen } from "./reset";
 import { WorkspaceScreen } from "./workspace";
 
 /** The screens for a signed-in person acting in an organisation, chosen by the route. */
@@ -31,6 +32,8 @@ export function ReadyRoutes() {
       return <PeopleScreen />;
     case "invite":
       return <InviteScreen />;
+    case "reset":
+      return <ResetScreen />;
     case "account":
       return <AccountScreen />;
     case "setup":

@@ -161,7 +161,7 @@ describe("members", () => {
       );
     await openPeople(api);
     await userEvent.click(
-      await screen.findByRole("button", { name: "Suspend Bo Builder" }),
+      await screen.findByRole("button", { name: "Disable Bo Builder" }),
     );
     await waitFor(() =>
       expect(

@@ -57,10 +57,10 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
 - [ ] **TS-005** Teams and projects work as a team expects: a team owns projects, files inherit
   the team's access, members have roles, an admin adds people and a team lead (S6-052, the
   team-lead part of S6-055), and the screens for it exist.
-- [ ] **TS-006** The admin can run the team from the browser without the command line: invite by
+- [x] **TS-006** The admin can run the team from the browser without the command line: invite by
   link (copy-link flow, or by email once TS-012 lands), disable and re-enable a person, send a
   password-reset link, see who is in the workspace (S6-037 and its screens).
-  Progress (not complete): `/account` screen (`webapp/saas/src/screens/account.tsx`): profile name and palette colour, change password (current, new, repeat; policy sentence shown; says how many other sessions were signed out), own sessions with revoke and sign out everywhere else; the people page already has invite-by-link (copyable, shown once), suspend/reactivate and remove. Waiting for the admin API (S6-037): reset-password link, revoke another person's sessions, set an initial or new password, must-change-password state; and for the mail flag (TS-014).
+  Evidence: `webapp/saas/src/screens/people.tsx` (Add a person: name, login name, role, then a copyable one-time setup link; copyable team invitation link; per password account the login and lock state, Disable/Enable, Reset password link, Sign out everywhere; role change and remove with confirmation), `screens/reset.tsx` (`/reset#token=…`: choose a password from a setup or reset link, token removed from the address bar, one sentence for a used/expired/replaced link), `screens/account.tsx` (profile, colour, change password, own sessions), stable test ids in `docs/saas/web-workspace.md`; `admin.test.tsx` and `account.test.tsx` with a fake API (139 web tests, no database). Not done: setting an initial or new password directly and the must-change-password sign-in step (TS-013, API not published yet); the email options (TS-014); not run in a real browser against the stack (TS-003).
 - [ ] **TS-012** Email delivery, optional and off by default: one SMTP configuration for the
   deployment (host, port, TLS mode, credentials from secret files, from-address), sending
   invitations, password-reset links and a "your account was created" notice. Messages carry
@@ -3084,3 +3084,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | TS-002: password sign-in, first-run owner setup and invitation sign-up screens driven by the server's sign-in methods; DB-free tests, stable test ids. |
 | 2026-10-18 | S6-037: administrator-created accounts with one-time setup links, disable/enable that ends live sessions, single-use reset links and session revocation (schema 20261018000024). S6 reaches 21/58. |
 | 2026-10-18 | TS-006 (1/2): the account screen (profile, colour, change password, own sessions). 126 web tests. |
+| 2026-10-18 | TS-006: admin screens on People (add person with setup link, reset link, disable/enable, sign out everywhere), the /reset password page and the Account page. 139 web tests. |

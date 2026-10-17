@@ -43,6 +43,27 @@ export interface AcceptedInvitation {
   joined_tenant: boolean;
 }
 
+/** A password account in the workspace (`GET /tenants/{t}/users`). */
+export interface AccountUser {
+  principal_id: string;
+  login: string;
+  display_name: string;
+  role: string;
+  member_state: string;
+  /** `active` or `disabled`. */
+  state: string;
+  locked: boolean;
+}
+
+export interface CreatedUser {
+  principal_id: string;
+  login: string;
+  role: string;
+  /** Shown once; the person opens `/reset#token=…` with it to choose a password. */
+  setup_token: string;
+  expires_in_secs: number;
+}
+
 export interface Grant {
   principal_id?: string;
   team_id?: string;
@@ -96,6 +117,33 @@ export const people = {
   ) => client.patch<void>(`/tenants/${tenant}/members/${principal}`, change),
   removeMember: (client: ApiClient, tenant: string, principal: string) =>
     client.delete<void>(`/tenants/${tenant}/members/${principal}`),
+
+  users: (client: ApiClient, tenant: string) =>
+    loadAll<AccountUser>(client, `/tenants/${tenant}/users`),
+  createUser: (
+    client: ApiClient,
+    tenant: string,
+    user: { login: string; display_name: string; role: string },
+  ) => client.post<CreatedUser>(`/tenants/${tenant}/users`, user),
+  disableUser: (client: ApiClient, tenant: string, principal: string) =>
+    client.post<void>(`/tenants/${tenant}/users/${principal}/disable`),
+  enableUser: (client: ApiClient, tenant: string, principal: string) =>
+    client.post<void>(`/tenants/${tenant}/users/${principal}/enable`),
+  resetLink: (client: ApiClient, tenant: string, principal: string) =>
+    client.post<{
+      reset_token: string;
+      expires_in_secs: number;
+      purpose: string;
+    }>(`/tenants/${tenant}/users/${principal}/reset-link`),
+  revokeUserSessions: (client: ApiClient, tenant: string, principal: string) =>
+    client.post<{ revoked: number }>(
+      `/tenants/${tenant}/users/${principal}/revoke-sessions`,
+    ),
+  resetPassword: (client: ApiClient, token: string, newPassword: string) =>
+    client.post<{ tenant_id: string }>("/auth/password/reset", {
+      token,
+      new_password: newPassword,
+    }),
 
   teams: (client: ApiClient, tenant: string) =>
     loadAll<Team>(client, `/tenants/${tenant}/teams`),
@@ -244,4 +292,9 @@ export function shareEditorUrl(
 /** A readable invitation link for the person who was invited. The token stays in the fragment. */
 export function invitationLink(origin: string, token: string): string {
   return `${origin}/invite#token=${encodeURIComponent(token)}`;
+}
+
+/** The link an administrator hands to a person to choose a password. The token stays in the fragment. */
+export function resetLink(origin: string, token: string): string {
+  return `${origin}/reset#token=${encodeURIComponent(token)}`;
 }

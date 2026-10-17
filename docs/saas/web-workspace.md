@@ -54,6 +54,18 @@ Stable `data-testid`s for scripted runs: `signin-login`, `signin-password`, `sig
 `setup-confirm`, `setup-submit`, `invite-name`, `invite-password`, `invite-confirm`,
 `invite-submit`; every field also has a visible label.
 
+## Running the team from the browser (admins)
+
+On **People**, owners and admins can: add a person (name, login name, role) and get a one-time
+setup link; copy a team invitation link; see each password account's login and whether it is
+locked; disable and re-enable a person (live sessions end at once); issue a password-reset link
+(works once, one hour); sign a person out everywhere; change roles; remove. The links open
+`/reset#token=…`, where the person chooses their password; the token is moved out of the address
+bar on arrival. **Account** (everyone) holds the profile name and colour, change password, and the
+list of own sessions with sign-out. Test ids: `addperson-open/-name/-login/-role/-submit`,
+`onetime-link`/`onetime-link-url`, `reset-password/-confirm/-submit/-done`, `profile-name/-save`,
+`password-current/-new/-confirm/-submit`, `sessions-revoke-others`.
+
 ## Permissions in the UI
 
 The server decides every action. The UI only avoids offering what would be refused:

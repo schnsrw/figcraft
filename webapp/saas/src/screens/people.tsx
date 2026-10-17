@@ -8,6 +8,8 @@ import {
 
 import type { ApiError } from "../api/client";
 import {
+  type AccountUser,
+  type CreatedUser,
   type Invitation,
   type Member,
   TEAM_ROLES,
@@ -16,6 +18,7 @@ import {
   type TeamMember,
   invitationLink,
   people,
+  resetLink,
 } from "../api/people";
 import {
   ErrorNotice,
@@ -105,28 +108,88 @@ export function PeopleScreen() {
 // ---------------------------------------------------------------------------------------------
 // Members
 
+/** A link to hand to someone, shown once with a copy button. */
+export function OneTimeLink({
+  heading,
+  url,
+  note,
+  testId,
+}: {
+  heading: string;
+  url: string;
+  note: string;
+  testId: string;
+}) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div role="status" className="notice ok" data-testid={testId}>
+      <p>
+        <strong>{heading}</strong> {note}
+      </p>
+      <p>
+        <code data-testid={`${testId}-url`}>{url}</code>
+      </p>
+      <button
+        type="button"
+        className="button"
+        onClick={() => {
+          void navigator.clipboard?.writeText(url).then(() => setCopied(true));
+        }}
+      >
+        {copied ? "Copied" : "Copy link"}
+      </button>
+    </div>
+  );
+}
+
+function hoursText(seconds: number): string {
+  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))} minutes`;
+  const hours = Math.round(seconds / 3600);
+  return hours === 1 ? "1 hour" : `${hours} hours`;
+}
+
 function MembersTab() {
   const { client, tenantId, role, principalId } = useReady();
+  const isOwner = role === "tenant_owner";
+  const canManage = hasRole(role, ADMIN_ROLES);
   const [list, reload] = useLoad(
     () => people.members(client, tenantId),
     [client, tenantId],
   );
+  // Password accounts (login, locked, disabled). Anyone who can see members may read this list;
+  // a deployment without password accounts just returns nothing useful, so a failure is quiet.
+  const [accounts, reloadAccounts] = useLoad(
+    () =>
+      people
+        .users(client, tenantId)
+        .catch(() => ({ items: [] as AccountUser[], truncated: false })),
+    [client, tenantId],
+  );
   const [problem, setProblem] = useState<ApiError | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [issued, setIssued] = useState<{
+    heading: string;
+    url: string;
+    note: string;
+  } | null>(null);
   const [filter, setFilter] = useState("");
   const [confirm, setConfirm] = useState<Member | null>(null);
   const filterId = useId();
-  const isOwner = role === "tenant_owner";
-  const canManage = hasRole(role, ADMIN_ROLES);
+
+  const refresh = () => {
+    reload();
+    reloadAccounts();
+  };
 
   const act = async (action: () => Promise<unknown>) => {
     setProblem(null);
+    setNotice(null);
     try {
       await action();
-      reload();
     } catch (error) {
       setProblem(asApiError(error));
-      reload();
     }
+    refresh();
   };
 
   if (list.kind === "loading")
@@ -134,15 +197,47 @@ function MembersTab() {
   if (list.kind === "error") {
     return <ErrorNotice error={list.error} retry={reload} />;
   }
+  const byPrincipal = new Map<string, AccountUser>();
+  if (accounts.kind === "ready") {
+    for (const account of accounts.value.items) {
+      byPrincipal.set(account.principal_id, account);
+    }
+  }
+  const showLogin = byPrincipal.size > 0;
   const needle = filter.trim().toLowerCase();
   const shown = list.value.items.filter(
     (member) =>
       member.state !== "removed" &&
       (needle === "" || member.display_name.toLowerCase().includes(needle)),
   );
+  const issue = (
+    heading: string,
+    token: string,
+    expires: number,
+    who: string,
+  ) =>
+    setIssued({
+      heading,
+      url: resetLink(window.location.origin, token),
+      note: `Send this to ${who}. It works once and expires in ${hoursText(expires)}.`,
+    });
 
   return (
     <>
+      {canManage && (
+        <AddPerson
+          onCreated={(created, name) => {
+            issue(
+              `${name} was added.`,
+              created.setup_token,
+              created.expires_in_secs,
+              name,
+            );
+            refresh();
+          }}
+          onProblem={setProblem}
+        />
+      )}
       <div className="field">
         <label htmlFor={filterId}>Find a member</label>
         <input
@@ -153,11 +248,25 @@ function MembersTab() {
         />
       </div>
       {problem !== null && <ErrorNotice error={problem} />}
+      {notice !== null && (
+        <p role="status" className="notice ok">
+          {notice}
+        </p>
+      )}
+      {issued !== null && (
+        <OneTimeLink
+          heading={issued.heading}
+          url={issued.url}
+          note={issued.note}
+          testId="onetime-link"
+        />
+      )}
       <table>
         <caption className="sr-only">Members of this organisation</caption>
         <thead>
           <tr>
             <th scope="col">Name</th>
+            {showLogin && <th scope="col">Login</th>}
             <th scope="col">Role</th>
             <th scope="col">Status</th>
             {canManage && (
@@ -172,16 +281,21 @@ function MembersTab() {
             const self = member.principal_id === principalId;
             const ownerRow = member.role === "tenant_owner";
             const editable = canManage && (isOwner || !ownerRow);
+            const account = byPrincipal.get(member.principal_id);
+            const disabled =
+              member.state === "suspended" || account?.state === "disabled";
+            const name = member.display_name;
             return (
               <tr key={member.principal_id}>
                 <th scope="row">
-                  {member.display_name}
+                  {name}
                   {self && <span className="muted"> (you)</span>}
                 </th>
+                {showLogin && <td>{account?.login ?? "—"}</td>}
                 <td>
                   {editable ? (
                     <select
-                      aria-label={`Role of ${member.display_name}`}
+                      aria-label={`Role of ${name}`}
                       value={member.role}
                       onChange={(event) =>
                         void act(() =>
@@ -211,8 +325,10 @@ function MembersTab() {
                   )}
                 </td>
                 <td>
-                  {member.state === "suspended" ? (
+                  {disabled ? (
                     <StateBadge state="suspended" />
+                  ) : account?.locked === true ? (
+                    <span className="badge">Locked</span>
                   ) : (
                     "Active"
                   )}
@@ -227,30 +343,89 @@ function MembersTab() {
                             className="button"
                             onClick={() =>
                               void act(() =>
-                                people.setMember(
-                                  client,
-                                  tenantId,
-                                  member.principal_id,
-                                  {
-                                    state:
-                                      member.state === "suspended"
-                                        ? "active"
-                                        : "suspended",
-                                  },
-                                ),
+                                account !== undefined
+                                  ? disabled
+                                    ? people.enableUser(
+                                        client,
+                                        tenantId,
+                                        member.principal_id,
+                                      )
+                                    : people.disableUser(
+                                        client,
+                                        tenantId,
+                                        member.principal_id,
+                                      )
+                                  : people.setMember(
+                                      client,
+                                      tenantId,
+                                      member.principal_id,
+                                      {
+                                        state: disabled
+                                          ? "active"
+                                          : "suspended",
+                                      },
+                                    ),
                               )
                             }
                           >
-                            {member.state === "suspended"
-                              ? `Reactivate ${member.display_name}`
-                              : `Suspend ${member.display_name}`}
+                            {disabled ? `Enable ${name}` : `Disable ${name}`}
                           </button>
+                          {account !== undefined && (
+                            <>
+                              <button
+                                type="button"
+                                className="button"
+                                onClick={() => {
+                                  setProblem(null);
+                                  setNotice(null);
+                                  people
+                                    .resetLink(
+                                      client,
+                                      tenantId,
+                                      member.principal_id,
+                                    )
+                                    .then((result) =>
+                                      issue(
+                                        `Password reset link for ${name}.`,
+                                        result.reset_token,
+                                        result.expires_in_secs,
+                                        name,
+                                      ),
+                                    )
+                                    .catch((error: unknown) =>
+                                      setProblem(asApiError(error)),
+                                    );
+                                }}
+                              >
+                                {`Reset password for ${name}`}
+                              </button>
+                              <button
+                                type="button"
+                                className="button"
+                                onClick={() =>
+                                  void act(async () => {
+                                    const result =
+                                      await people.revokeUserSessions(
+                                        client,
+                                        tenantId,
+                                        member.principal_id,
+                                      );
+                                    setNotice(
+                                      `${name} was signed out of ${result.revoked} session${result.revoked === 1 ? "" : "s"}.`,
+                                    );
+                                  })
+                                }
+                              >
+                                {`Sign ${name} out everywhere`}
+                              </button>
+                            </>
+                          )}
                           <button
                             type="button"
                             className="button danger"
                             onClick={() => setConfirm(member)}
                           >
-                            {`Remove ${member.display_name}`}
+                            {`Remove ${name}`}
                           </button>
                         </>
                       )}
@@ -304,6 +479,121 @@ function MembersTab() {
         </Modal>
       )}
     </>
+  );
+}
+
+/** Admin creates a person with a login name; they get a one-time link to choose their password. */
+function AddPerson({
+  onCreated,
+  onProblem,
+}: {
+  onCreated: (created: CreatedUser, name: string) => void;
+  onProblem: (error: ApiError | null) => void;
+}) {
+  const { client, tenantId, role } = useReady();
+  const loginId = useId();
+  const nameId = useId();
+  const roleId = useId();
+  const [open, setOpen] = useState(false);
+  const [login, setLogin] = useState("");
+  const [name, setName] = useState("");
+  const [newRole, setNewRole] = useState("editor");
+  const [busy, setBusy] = useState(false);
+
+  if (!open) {
+    return (
+      <div className="toolbar">
+        <button
+          type="button"
+          className="button primary"
+          data-testid="addperson-open"
+          onClick={() => setOpen(true)}
+        >
+          Add a person
+        </button>
+      </div>
+    );
+  }
+  return (
+    <form
+      className="inline-form"
+      data-testid="addperson-form"
+      onSubmit={(event: FormEvent) => {
+        event.preventDefault();
+        if (busy) return;
+        setBusy(true);
+        onProblem(null);
+        people
+          .createUser(client, tenantId, {
+            login: login.trim(),
+            display_name: name.trim(),
+            role: newRole,
+          })
+          .then((created) => {
+            onCreated(created, name.trim());
+            setLogin("");
+            setName("");
+            setOpen(false);
+          })
+          .catch((error: unknown) => onProblem(asApiError(error)))
+          .finally(() => setBusy(false));
+      }}
+    >
+      <div className="field grow">
+        <label htmlFor={nameId}>Name</label>
+        <input
+          id={nameId}
+          data-testid="addperson-name"
+          value={name}
+          maxLength={64}
+          required
+          onChange={(event) => setName(event.target.value)}
+        />
+      </div>
+      <div className="field grow">
+        <label htmlFor={loginId}>Login name</label>
+        <input
+          id={loginId}
+          data-testid="addperson-login"
+          value={login}
+          maxLength={254}
+          autoCapitalize="off"
+          spellCheck={false}
+          required
+          onChange={(event) => setLogin(event.target.value)}
+        />
+      </div>
+      <div className="field">
+        <label htmlFor={roleId}>Role</label>
+        <select
+          id={roleId}
+          data-testid="addperson-role"
+          value={newRole}
+          onChange={(event) => setNewRole(event.target.value)}
+        >
+          {TENANT_ROLES.map((option) => (
+            <option
+              key={option}
+              value={option}
+              disabled={option === "tenant_owner" && role !== "tenant_owner"}
+            >
+              {roleLabel(option)}
+            </option>
+          ))}
+        </select>
+      </div>
+      <button
+        type="submit"
+        className="button primary"
+        data-testid="addperson-submit"
+        disabled={busy || login.trim() === "" || name.trim() === ""}
+      >
+        {busy ? "Adding…" : "Create and get link"}
+      </button>
+      <button type="button" className="button" onClick={() => setOpen(false)}>
+        Cancel
+      </button>
+    </form>
   );
 }
 
