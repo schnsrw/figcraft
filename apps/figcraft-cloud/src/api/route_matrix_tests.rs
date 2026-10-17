@@ -286,6 +286,7 @@ const ROWS: &[Row] = &[
     row("GET", "/workspaces/{workspace_id}/members", "/workspaces/{w}/members", Send::Nothing, RES, ALL),
     row("PUT", "/workspaces/{workspace_id}/members/{principal_id}", "/workspaces/{w}/members/{m2}", Send::RoleEditor, RES, WS_ADMINS),
     row("DELETE", "/workspaces/{workspace_id}/members/{principal_id}", "/workspaces/{w}/members/{m2}", Send::Nothing, RES, WS_ADMINS),
+    row("GET", "/workspaces/{workspace_id}/team-grants", "/workspaces/{w}/team-grants", Send::Nothing, RES, ALL),
     row("GET", "/workspaces/{workspace_id}/projects", "/workspaces/{w}/projects", Send::Nothing, RES, ALL),
     row("POST", "/workspaces/{workspace_id}/projects", "/workspaces/{w}/projects", Send::Name, RES, EDITORS),
     // projects
@@ -477,7 +478,14 @@ const UNLISTED: &[&str] = &[
     "/tenants/{t}/teams/{team}/grants/projects/{p}",
     "/tenants/{t}/teams/{team}/owned/libraries/{d}",
     "/tenants/{t}/members/{m}/sessions",
-    "/workspaces/{w}/team-grants",
+    // Workspace team grants are written through the team routes; only the listing is here.
+    "/workspaces/{w}/team-grants/{team}",
+    // No project-level grants (the schema has none; projects inherit their workspace's).
+    "/projects/{p}/team-grants",
+    "/projects/{p}/team-grants/{team}",
+    // Global principal suspension is operator tooling (S8), not a tenant API.
+    "/principals/{m}",
+    "/tenants/{t}/principals/{m}",
     "/projects/{p}/members",
     "/admin",
 ];

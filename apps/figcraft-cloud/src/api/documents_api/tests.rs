@@ -45,6 +45,7 @@ const EXPECTED: &[(&str, &str, &str)] = &[
     ("GET", "/workspaces/{workspace_id}/members", "WECV"),
     ("PUT", "/workspaces/{workspace_id}/members/{principal_id}", "W"),
     ("DELETE", "/workspaces/{workspace_id}/members/{principal_id}", "W"),
+    ("GET", "/workspaces/{workspace_id}/team-grants", "WECV"),
     ("GET", "/workspaces/{workspace_id}/projects", "WECV"),
     ("POST", "/workspaces/{workspace_id}/projects", "WE"),
     ("GET", "/projects/{project_id}", "WECV"),

@@ -27,6 +27,20 @@
 //! must be allowed for that role by [`role_allows`]. So `billing`, `export` (tenant export) and
 //! `deletion` go to owners, `provider_keys`, `support` and audit `export` to owners and admins,
 //! and nothing goes to editors, commenters or viewers.
+//!
+//! # Suspension: members here, principals in operator tooling
+//!
+//! Tenant owners and admins suspend a person *in their tenant* with
+//! `PATCH /tenants/{id}/members/{p}` `{"state": "suspended"}` (and reactivate with
+//! `"active"`); suspending an owner needs `member.manage_owners` and the last active owner cannot
+//! be suspended. After commit this applies `AccessRevocation::TenantMemberSuspended`, which revokes
+//! the person's browser sessions unless they still belong to another active tenant. There is
+//! deliberately no tenant route that sets `principals.state`: a principal is global (it can belong
+//! to several tenants and its identity links are not tenant data), so suspending it from one tenant
+//! would cut it off from tenants whose admins never agreed. Global principal suspension
+//! (`AccessRevocation::PrincipalSuspended`) is a deployment-operator action and belongs to the S8
+//! operator console, which owns operator identity; support-access grants (S4-018) cannot carry it
+//! because a grant never administers members.
 
 use std::collections::BTreeSet;
 

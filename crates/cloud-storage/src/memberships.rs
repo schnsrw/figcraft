@@ -492,6 +492,35 @@ pub async fn remove_workspace_team_grant(
     Ok(result.rows_affected() > 0)
 }
 
+/// A workspace's team grants by team ID after `after`, at most
+/// [`crate::resource_admin::MAX_LISTED`] (the same shape as the document listing).
+pub async fn list_workspace_team_grants(
+    transaction: &mut TenantTransaction<'_>,
+    workspace_id: WorkspaceId,
+    after: Option<Uuid>,
+) -> Result<Vec<crate::resource_admin::Grant<Uuid>>, MembershipError> {
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT team_id::text, role FROM workspace_team_grants \
+         WHERE tenant_id = $1::uuid AND workspace_id = $2::uuid AND ($3::uuid IS NULL OR team_id > $3::uuid) \
+         ORDER BY team_id LIMIT $4",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(workspace_id.to_string())
+    .bind(after.map(|id| id.to_string()))
+    .bind(crate::resource_admin::MAX_LISTED)
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(|error| database_error(&error))?;
+    rows.into_iter()
+        .map(|(id, role)| {
+            Ok(crate::resource_admin::Grant {
+                id: id.parse().map_err(|_| MembershipError::CorruptRow)?,
+                role: parse_role(&role).ok_or(MembershipError::CorruptRow)?,
+            })
+        })
+        .collect()
+}
+
 /// Grant team `team_id` a role on a document (insert or update).
 pub async fn set_document_team_grant(
     transaction: &mut TenantTransaction<'_>,

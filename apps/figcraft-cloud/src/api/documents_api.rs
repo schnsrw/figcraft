@@ -13,6 +13,25 @@
 //!
 //! Routes (relative to `/api/v1`) and the action each one needs are listed in [`ROUTES`]; the
 //! permission-matrix tests (S4-021) check every entry against an independently written table.
+//!
+//! Every successful mutation writes an `audit_events` row (`outcome = succeeded`, actor = the
+//! caller) in the same transaction as the change: `workspace.create|rename|archive|restore|delete`,
+//! `workspace.member.set|remove`, `project.*` and `document.*` likewise,
+//! `document.member.set|remove`, `document.team_grant.set|remove`, `share_link.create|revoke`
+//! and `document.collab_link` (a minted collaboration share link). Metadata carries ids and roles
+//! only, never a secret. A removed or changed direct membership or team grant is followed, after
+//! commit, by `revocation::apply_revocation(GrantRevoked)`: grants change no session, so the next
+//! request and the relay's next sweep re-resolve access (see `revocation`).
+//!
+//! Team grants exist on workspaces and documents only. `GET /workspaces/{id}/team-grants` lists a
+//! workspace's grants; they are written through the team routes
+//! (`/tenants/{t}/teams/{team}/grants/workspaces/{w}`, which need `team.manage` as well as
+//! `workspace.manage_members`). There are no project-level team grants: the S2 schema has no
+//! project grant table and `effective_roles` resolves a project's access from its workspace, so a
+//! project inherits its workspace's direct members and team grants. Adding project grants would
+//! need a migration plus a new inheritance rule in `effective_roles` and the relay's admission
+//! check; it is deliberately left out until the product needs it (projects are owned by a team
+//! through `/teams/{team}/owned/projects/{p}`).
 
 pub(crate) mod admission;
 #[cfg(test)]
@@ -28,12 +47,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use figcraft_cloud_auth::authz::{Action, Resource, SensitivePermission, Subject, decide};
 use figcraft_cloud_domain::{CloudDocumentId, ErrorCode, PrincipalId, ProjectId, ResourceState, Role, Uuid, WorkspaceId};
+use figcraft_cloud_storage::audit::{RepositoryError as AuditError, record_audit_event};
 use figcraft_cloud_storage::effective_roles::{
     ResourceAccess, TenantAccess, resolve_document_access, resolve_project_access, resolve_tenant_access, resolve_workspace_access,
 };
 use figcraft_cloud_storage::memberships::{
-    MembershipError, parse_role, remove_document_member, remove_document_team_grant, remove_workspace_member, role_str, set_document_member,
-    set_document_team_grant, set_workspace_member,
+    MembershipError, list_workspace_team_grants, parse_role, remove_document_member, remove_document_team_grant, remove_workspace_member, role_str,
+    set_document_member, set_document_team_grant, set_workspace_member,
 };
 use figcraft_cloud_storage::metadata::{
     DocumentRecord, PageSize, ProjectRecord, RepositoryError, WorkspaceRecord, archive_document, create_document, create_project, create_workspace,
@@ -43,6 +63,7 @@ use figcraft_cloud_storage::resource_admin::{
     MAX_LISTED, Transition, get_project_by_id, list_document_members, list_document_team_grants, list_documents, list_visible_workspaces,
     list_workspace_members, rename_project, rename_workspace, transition_project, transition_workspace,
 };
+use figcraft_cloud_storage::revocation::AccessRevocation;
 use figcraft_cloud_storage::share_links::{ShareLinkError, ShareRole, create_share_link, list_share_links, revoke_share_link};
 use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
 use serde::Deserialize;
@@ -89,6 +110,7 @@ pub(crate) const ROUTES: &[RouteSpec] = &[
     route("GET", "/workspaces/{workspace_id}/members", Action::WorkspaceView),
     route("PUT", "/workspaces/{workspace_id}/members/{principal_id}", Action::WorkspaceManageMembers),
     route("DELETE", "/workspaces/{workspace_id}/members/{principal_id}", Action::WorkspaceManageMembers),
+    route("GET", "/workspaces/{workspace_id}/team-grants", Action::WorkspaceView),
     route("GET", "/workspaces/{workspace_id}/projects", Action::WorkspaceView),
     route("POST", "/workspaces/{workspace_id}/projects", Action::ProjectCreate),
     route("GET", "/projects/{project_id}", Action::ProjectView),
@@ -125,6 +147,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/workspaces/{workspace_id}/restore", post(restore_workspace_handler))
         .route("/workspaces/{workspace_id}/members", get(list_workspace_members_handler))
         .route("/workspaces/{workspace_id}/members/{principal_id}", put(set_workspace_member_handler).delete(remove_workspace_member_handler))
+        .route("/workspaces/{workspace_id}/team-grants", get(list_workspace_team_grants_handler))
         .route("/workspaces/{workspace_id}/projects", get(list_projects_handler).post(create_project_handler))
         .route("/projects/{project_id}", get(get_project_handler).patch(rename_project_handler).delete(delete_project_handler))
         .route("/projects/{project_id}/archive", post(archive_project_handler))
@@ -274,6 +297,37 @@ async fn begin<'a>(state: &'a AppState, caller: &Authenticated) -> Result<Tenant
 
 async fn commit(transaction: TenantTransaction<'_>) -> Result<(), ApiError> {
     transaction.commit().await.map_err(|_| ApiError::unavailable())
+}
+
+/// Record a successful mutation by `caller` on `resource_kind`/`resource_id` in `transaction`
+/// (before commit, so the change and its audit row land together). `metadata` holds ids and roles
+/// only.
+async fn audit(
+    transaction: &mut TenantTransaction<'_>,
+    caller: &Authenticated,
+    action: &str,
+    resource_kind: &str,
+    resource_id: Uuid,
+    metadata: Value,
+) -> Result<(), ApiError> {
+    record_audit_event(
+        transaction,
+        Uuid::new_v4(),
+        Some(caller.principal.as_uuid()),
+        action,
+        resource_kind,
+        Some(resource_id),
+        None,
+        None,
+        "succeeded",
+        &metadata,
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| match error {
+        AuditError::Database => ApiError::unavailable(),
+        AuditError::Conflict | AuditError::Constraint | AuditError::CorruptRow => ApiError::new(ErrorCode::Internal),
+    })
 }
 
 async fn workspace_access(
@@ -436,6 +490,7 @@ async fn create_workspace_handler(
     let mut transaction = begin(&state, &caller).await?;
     tenant_access(&mut transaction, &caller, Action::WorkspaceCreate).await?;
     let record = create_workspace(&mut transaction, WorkspaceId::random(), name, team).await.map_err(repository_error)?;
+    audit(&mut transaction, &caller, "workspace.create", "workspace", record.id.as_uuid(), json!({})).await?;
     commit(transaction).await?;
     Ok(created(workspace_view(&record)))
 }
@@ -457,6 +512,7 @@ async fn rename_workspace_handler(
     let mut transaction = begin(&state, &caller).await?;
     let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceUpdate).await?;
     let record = rename_workspace(&mut transaction, id, name).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    audit(&mut transaction, &caller, "workspace.rename", "workspace", id.as_uuid(), json!({})).await?;
     commit(transaction).await?;
     Ok(Json(workspace_view(&record)))
 }
@@ -471,6 +527,7 @@ async fn workspace_transition(
     let mut transaction = begin(state, caller).await?;
     let id = workspace_access(&mut transaction, caller, id, action).await?;
     let record = transition_workspace(&mut transaction, id, transition).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    audit(&mut transaction, caller, transition_action(Kind::Workspace, transition), "workspace", id.as_uuid(), json!({})).await?;
     commit(transaction).await?;
     Ok(Json(workspace_view(&record)))
 }
@@ -520,7 +577,11 @@ async fn set_workspace_member_handler(
     let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceManageMembers).await?;
     let principal: PrincipalId = principal.parse().map_err(|_| ApiError::not_found())?;
     set_workspace_member(&mut transaction, id, principal, role).await.map_err(membership_error)?;
+    let metadata = json!({"principal_id": principal.to_string(), "role": role_str(role)});
+    audit(&mut transaction, &caller, "workspace.member.set", "workspace", id.as_uuid(), metadata).await?;
     commit(transaction).await?;
+    // A changed role may be a downgrade.
+    super::tenants_api::revoke_after_commit(&state, AccessRevocation::GrantRevoked).await;
     Ok(Json(json!({"principal_id": principal.to_string(), "role": role_str(role)})))
 }
 
@@ -535,8 +596,38 @@ async fn remove_workspace_member_handler(
     if !remove_workspace_member(&mut transaction, id, principal).await.map_err(membership_error)? {
         return Err(ApiError::not_found());
     }
+    audit(&mut transaction, &caller, "workspace.member.remove", "workspace", id.as_uuid(), json!({"principal_id": principal.to_string()})).await?;
     commit(transaction).await?;
+    super::tenants_api::revoke_after_commit(&state, AccessRevocation::GrantRevoked).await;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// `GET /workspaces/{id}/team-grants`: the workspace's team grants (the workspace's viewers may
+/// list them, like its direct members).
+async fn list_workspace_team_grants_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let paging = Paging::new(&caller, "workspace_team_grants", &id, &query)?;
+    let after: Option<Uuid> = paging.after()?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceView).await?;
+    let grants = list_workspace_team_grants(&mut transaction, id, after).await.map_err(membership_error)?;
+    Ok(Json(grants_view(&paging, "team_id", &grants)))
+}
+
+/// The audit action for a lifecycle transition of `kind`.
+const fn transition_action(kind: Kind, transition: Transition) -> &'static str {
+    match (kind, transition) {
+        (Kind::Workspace, Transition::Archive) => "workspace.archive",
+        (Kind::Workspace, Transition::Restore) => "workspace.restore",
+        (Kind::Workspace, Transition::SoftDelete) => "workspace.delete",
+        (_, Transition::Archive) => "project.archive",
+        (_, Transition::Restore) => "project.restore",
+        (_, Transition::SoftDelete) => "project.delete",
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -567,6 +658,7 @@ async fn create_project_handler(
     let mut transaction = begin(&state, &caller).await?;
     let id = workspace_access(&mut transaction, &caller, &id, Action::ProjectCreate).await?;
     let record = create_project(&mut transaction, ProjectId::random(), id, name, None).await.map_err(repository_error)?;
+    audit(&mut transaction, &caller, "project.create", "project", record.id.as_uuid(), json!({"workspace_id": id.to_string()})).await?;
     commit(transaction).await?;
     Ok(created(project_view(&record)))
 }
@@ -588,6 +680,7 @@ async fn rename_project_handler(
     let mut transaction = begin(&state, &caller).await?;
     let id = project_access(&mut transaction, &caller, &id, Action::ProjectUpdate).await?;
     let record = rename_project(&mut transaction, id, name).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    audit(&mut transaction, &caller, "project.rename", "project", id.as_uuid(), json!({})).await?;
     commit(transaction).await?;
     Ok(Json(project_view(&record)))
 }
@@ -602,6 +695,7 @@ async fn project_transition(
     let mut transaction = begin(state, caller).await?;
     let id = project_access(&mut transaction, caller, id, action).await?;
     let record = transition_project(&mut transaction, id, transition).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    audit(&mut transaction, caller, transition_action(Kind::Project, transition), "project", id.as_uuid(), json!({})).await?;
     commit(transaction).await?;
     Ok(Json(project_view(&record)))
 }
@@ -647,6 +741,7 @@ async fn create_document_handler(
     let id = project_access(&mut transaction, &caller, &id, Action::DocumentCreate).await?;
     let project = get_project_by_id(&mut transaction, id).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
     let record = create_document(&mut transaction, CloudDocumentId::random(), project.workspace_id, id, name).await.map_err(repository_error)?;
+    audit(&mut transaction, &caller, "document.create", "document", record.id.as_uuid(), json!({"project_id": id.to_string()})).await?;
     commit(transaction).await?;
     Ok(created(document_view(&record)))
 }
@@ -671,6 +766,7 @@ async fn rename_document_handler(
     let mut transaction = begin(&state, &caller).await?;
     let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentRename).await?;
     let record = rename_document(&mut transaction, id, name).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    audit(&mut transaction, &caller, "document.rename", "document", id.as_uuid(), json!({})).await?;
     commit(transaction).await?;
     Ok(Json(document_view(&record)))
 }
@@ -683,10 +779,10 @@ enum DocumentTransition {
 }
 
 async fn document_transition(state: &AppState, caller: &Authenticated, id: &str, transition: DocumentTransition) -> Result<Json<Value>, ApiError> {
-    let action = match transition {
-        DocumentTransition::Archive => Action::DocumentArchive,
-        DocumentTransition::Restore => Action::DocumentRestore,
-        DocumentTransition::Delete => Action::DocumentDelete,
+    let (action, audited) = match transition {
+        DocumentTransition::Archive => (Action::DocumentArchive, "document.archive"),
+        DocumentTransition::Restore => (Action::DocumentRestore, "document.restore"),
+        DocumentTransition::Delete => (Action::DocumentDelete, "document.delete"),
     };
     let mut transaction = begin(state, caller).await?;
     let (id, _) = document_access(&mut transaction, caller, id, action).await?;
@@ -697,6 +793,7 @@ async fn document_transition(state: &AppState, caller: &Authenticated, id: &str,
     }
     .map_err(repository_error)?
     .ok_or(ApiError::not_found())?;
+    audit(&mut transaction, caller, audited, "document", id.as_uuid(), json!({})).await?;
     commit(transaction).await?;
     Ok(Json(document_view(&record)))
 }
@@ -741,7 +838,10 @@ async fn set_document_member_handler(
     let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
     let principal: PrincipalId = principal.parse().map_err(|_| ApiError::not_found())?;
     set_document_member(&mut transaction, id, principal, role).await.map_err(membership_error)?;
+    let metadata = json!({"principal_id": principal.to_string(), "role": role_str(role)});
+    audit(&mut transaction, &caller, "document.member.set", "document", id.as_uuid(), metadata).await?;
     commit(transaction).await?;
+    super::tenants_api::revoke_after_commit(&state, AccessRevocation::GrantRevoked).await;
     Ok(Json(json!({"principal_id": principal.to_string(), "role": role_str(role)})))
 }
 
@@ -756,7 +856,9 @@ async fn remove_document_member_handler(
     if !remove_document_member(&mut transaction, id, principal).await.map_err(membership_error)? {
         return Err(ApiError::not_found());
     }
+    audit(&mut transaction, &caller, "document.member.remove", "document", id.as_uuid(), json!({"principal_id": principal.to_string()})).await?;
     commit(transaction).await?;
+    super::tenants_api::revoke_after_commit(&state, AccessRevocation::GrantRevoked).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -785,7 +887,10 @@ async fn set_document_team_grant_handler(
     let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
     let team = Uuid::parse_str(&team).map_err(|_| ApiError::not_found())?;
     set_document_team_grant(&mut transaction, id, team, role).await.map_err(membership_error)?;
+    let metadata = json!({"team_id": team.to_string(), "role": role_str(role)});
+    audit(&mut transaction, &caller, "document.team_grant.set", "document", id.as_uuid(), metadata).await?;
     commit(transaction).await?;
+    super::tenants_api::revoke_after_commit(&state, AccessRevocation::GrantRevoked).await;
     Ok(Json(json!({"team_id": team.to_string(), "role": role_str(role)})))
 }
 
@@ -800,7 +905,9 @@ async fn remove_document_team_grant_handler(
     if !remove_document_team_grant(&mut transaction, id, team).await.map_err(membership_error)? {
         return Err(ApiError::not_found());
     }
+    audit(&mut transaction, &caller, "document.team_grant.remove", "document", id.as_uuid(), json!({"team_id": team.to_string()})).await?;
     commit(transaction).await?;
+    super::tenants_api::revoke_after_commit(&state, AccessRevocation::GrantRevoked).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -843,6 +950,8 @@ async fn create_share_link_handler(
     }
     let link =
         create_share_link(&mut transaction, id, role, body.label.as_deref(), caller.principal, body.expires_in_secs).await.map_err(share_error)?;
+    let metadata = json!({"link_id": link.id.to_string(), "role": role.as_str()});
+    audit(&mut transaction, &caller, "share_link.create", "document", id.as_uuid(), metadata).await?;
     commit(transaction).await?;
     // The secret is returned once and never stored or logged.
     Ok(no_store(created(json!({"id": link.id.to_string(), "role": role.as_str(), "secret": link.secret}))))
@@ -861,6 +970,7 @@ async fn revoke_share_link_handler(
     if !links.iter().any(|record| record.id == link) || !revoke_share_link(&mut transaction, link).await.map_err(share_error)? {
         return Err(ApiError::not_found());
     }
+    audit(&mut transaction, &caller, "share_link.revoke", "document", id.as_uuid(), json!({"link_id": link.to_string()})).await?;
     commit(transaction).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -928,6 +1038,8 @@ async fn collab_link_handler(State(state): State<AppState>, caller: Authenticate
     let link = create_share_link(&mut transaction, id, role, Some(COLLAB_LINK_LABEL), caller.principal, Some(COLLAB_LINK_SECS))
         .await
         .map_err(share_error)?;
+    let metadata = json!({"link_id": link.id.to_string(), "role": role.as_str()});
+    audit(&mut transaction, &caller, "document.collab_link", "document", id.as_uuid(), metadata).await?;
     commit(transaction).await?;
     let (invite, editor_url) = collab_urls(public_url(), id, &link.secret)?;
     Ok(no_store(

@@ -481,6 +481,67 @@ pub async fn list_team_members(
     Ok(page(items, size, |item| item.principal_id))
 }
 
+/// Most rows [`search_team_members`] returns in one call (a page of the API's largest size plus
+/// the one-row look-ahead, with headroom).
+pub const MAX_MEMBER_SEARCH_ROWS: i64 = 201;
+/// Longest `LIKE` pattern [`search_team_members`] accepts, in characters (the API caps the term
+/// itself at 64 characters; escaping can at most double it, plus the trailing `%`).
+pub const MAX_MEMBER_PATTERN_CHARS: usize = 160;
+/// Longest resume display name accepted (the schema caps display names at 255 characters).
+const MAX_RESUME_NAME_CHARS: usize = 255;
+
+/// One active team member with the principal's display name, from [`search_team_members`].
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TeamMemberListing {
+    pub principal_id: PrincipalId,
+    pub display_name: String,
+    pub role: TeamRole,
+}
+
+/// The team's active members ordered by `(display_name COLLATE "C", principal_id)`, keyset-paged
+/// after `after` (`(display_name, principal)` of the last row seen), at most `limit` rows (clamped
+/// to `1..=`[`MAX_MEMBER_SEARCH_ROWS`]). `pattern` is an `ILIKE` pattern the caller has already
+/// escaped with `\` as the escape character (for example a prefix search `"ann%"`); `None`
+/// lists everyone. Over-long patterns or resume names are [`TeamError::InvalidName`].
+pub async fn search_team_members(
+    transaction: &mut TenantTransaction<'_>,
+    team_id: Uuid,
+    pattern: Option<&str>,
+    after: Option<(&str, PrincipalId)>,
+    limit: i64,
+) -> Result<Vec<TeamMemberListing>, TeamError> {
+    if pattern.is_some_and(|pattern| pattern.chars().count() > MAX_MEMBER_PATTERN_CHARS)
+        || after.is_some_and(|(name, _)| name.chars().count() > MAX_RESUME_NAME_CHARS)
+    {
+        return Err(TeamError::InvalidName);
+    }
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT m.principal_id::text, p.display_name, m.role FROM team_members m JOIN principals p ON p.id = m.principal_id \
+         WHERE m.tenant_id = $1::uuid AND m.team_id = $2::uuid AND m.state = 'active' \
+           AND ($3::text IS NULL OR p.display_name ILIKE $3 ESCAPE '\\') \
+           AND ($4::text IS NULL OR (p.display_name COLLATE \"C\", m.principal_id) > ($4::text COLLATE \"C\", $5::uuid)) \
+         ORDER BY p.display_name COLLATE \"C\", m.principal_id LIMIT $6",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(team_id.to_string())
+    .bind(pattern)
+    .bind(after.map(|(name, _)| name))
+    .bind(after.map(|(_, id)| id.to_string()))
+    .bind(limit.clamp(1, MAX_MEMBER_SEARCH_ROWS))
+    .fetch_all(transaction.connection())
+    .await
+    .map_err(|error| database_error(&error))?;
+    rows.into_iter()
+        .map(|(principal, display_name, role)| {
+            Ok(TeamMemberListing {
+                principal_id: principal.parse().map_err(|_| TeamError::CorruptRow)?,
+                display_name,
+                role: TeamRole::parse(&role).ok_or(TeamError::CorruptRow)?,
+            })
+        })
+        .collect()
+}
+
 /// The kind of tenant resource a team can own.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OwnedResource {

@@ -478,6 +478,168 @@ async fn teams_grants_and_search_follow_the_matrix() -> Fallible<()> {
     Ok(())
 }
 
+/// A g1-prefixed principal (fixture prefix g1: names and slugs start with "g1").
+async fn g1_principal(pool: &PgPool, name: &str) -> Fallible<PrincipalId> {
+    let mut bytes = *Uuid::new_v4().as_bytes();
+    bytes[0] = 0x91;
+    let id = Uuid::from_bytes(bytes);
+    sqlx::query("INSERT INTO principals (id, kind, display_name) VALUES ($1::uuid, 'user', $2)")
+        .bind(id.to_string())
+        .bind(format!("g1 {name}"))
+        .execute(pool)
+        .await?;
+    Ok(PrincipalId::try_from(id).map_err(|_| "nil")?)
+}
+
+#[tokio::test]
+async fn team_member_search_workspace_grant_listing_and_resource_audit() -> Fallible<()> {
+    let Some(pool) = pool().await? else { return Ok(()) };
+    let app = app(&pool, DeploymentMode::SingleTenant);
+    let tenant = TenantId::try_from(Uuid::new_v4()).map_err(|_| "nil")?;
+    let owner = g1_principal(&pool, "Owner").await?;
+    let viewer = g1_principal(&pool, "Viewer").await?;
+    let mut people = Vec::new();
+    for name in ["Ann%", "Ann_b", "Annx", "Bob"] {
+        people.push((name, g1_principal(&pool, name).await?));
+    }
+    let slug = format!("g1-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let mut transaction = begin_tenant_transaction(&pool, tenant).await.map_err(|error| format!("{error:?}"))?;
+    create_tenant_with_owner(&mut transaction, NewTenant { slug: &slug, name: "g1 tenant", plan_id: "team", home_region: "local" }, owner).await?;
+    add_tenant_member(&mut transaction, viewer, Role::Viewer).await.map_err(|error| format!("{error:?}"))?;
+    for (_, person) in &people {
+        add_tenant_member(&mut transaction, *person, Role::Viewer).await.map_err(|error| format!("{error:?}"))?;
+    }
+    transaction.commit().await?;
+    let owner = Caller { principal: owner, tenant, kind: "session" };
+    let viewer = Caller { principal: viewer, tenant, kind: "session" };
+
+    let teams = format!("/api/v1/tenants/{tenant}/teams");
+    let (status, body) = call(&app, Some(owner), Method::POST, &teams, Some(serde_json::json!({"slug": slug, "name": "g1 team"}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let team_id = body["id"].as_str().unwrap().to_owned();
+    let members = format!("{teams}/{team_id}/members");
+    for (_, person) in &people {
+        let add = serde_json::json!({"principal_id": person.to_string(), "role": "viewer"});
+        assert_eq!(call(&app, Some(owner), Method::POST, &members, Some(add)).await.0, StatusCode::CREATED);
+    }
+    let names = |body: &serde_json::Value| -> Vec<String> {
+        body["items"].as_array().unwrap().iter().filter_map(|item| item["display_name"].as_str().map(str::to_owned)).collect()
+    };
+    let search = |q: &str| format!("{members}?q={q}");
+
+    // Prefix search on the display name; `%` and `_` are literal; byte order (COLLATE "C").
+    assert_eq!(names(&call(&app, Some(owner), Method::GET, &search("g1%20Ann%25"), None).await.1), ["g1 Ann%"]);
+    assert_eq!(names(&call(&app, Some(owner), Method::GET, &search("g1%20Ann_"), None).await.1), ["g1 Ann_b"]);
+    assert_eq!(names(&call(&app, Some(owner), Method::GET, &search("g1%20Ann"), None).await.1), ["g1 Ann%", "g1 Ann_b", "g1 Annx"]);
+    assert_eq!(names(&call(&app, Some(owner), Method::GET, &search("zz"), None).await.1), Vec::<String>::new());
+    // The creator is a team manager too: everyone, ordered by name.
+    let (_, all) = call(&app, Some(owner), Method::GET, &members, None).await;
+    assert_eq!(names(&all), ["g1 Ann%", "g1 Ann_b", "g1 Annx", "g1 Bob", "g1 Owner"]);
+    assert_eq!(all["items"][4]["role"], "team_manager");
+    assert_eq!(all["items"][0]["principal_id"], people[0].1.to_string());
+
+    // Keyset paging through a search.
+    let mut seen = Vec::new();
+    let mut cursor: Option<String> = None;
+    for _ in 0..5 {
+        let path = match &cursor {
+            Some(cursor) => format!("{}&limit=1&cursor={cursor}", search("g1%20Ann")),
+            None => format!("{}&limit=1", search("g1%20Ann")),
+        };
+        let (status, page) = call(&app, Some(owner), Method::GET, &path, None).await;
+        assert_eq!(status, StatusCode::OK, "{page}");
+        seen.extend(names(&page));
+        cursor = page["next_cursor"].as_str().map(str::to_owned);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    assert_eq!(seen, ["g1 Ann%", "g1 Ann_b", "g1 Annx"]);
+    // A cursor is bound to the search term, the caller and the team.
+    let (_, first) = call(&app, Some(owner), Method::GET, &format!("{}&limit=1", search("g1%20Ann")), None).await;
+    let cursor = first["next_cursor"].as_str().unwrap().to_owned();
+    let (status, body) = call(&app, Some(owner), Method::GET, &format!("{}&limit=1&cursor={cursor}", search("g1%20A")), None).await;
+    assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid_cursor"));
+    let ann = Caller { principal: people[0].1, tenant, kind: "session" };
+    let (status, body) = call(&app, Some(ann), Method::GET, &format!("{}&limit=1&cursor={cursor}", search("g1%20Ann")), None).await;
+    assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid_cursor"));
+    // Bounded: a 65-character term and a control character are 400.
+    let (status, body) = call(&app, Some(owner), Method::GET, &search(&"a".repeat(65)), None).await;
+    assert_eq!((status, code(&body)), (StatusCode::BAD_REQUEST, "invalid_request"));
+    assert_eq!(call(&app, Some(owner), Method::GET, &search("a%07"), None).await.0, StatusCode::BAD_REQUEST);
+    // Team members may search; a tenant viewer outside the team cannot see it (404).
+    assert_eq!(names(&call(&app, Some(ann), Method::GET, &search("g1%20B"), None).await.1), ["g1 Bob"]);
+    assert_eq!(call(&app, Some(viewer), Method::GET, &search("g1"), None).await.0, StatusCode::NOT_FOUND);
+
+    // Workspace team grants are listed per workspace (viewers of the workspace may list them).
+    let (status, body) = call(&app, Some(owner), Method::POST, "/api/v1/workspaces", Some(serde_json::json!({"name": "g1 ws"}))).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let ws = body["id"].as_str().unwrap().to_owned();
+    let grants = format!("/api/v1/workspaces/{ws}/team-grants");
+    assert_eq!(call(&app, Some(owner), Method::GET, &grants, None).await.1["items"], serde_json::json!([]));
+    let grant = format!("{teams}/{team_id}/grants/workspaces/{ws}");
+    assert_eq!(call(&app, Some(owner), Method::PUT, &grant, Some(serde_json::json!({"role": "commenter"}))).await.0, StatusCode::NO_CONTENT);
+    let (status, body) = call(&app, Some(owner), Method::GET, &grants, None).await;
+    assert_eq!((status, body["items"].clone()), (StatusCode::OK, serde_json::json!([{"team_id": team_id, "role": "commenter"}])));
+    // Ann sees the workspace through the team grant and may list its grants; the tenant viewer
+    // outside the team holds no role on it (404); share links 403.
+    assert_eq!(call(&app, Some(ann), Method::GET, &grants, None).await.0, StatusCode::OK);
+    assert_eq!(call(&app, Some(viewer), Method::GET, &grants, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&app, Some(owner.as_kind("share")), Method::GET, &grants, None).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        call(&app, Some(owner), Method::GET, &format!("/api/v1/workspaces/{}/team-grants", Uuid::new_v4()), None).await.0,
+        StatusCode::NOT_FOUND
+    );
+
+    // Resource mutations are audited in the same transaction.
+    assert_eq!(audit_count(&pool, tenant, "workspace.create").await?, 1);
+    let workspace = format!("/api/v1/workspaces/{ws}");
+    assert_eq!(call(&app, Some(owner), Method::PATCH, &workspace, Some(serde_json::json!({"name": "g1 ws 2"}))).await.0, StatusCode::OK);
+    assert_eq!(audit_count(&pool, tenant, "workspace.rename").await?, 1);
+    let (status, project) = call(&app, Some(owner), Method::POST, &format!("{workspace}/projects"), Some(serde_json::json!({"name": "g1 p"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let project = project["id"].as_str().unwrap().to_owned();
+    let (status, document) =
+        call(&app, Some(owner), Method::POST, &format!("/api/v1/projects/{project}/documents"), Some(serde_json::json!({"name": "g1 d"}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let document = format!("/api/v1/documents/{}", document["id"].as_str().unwrap());
+    let doc_grant = format!("{document}/team-grants/{team_id}");
+    assert_eq!(call(&app, Some(owner), Method::PUT, &doc_grant, Some(serde_json::json!({"role": "editor"}))).await.0, StatusCode::OK);
+    assert_eq!(call(&app, Some(owner), Method::DELETE, &doc_grant, None).await.0, StatusCode::NO_CONTENT);
+    let member = format!("{workspace}/members/{}", viewer.principal);
+    assert_eq!(call(&app, Some(owner), Method::PUT, &member, Some(serde_json::json!({"role": "viewer"}))).await.0, StatusCode::OK);
+    assert_eq!(call(&app, Some(viewer), Method::GET, &workspace, None).await.0, StatusCode::OK);
+    assert_eq!(call(&app, Some(owner), Method::DELETE, &member, None).await.0, StatusCode::NO_CONTENT);
+    // Access is lost on the next request.
+    assert_eq!(call(&app, Some(viewer), Method::GET, &workspace, None).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(call(&app, Some(owner), Method::POST, &format!("{document}/archive"), None).await.0, StatusCode::OK);
+    assert_eq!(call(&app, Some(owner), Method::POST, &format!("/api/v1/projects/{project}/archive"), None).await.0, StatusCode::OK);
+    for action in [
+        "project.create",
+        "document.create",
+        "document.team_grant.set",
+        "document.team_grant.remove",
+        "workspace.member.set",
+        "workspace.member.remove",
+        "document.archive",
+        "project.archive",
+    ] {
+        assert_eq!(audit_count(&pool, tenant, action).await?, 1, "{action}");
+    }
+    // A refused mutation records nothing.
+    assert_eq!(call(&app, Some(ann), Method::PATCH, &workspace, Some(serde_json::json!({"name": "no"}))).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(audit_count(&pool, tenant, "workspace.rename").await?, 1);
+    let actor: Option<String> = {
+        let mut transaction = begin_tenant_transaction(&pool, tenant).await.map_err(|error| format!("{error:?}"))?;
+        sqlx::query_scalar("SELECT actor_principal_id::text FROM audit_events WHERE tenant_id = $1::uuid AND action = 'workspace.rename'")
+            .bind(tenant.to_string())
+            .fetch_one(transaction.connection())
+            .await?
+    };
+    assert_eq!(actor, Some(owner.principal.to_string()));
+    Ok(())
+}
+
 #[tokio::test]
 async fn invitations_are_created_once_listed_revoked_and_accepted() -> Fallible<()> {
     let Some(pool) = pool().await? else { return Ok(()) };

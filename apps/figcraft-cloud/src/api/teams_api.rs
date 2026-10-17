@@ -9,7 +9,7 @@
 //! | `GET /teams/{team}` | `team.view` |
 //! | `PATCH /teams/{team}` | rename or archive: `team.manage` |
 //! | `DELETE /teams/{team}` | archive: `team.manage` |
-//! | `GET /teams/{team}/members` | `team.view` |
+//! | `GET /teams/{team}/members?q=` | `team.view` (prefix search on display name, keyset on `(display_name, principal)`) |
 //! | `POST /teams/{team}/members` | `team.manage` |
 //! | `PATCH`/`DELETE /teams/{team}/members/{principal}` | `team.manage` |
 //! | `PUT /teams/{team}/grants/workspaces/{workspace}` | `team.manage` and `workspace.manage_members` |
@@ -271,9 +271,14 @@ async fn archive_team(
 #[derive(Debug, Serialize)]
 struct TeamMemberBody {
     principal_id: PrincipalId,
+    display_name: String,
     role: &'static str,
 }
 
+/// `GET /teams/{team}/members?q=&limit=&cursor=`: the team's active members, ordered by
+/// `(display_name COLLATE "C", principal_id)`. `q` is a bounded prefix search on the display name
+/// ([`SearchTerm`]: at most 64 characters, backslash, `%` and `_` escaped); cursors are bound to the tenant,
+/// the caller, the team and the search term.
 async fn list_team_members(
     State(state): State<AppState>,
     caller: Authenticated,
@@ -282,12 +287,24 @@ async fn list_team_members(
 ) -> Result<Response, ApiError> {
     let mut call = open(&state, &caller, &tenant).await?;
     let id = authorize_team(&mut call, &team, Action::TeamView).await?;
+    let search = SearchTerm::parse(query.q.as_deref())?;
     let tenant_text = call.transaction.tenant_id().to_string();
-    let request = PageRequest::new(CursorScope::new("team_members", &[&tenant_text, &id.to_string()]), query.limit, query.cursor.as_deref())?;
-    let after = request.after.as_ref().map(|position| PrincipalId::try_from(position.id)).transpose().map_err(|_| invalid_cursor())?;
-    let page = teams::list_team_members(&mut call.transaction, id, after, page_size(request.limit)?).await.map_err(team_error)?;
-    let next_cursor = page.next_cursor.and_then(|id| request.cursor_for(&Position { sort_key: String::new(), id: id.as_uuid() }));
-    let items = page.items.into_iter().map(|member| TeamMemberBody { principal_id: member.principal_id, role: member.role.as_str() }).collect();
+    let principal_text = call.principal.to_string();
+    let team_text = id.to_string();
+    let scope =
+        CursorScope::new("team_members_by_name", &[&tenant_text, &principal_text, &team_text, search.as_ref().map_or("", SearchTerm::as_str)]);
+    let request = PageRequest::new(scope, query.limit, query.cursor.as_deref())?;
+    let after = match request.after.as_ref() {
+        Some(position) => Some((position.sort_key.as_str(), PrincipalId::try_from(position.id).map_err(|_| invalid_cursor())?)),
+        None => None,
+    };
+    let pattern = search.as_ref().map(SearchTerm::prefix_pattern);
+    let rows = teams::search_team_members(&mut call.transaction, id, pattern.as_deref(), after, request.fetch_limit()).await.map_err(team_error)?;
+    let found = rows
+        .into_iter()
+        .map(|member| TeamMemberBody { principal_id: member.principal_id, display_name: member.display_name, role: member.role.as_str() })
+        .collect();
+    let (items, next_cursor) = request.finish(found, |member| Position { sort_key: member.display_name.clone(), id: member.principal_id.as_uuid() });
     Ok(axum::Json(PageBody { items, next_cursor }).into_response())
 }
 
