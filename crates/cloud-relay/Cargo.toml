@@ -18,6 +18,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 
 [dev-dependencies]
 figcraft-doc = { workspace = true }
+# S5-019: the app's own network client (an engine session with the network link) joins the relay.
+figcraft-engine = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }

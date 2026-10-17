@@ -1875,6 +1875,7 @@ dependencies = [
  "figcraft-collab",
  "figcraft-collab-net",
  "figcraft-doc",
+ "figcraft-engine",
  "log",
  "serde_json",
  "sqlx",
