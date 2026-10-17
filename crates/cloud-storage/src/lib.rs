@@ -5,6 +5,7 @@ use sqlx::{PgConnection, PgPool, Postgres, Transaction};
 
 pub mod assets;
 pub mod audit;
+pub mod bootstrap;
 pub mod bucket_admin;
 pub mod document_snapshots;
 pub mod downloads;
@@ -25,6 +26,8 @@ pub mod oidc_logins;
 pub mod plugin_store;
 pub mod quarantine;
 pub mod reconciliation;
+pub mod service_accounts;
+pub mod sessions;
 pub mod share_links;
 pub mod snapshots;
 pub mod uploads;
