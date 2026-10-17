@@ -311,13 +311,10 @@ async fn a_session_touch_racing_logout_or_revoke_all_never_undoes_the_revoke() -
 /// Rotation racing "sign out everywhere": whichever takes the old session's row first, the
 /// principal must end with no live session. Both arrival orders are forced.
 ///
-/// Known race (reported for S4-023, fix pending in `sessions.rs`): when the rotation wins, the
-/// revoke-all statement's snapshot predates the rotated session's insert, so the new session
-/// survives. Ignored until `revoke_all_for_principal` and `rotate_session` serialise on the
-/// principal (for example `SELECT ... FROM principals WHERE id = $1 FOR UPDATE` in revoke-all,
-/// `FOR SHARE` in rotate, then the UPDATE as a fresh statement).
+/// Regression for the race this probe found: when the rotation won, the revoke-all statement's
+/// snapshot predated the rotated session's insert and the new session survived. Rotation now
+/// holds the principal `FOR SHARE` and revoke-all takes it `FOR UPDATE` before its UPDATE.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "known race: rotate_session winning against revoke_all_for_principal leaves the rotated session live"]
 async fn session_rotation_racing_revoke_all_leaves_nothing_live() -> TestResult {
     rotation_race(true).await
 }

@@ -79,7 +79,7 @@ macro_rules! table {
 /// test asserts both ends report the same schema version. `documents.current_snapshot_id` and
 /// `document_snapshots` reference each other, so documents load without the pointer and get it
 /// back once the snapshots exist ([`RELINK_CURRENT_SNAPSHOTS`]).
-fn tables() -> [Table; 30] {
+fn tables() -> [Table; 40] {
     [
         table!("principals"),
         table!("identity_links"),
@@ -118,6 +118,17 @@ fn tables() -> [Table; 30] {
         table!("plugin_versions"),
         table!("exports"),
         table!("document_thumbnails"),
+        // S3 follow-ups, the core slice and S4, each after every table it references.
+        table!("retention_holds"),
+        table!("share_links"),
+        table!("oidc_login_attempts"),
+        table!("browser_sessions"),
+        table!("tenant_bootstrap"),
+        table!("service_accounts"),
+        table!("service_account_credentials"),
+        table!("team_invitations"),
+        table!("member_permissions"),
+        table!("support_access_grants"),
     ]
 }
 

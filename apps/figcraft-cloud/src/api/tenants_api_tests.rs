@@ -53,6 +53,7 @@ impl Authenticator for HeaderAuthenticator {
                 principal,
                 tenant: TenantContext::new(tenant, principal, DeploymentMode::MultiTenant, Role::Viewer, []),
                 session: SessionInfo { kind, id: Uuid::new_v4().to_string() },
+                grant: crate::api::auth::Grant::Member,
             })
         })
     }

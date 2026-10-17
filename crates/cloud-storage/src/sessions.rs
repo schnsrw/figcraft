@@ -276,6 +276,14 @@ pub async fn rotate_session(pool: &PgPool, token: &str, limits: SessionLimits) -
     let new_token = random_token().ok_or(SessionError::Random)?;
     let new_id = Uuid::new_v4();
     let mut transaction = pool.begin().await.map_err(|_| SessionError::Database)?;
+    // Lock order shared with `revoke_all_for_principal`: the principal first (`FOR SHARE` here,
+    // `FOR UPDATE` there), then sessions, so a rotation and a revoke-all serialise without
+    // deadlocking, and the revoke-all always sees the session a rotation inserts.
+    sqlx::query("SELECT 1 FROM principals WHERE id = (SELECT principal_id FROM browser_sessions WHERE token_hash = $1) FOR SHARE")
+        .bind(session_token_hash(token).to_vec())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SessionError::Database)?;
     let old: Option<(String, i64)> = sqlx::query_as(concat!(
         "SELECT s.id::text, extract(epoch FROM s.absolute_expires_at - now())::bigint ",
         "FROM browser_sessions s JOIN principals p ON p.id = s.principal_id ",
@@ -326,6 +334,15 @@ pub async fn logout(pool: &PgPool, token: &str) -> Result<bool, SessionError> {
 /// Revoke every unrevoked session of `principal_id` (at most [`MAX_REVOKE_BATCH`] per call; call
 /// again while it returns that many). Returns how many were revoked.
 pub async fn revoke_all_for_principal(pool: &PgPool, principal_id: PrincipalId, reason: RevokeReason) -> Result<u64, SessionError> {
+    // Serialise with `rotate_session`, which holds the principal `FOR SHARE` while it replaces a
+    // session: once this lock is granted every concurrent rotation has committed, and the UPDATE
+    // below (a new statement, so a new READ COMMITTED snapshot) sees the session it inserted.
+    let mut transaction = pool.begin().await.map_err(|_| SessionError::Database)?;
+    sqlx::query("SELECT 1 FROM principals WHERE id = $1::uuid FOR UPDATE")
+        .bind(principal_id.to_string())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|_| SessionError::Database)?;
     let result = sqlx::query(concat!(
         "UPDATE browser_sessions SET revoked_at = now(), revoke_reason = $2 WHERE id IN (",
         "SELECT id FROM browser_sessions WHERE principal_id = $1::uuid AND revoked_at IS NULL LIMIT $3)"
@@ -333,9 +350,10 @@ pub async fn revoke_all_for_principal(pool: &PgPool, principal_id: PrincipalId, 
     .bind(principal_id.to_string())
     .bind(reason.as_str())
     .bind(MAX_REVOKE_BATCH)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(|_| SessionError::Database)?;
+    transaction.commit().await.map_err(|_| SessionError::Database)?;
     Ok(result.rows_affected())
 }
 

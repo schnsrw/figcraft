@@ -221,6 +221,7 @@ impl Authenticator for BearerPrincipal {
                 principal,
                 tenant: TenantContext::new(tenant, principal, DeploymentMode::MultiTenant, Role::Editor, []),
                 session: SessionInfo { kind, id: "d3000000-0000-4000-8000-0000000000ee".to_string() },
+                grant: crate::api::auth::Grant::Member,
             })
         })
     }
