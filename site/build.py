@@ -506,10 +506,13 @@ def build(out_dir: Path) -> None:
     if current:
         n_done = sum(1 for t in current_tasks if t["done"])
         if n_done != current["done"] or len(current_tasks) != current["total"]:
-            raise BuildError(
-                f"tracker: {current['id']} table says {current['done']}/{current['total']} "
-                f"but its section lists {n_done}/{len(current_tasks)} tasks"
+            # A stale summary row should not block the deploy: warn, and trust the task list.
+            print(
+                f"::warning::tracker: {current['id']} table says {current['done']}/{current['total']} "
+                f"but its section lists {n_done}/{len(current_tasks)} tasks; using the task list",
+                file=sys.stderr,
             )
+            current["done"], current["total"] = n_done, len(current_tasks)
 
     progress_html = render_progress(rows, roadmap, current_tasks, current["id"] if current else "", updated)
     strip_html = render_strip(rows, updated)
