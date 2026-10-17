@@ -480,3 +480,90 @@ fn people_are_shown_as_the_account_they_signed_in_with_not_as_they_claim() -> Te
     front.stop();
     Ok(())
 }
+
+/// `(seq, actor, via_kind, via_id)` of every committed event of the fixture document.
+fn events_via(fixture: &Fixture) -> Vec<(i64, String, Option<String>, Option<String>)> {
+    fixture.runtime.block_on(async {
+        let mut transaction = begin_tenant_transaction(&fixture.pool, fixture.tenant).await.unwrap();
+        let rows = sqlx::query_as(
+            "SELECT seq, actor_principal_id::text, via_kind, via_id::text FROM document_events \
+             WHERE tenant_id = $1::uuid AND document_id = $2::uuid ORDER BY seq",
+        )
+        .bind(fixture.tenant.to_string())
+        .bind(fixture.document.to_string())
+        .fetch_all(transaction.connection())
+        .await
+        .unwrap();
+        transaction.rollback().await.unwrap();
+        rows
+    })
+}
+
+#[test]
+fn every_batch_records_whether_a_person_acted_directly_through_a_team_or_through_a_link() -> TestResult {
+    use figcraft_cloud_storage::teams::{TeamGrant, TeamRole, WorkspaceGrantRole, add_team_member, create_team, grant_to_team};
+    let Some(fixture) = Fixture::new()? else {
+        return Ok(());
+    };
+    let file = fixture.document.to_string();
+    let direct = fixture.member(Role::Editor);
+    // A member with no direct grant whose only access is the Design team's workspace grant.
+    let teamed = fixture.member(Role::Viewer);
+    let team = fresh(0x40);
+    fixture.runtime.block_on(async {
+        let mut t = begin_tenant_transaction(&fixture.pool, fixture.tenant).await.unwrap();
+        sqlx::query("DELETE FROM workspace_members WHERE tenant_id = $1::uuid AND principal_id = $2::uuid")
+            .bind(fixture.tenant.to_string())
+            .bind(teamed.principal.to_string())
+            .execute(t.connection())
+            .await
+            .unwrap();
+        create_team(&mut t, team, &format!("e1-design-{}", &team.to_string()[24..]), "Design", fixture.owner).await.unwrap();
+        add_team_member(&mut t, team, teamed.principal, TeamRole::Editor, fixture.owner).await.unwrap();
+        grant_to_team(&mut t, team, TeamGrant::Workspace(fixture.workspace, WorkspaceGrantRole::Editor), fixture.owner).await.unwrap();
+        t.commit().await.unwrap();
+    });
+    let link = fixture.runtime.block_on(async {
+        let mut t = begin_tenant_transaction(&fixture.pool, fixture.tenant).await.unwrap();
+        let link = create_share_link(&mut t, fixture.document, ShareRole::Editor, Some("Link"), fixture.owner, None).await.unwrap();
+        t.commit().await.unwrap();
+        link
+    });
+    let expires = expiry(now(), MAX_TICKET_SECS);
+    let (mut hosting, _sweeper) = fixture.serve(true);
+    let addr = hosting.addr();
+
+    // Three people in one room; each batch is recorded with how its author held access.
+    let mut ada = Raw::join(addr, &file, &fixture.ticket(&direct, fixture.document, true, expires));
+    let (ada_id, seq, _, page) = ada.welcome();
+    let mut tess = Raw::join(addr, &file, &fixture.ticket(&teamed, fixture.document, true, expires));
+    let (tess_id, ..) = tess.welcome();
+    let mut linda = Raw::join(addr, &file, &link.secret);
+    let (linda_id, ..) = linda.welcome();
+    ada.rename(seq, 1, page, "By Ada");
+    let s1 = ada.confirmation(ada_id, 1).unwrap();
+    tess.rename(s1, 1, page, "By Tess");
+    let s2 = tess.confirmation(tess_id, 1).unwrap();
+    linda.rename(s2, 1, page, "By Linda");
+    linda.confirmation(linda_id, 1).unwrap();
+    // The commit happens when the room is flushed; closing the room (everyone leaves) makes it durable.
+    drop((ada, tess, linda));
+    let deadline = Instant::now() + WAIT;
+    let mut events = events_via(&fixture);
+    while events.len() < 3 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(200));
+        events = events_via(&fixture);
+    }
+    let team_id = team.to_string();
+    assert_eq!(
+        events,
+        vec![
+            (1, direct.principal.to_string(), Some("member".to_string()), None),
+            (2, teamed.principal.to_string(), Some("team".to_string()), Some(team_id)),
+            (3, fixture.owner.to_string(), Some("share_link".to_string()), Some(link.id.to_string())),
+        ],
+        "a person and a team are told apart, and a link is attributed to its creator through the link"
+    );
+    hosting.stop();
+    Ok(())
+}

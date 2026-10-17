@@ -50,9 +50,10 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
+use figcraft_cloud_storage::attribution::{Via, access_via};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::document_snapshots::store_snapshot;
-use figcraft_cloud_storage::events::{MAX_APPEND_BATCHES, append_events};
+use figcraft_cloud_storage::events::{MAX_APPEND_BATCHES, append_events_via};
 use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
 use figcraft_cloud_storage::quarantine::{QuarantineError, quarantine_reason};
 use figcraft_cloud_storage::realtime_tickets::{TicketKey, looks_like_ticket, verify as verify_ticket};
@@ -369,6 +370,15 @@ struct Admitted {
     /// Whom accepted batches are recorded as made by: the signed-in member, or a share link's
     /// creator.
     actor: PrincipalId,
+    /// How the actor holds access (recorded with each of their batches); `None`: not determined.
+    via: Option<Via>,
+}
+
+/// Who made a batch and how they held access.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct Author {
+    principal: PrincipalId,
+    via: Option<Via>,
 }
 
 /// One open document.
@@ -377,9 +387,9 @@ struct OpenDoc {
     document: CloudDocumentId,
     fencing_token: i64,
     /// The trusted principal recorded when each client id joined this room.
-    actors: HashMap<u32, PrincipalId>,
+    actors: HashMap<u32, Author>,
     /// Accepted batches not yet committed.
-    pending: Vec<(PrincipalId, Accepted)>,
+    pending: Vec<(Author, Accepted)>,
     /// Client ids handed out since the last commit: recorded with the next one, so an id is
     /// durable before its client's welcome is sent.
     issued: Vec<u32>,
@@ -799,27 +809,27 @@ async fn commit_batches(
     tenant: TenantId,
     document: CloudDocumentId,
     fencing_token: i64,
-    pending: Vec<(PrincipalId, Accepted)>,
+    pending: Vec<(Author, Accepted)>,
     issued: Vec<u32>,
 ) -> Result<(), &'static str> {
     let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| "begin")?;
     for ids in issued.chunks(room_clients_batch()) {
         record_issued(&mut transaction, document, ids).await.map_err(|_| "record clients")?;
     }
-    let mut actor = None;
+    let mut author: Option<Author> = None;
     let mut chunk = Vec::new();
-    for (batch_actor, batch) in pending {
-        if actor != Some(batch_actor) || chunk.len() == MAX_APPEND_BATCHES {
-            if let Some(previous) = actor {
-                append_events(&mut transaction, document, fencing_token, previous, &chunk).await.map_err(|_| "append")?;
+    for (batch_author, batch) in pending {
+        if author != Some(batch_author) || chunk.len() == MAX_APPEND_BATCHES {
+            if let Some(previous) = author {
+                append_events_via(&mut transaction, document, fencing_token, previous.principal, previous.via, &chunk).await.map_err(|_| "append")?;
                 chunk.clear();
             }
-            actor = Some(batch_actor);
+            author = Some(batch_author);
         }
         chunk.push(batch);
     }
-    if let Some(last) = actor {
-        append_events(&mut transaction, document, fencing_token, last, &chunk).await.map_err(|_| "append")?;
+    if let Some(last) = author {
+        append_events_via(&mut transaction, document, fencing_token, last.principal, last.via, &chunk).await.map_err(|_| "append")?;
     }
     transaction.commit().await.map_err(|_| "commit")
 }
@@ -964,6 +974,19 @@ impl CloudBackend {
         }
     }
 
+    /// How a signed-in member holds access to `document` (S6-039); `None` when it can't be told,
+    /// which history shows as unknown rather than refusing the join.
+    fn member_via(&mut self, tenant: TenantId, principal: PrincipalId, document: CloudDocumentId) -> Option<Via> {
+        let pool = &self.pool;
+        let found = self.block(async {
+            let mut transaction = begin_tenant_transaction(pool, tenant).await.ok()?;
+            let via = access_via(&mut transaction, principal, document).await.ok().flatten();
+            let _ = transaction.rollback().await;
+            via
+        });
+        found.flatten()
+    }
+
     /// The account's display name and colour for a signed-in member, remembered for the hub. A
     /// profile that can't be read refuses the hello (the client's own claim is not a substitute).
     fn member_display(&mut self, file: &str, link: &str, principal: PrincipalId) -> Result<(), String> {
@@ -997,7 +1020,8 @@ impl CloudBackend {
             log::warn!("document {file}: too many links and members in use to watch another; hello refused");
             return Err(UNAVAILABLE.into());
         }
-        self.admitted.insert(file.to_string(), Admitted { tenant: admission.tenant, actor: admission.principal });
+        let via = self.member_via(admission.tenant, admission.principal, document);
+        self.admitted.insert(file.to_string(), Admitted { tenant: admission.tenant, actor: admission.principal, via });
         let link = member_link(admission.session);
         self.member_display(file, &link, admission.principal)?;
         let access = if admission.edit { Access::Edit } else { Access::View };
@@ -1030,7 +1054,8 @@ impl CloudBackend {
             log::warn!("document {file}: too many links and members in use to watch another; hello refused");
             return Err(UNAVAILABLE.into());
         }
-        self.admitted.insert(file.to_string(), Admitted { tenant: admission.tenant, actor: admission.principal });
+        let via = self.member_via(admission.tenant, admission.principal, document);
+        self.admitted.insert(file.to_string(), Admitted { tenant: admission.tenant, actor: admission.principal, via });
         let link = member_link(admission.session);
         self.member_display(file, &link, admission.principal)?;
         let access = if admission.edit { Access::Edit } else { Access::View };
@@ -1066,7 +1091,7 @@ impl Backend for CloudBackend {
             log::warn!("document {file}: too many share links in use to watch another; hello refused");
             return Err(UNAVAILABLE.into());
         }
-        self.admitted.insert(file.to_string(), Admitted { tenant: link.tenant_id, actor: link.created_by });
+        self.admitted.insert(file.to_string(), Admitted { tenant: link.tenant_id, actor: link.created_by, via: Some(Via::ShareLink(link.id)) });
         let pool = &self.pool;
         let label = match self.block(figcraft_cloud_storage::share_links::link_label(pool, link.tenant_id, link.id)) {
             Some(Ok(label)) => label,
@@ -1152,7 +1177,7 @@ impl Backend for CloudBackend {
     fn joined(&mut self, file: &str, id: u32) {
         self.idle_since.remove(file);
         if let (Some(admitted), Some(doc)) = (self.admitted.get(file), self.open.get_mut(file)) {
-            doc.actors.insert(id, admitted.actor);
+            doc.actors.insert(id, Author { principal: admitted.actor, via: admitted.via });
         }
     }
 
@@ -1181,7 +1206,7 @@ impl Backend for CloudBackend {
             return;
         }
         let attributed = self.open.get(file).and_then(|doc| {
-            accepted.into_iter().map(|batch| doc.actors.get(&batch.author).copied().map(|actor| (actor, batch))).collect::<Option<Vec<_>>>()
+            accepted.into_iter().map(|batch| doc.actors.get(&batch.author).copied().map(|author| (author, batch))).collect::<Option<Vec<_>>>()
         });
         match attributed {
             Some(batches) => {

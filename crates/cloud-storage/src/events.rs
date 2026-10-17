@@ -28,6 +28,7 @@ use figcraft_collab::message;
 use sha2::{Digest, Sha256};
 
 use crate::TenantTransaction;
+use crate::attribution::Via;
 
 /// Largest stored payload, matching the `document_events.payload` `CHECK` constraint. It is
 /// smaller than the collaboration protocol's message limit, so the relay must refuse a larger
@@ -298,6 +299,19 @@ pub async fn append_events(
     actor: PrincipalId,
     batches: &[Accepted],
 ) -> Result<Appended, EventRepositoryError> {
+    append_events_via(transaction, document_id, fencing_token, actor, None, batches).await
+}
+
+/// [`append_events`] that also records how `actor` held access (S6-039): `via` is written to the
+/// rows' `via_kind`/`via_id`. `None` records "unknown".
+pub async fn append_events_via(
+    transaction: &mut TenantTransaction<'_>,
+    document_id: CloudDocumentId,
+    fencing_token: i64,
+    actor: PrincipalId,
+    via: Option<Via>,
+    batches: &[Accepted],
+) -> Result<Appended, EventRepositoryError> {
     if batches.is_empty() || batches.len() > MAX_APPEND_BATCHES {
         return Err(EventRepositoryError::InvalidInput);
     }
@@ -337,8 +351,8 @@ pub async fn append_events(
     let checksums: Vec<Vec<u8>> = encoded.iter().map(|event| event.checksum.to_vec()).collect();
     let payloads: Vec<Vec<u8>> = encoded.into_iter().map(|event| event.payload).collect();
     sqlx::query(
-        "INSERT INTO document_events (tenant_id, document_id, seq, fencing_token, payload, checksum, actor_principal_id) \
-         SELECT $1::uuid, $2::uuid, event.seq, $3, event.payload, event.checksum, $4::uuid \
+        "INSERT INTO document_events (tenant_id, document_id, seq, fencing_token, payload, checksum, actor_principal_id, via_kind, via_id) \
+         SELECT $1::uuid, $2::uuid, event.seq, $3, event.payload, event.checksum, $4::uuid, $8, $9::uuid \
          FROM UNNEST($5::bigint[], $6::bytea[], $7::bytea[]) AS event (seq, payload, checksum)",
     )
     .bind(tenant_id.to_string())
@@ -348,6 +362,8 @@ pub async fn append_events(
     .bind(seqs)
     .bind(payloads)
     .bind(checksums)
+    .bind(via.map(Via::kind))
+    .bind(via.and_then(Via::id).map(|id| id.to_string()))
     .execute(transaction.connection())
     .await
     .map_err(event_database_error)?;

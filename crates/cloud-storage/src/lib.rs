@@ -7,6 +7,7 @@ pub mod access_guard;
 pub mod account_settings;
 pub mod accounts;
 pub mod assets;
+pub mod attribution;
 pub mod audit;
 pub mod bootstrap;
 pub mod bucket_admin;
