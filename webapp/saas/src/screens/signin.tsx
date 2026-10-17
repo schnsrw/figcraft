@@ -608,8 +608,10 @@ export function InvitedSignUp({
   const { client, refresh } = useSession();
   const { navigate } = useRouter();
   const nameId = useId();
+  const loginId = useId();
   const [token] = useState(readInviteToken);
   const [name, setName] = useState("");
+  const [login, setLogin] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
   const [problem, setProblem] = useState<string | null>(null);
@@ -664,6 +666,7 @@ export function InvitedSignUp({
     try {
       await client.post("/auth/password/signup", {
         invitation: token,
+        login: login.trim(),
         display_name: name.trim(),
         password,
       });
@@ -679,7 +682,9 @@ export function InvitedSignUp({
         failure.status === 404
           ? "This invitation can't be used. It may have expired, been revoked or already been used. Ask the person who invited you for a new link."
           : failure.status === 409
-            ? "An account for this address already exists. Sign in with it instead."
+            ? failure.reason === "login_taken"
+              ? "That login name is already taken. Choose another one."
+              : "An account with that login already exists. Sign in with it instead."
             : passwordProblem(failure),
       );
     }
@@ -709,6 +714,26 @@ export function InvitedSignUp({
             onChange={(event) => setName(event.target.value)}
           />
         </div>
+        <div className="field">
+          <label htmlFor={loginId}>Login name</label>
+          <input
+            id={loginId}
+            data-testid="invite-login"
+            value={login}
+            autoComplete="username"
+            autoCapitalize="off"
+            spellCheck={false}
+            minLength={3}
+            maxLength={128}
+            pattern="\S+"
+            required
+            onChange={(event) => setLogin(event.target.value)}
+          />
+          <p className="muted small">
+            At least 3 characters, no spaces. It doesn't have to be an email
+            address.
+          </p>
+        </div>
         <NewPasswordFields
           password={password}
           confirm={confirm}
@@ -726,7 +751,9 @@ export function InvitedSignUp({
           type="submit"
           className="button primary"
           data-testid="invite-submit"
-          disabled={busy || name.trim() === "" || password === ""}
+          disabled={
+            busy || name.trim() === "" || login.trim() === "" || password === ""
+          }
         >
           {busy ? "Creating…" : "Create account and join"}
         </button>

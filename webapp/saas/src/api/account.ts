@@ -10,6 +10,7 @@ export interface Profile {
   tenant_id?: string;
   /** Only when the person has a password account in the selected workspace. */
   login?: string | null;
+  must_change_password?: boolean;
 }
 
 /** One live browser session (never a token). Times are Unix seconds. */

@@ -24,7 +24,8 @@ export interface TeamMember {
 export interface Invitation {
   id: string;
   team_id: string;
-  email: string;
+  /** `null` for a link-only invitation. */
+  email: string | null;
   role: string;
   invited_by: string;
   expires_in_secs: number;
@@ -53,16 +54,25 @@ export interface AccountUser {
   /** `active` or `disabled`. */
   state: string;
   locked: boolean;
+  /** An administrator set the password; the person must choose their own at next sign-in. */
+  must_change_password: boolean;
 }
 
 export interface CreatedUser {
   principal_id: string;
   login: string;
   role: string;
+  must_change_password: boolean;
   /** Shown once; the person opens `/reset#token=…` with it to choose a password. */
-  setup_token: string;
-  expires_in_secs: number;
+  setup_token?: string;
+  expires_in_secs?: number;
+  /** A generated temporary password, shown once. */
+  generated_password?: string;
 }
+
+/** How a new person gets their first password. */
+export type InitialPassword =
+  { kind: "link" } | { kind: "typed"; password: string } | { kind: "generate" };
 
 export interface Grant {
   principal_id?: string;
@@ -124,7 +134,25 @@ export const people = {
     client: ApiClient,
     tenant: string,
     user: { login: string; display_name: string; role: string },
-  ) => client.post<CreatedUser>(`/tenants/${tenant}/users`, user),
+    initial: InitialPassword = { kind: "link" },
+  ) =>
+    client.post<CreatedUser>(`/tenants/${tenant}/users`, {
+      ...user,
+      ...(initial.kind === "typed"
+        ? { initial_password: initial.password }
+        : {}),
+      ...(initial.kind === "generate" ? { generate_password: true } : {}),
+    }),
+  setUserPassword: (
+    client: ApiClient,
+    tenant: string,
+    principal: string,
+    change: { password: string } | { generate: true },
+  ) =>
+    client.post<{ must_change_password: boolean; generated_password?: string }>(
+      `/tenants/${tenant}/users/${principal}/password`,
+      change,
+    ),
   disableUser: (client: ApiClient, tenant: string, principal: string) =>
     client.post<void>(`/tenants/${tenant}/users/${principal}/disable`),
   enableUser: (client: ApiClient, tenant: string, principal: string) =>
@@ -195,15 +223,19 @@ export const people = {
     client: ApiClient,
     tenant: string,
     team: string,
-    email: string,
+    email: string | null,
     role: string,
     expiresInSecs?: number,
   ) =>
     client.post<CreatedInvitation>(
       `/tenants/${tenant}/teams/${team}/invitations`,
-      expiresInSecs === undefined
-        ? { email, role }
-        : { email, role, expires_in_secs: expiresInSecs },
+      {
+        ...(email === null ? {} : { email }),
+        role,
+        ...(expiresInSecs === undefined
+          ? {}
+          : { expires_in_secs: expiresInSecs }),
+      },
     ),
   revokeInvitation: (
     client: ApiClient,

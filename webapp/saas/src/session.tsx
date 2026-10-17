@@ -36,6 +36,7 @@ export type SessionState =
   | { kind: "unavailable"; error: ApiError }
   | { kind: "unsupported"; credential: SessionInfo["credential"] }
   | { kind: "bootstrap_required"; session: SessionInfo }
+  | { kind: "must_change_password"; session: SessionInfo }
   | { kind: "choose_tenant"; session: SessionInfo; tenants: TenantSummary[] }
   | { kind: "no_tenant"; session: SessionInfo }
   | {
@@ -100,6 +101,10 @@ export async function loadSession(
   }
   if (session.bootstrap_required)
     return { kind: "bootstrap_required", session };
+  // An administrator set this password: nothing else works until the person chooses their own.
+  if (session.must_change_password === true) {
+    return { kind: "must_change_password", session };
+  }
 
   let tenants: TenantSummary[] = [];
   try {

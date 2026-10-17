@@ -329,7 +329,7 @@ describe("invitations", () => {
     await openPeople(api);
     await userEvent.click(screen.getByRole("tab", { name: "Invitations" }));
     await userEvent.type(
-      await screen.findByLabelText("Email address"),
+      await screen.findByLabelText(/Email address/),
       "new.person@acme.test",
     );
     await userEvent.selectOptions(screen.getByLabelText("Team"), TEAM);

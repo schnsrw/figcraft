@@ -371,6 +371,7 @@ describe("accepting an invitation with a password", () => {
       await screen.findByTestId("invite-name"),
       "Bo Builder",
     );
+    await userEvent.type(screen.getByTestId("invite-login"), "bo");
     await userEvent.type(
       screen.getByTestId("invite-password"),
       "a long passphrase",
@@ -400,6 +401,7 @@ describe("accepting an invitation with a password", () => {
       api.calls.find((c) => c.path === "/auth/password/signup")?.body,
     ).toEqual({
       invitation: "tok_ABC-123_xyz",
+      login: "bo",
       display_name: "Bo Builder",
       password: "a long passphrase",
     });
@@ -410,7 +412,17 @@ describe("accepting an invitation with a password", () => {
     window.history.replaceState(null, "", "/invite#token=tok_ABC-123_xyz");
     const replies = [
       apiError(404, "not_found", "x"),
-      apiError(409, "conflict", "x"),
+      {
+        status: 409,
+        body: {
+          error: {
+            code: "conflict",
+            reason: "login_taken",
+            message: "The request conflicts with the current state.",
+            request_id: "r",
+          },
+        },
+      },
       {
         status: 400,
         body: {
@@ -426,7 +438,11 @@ describe("accepting an invitation with a password", () => {
     const api = inviteApi(() => replies.shift() ?? { body: {} });
     render(<App client={api.client()} />);
     await fill();
-    for (const expected of ["can't be used", "already exists", "Too short."]) {
+    for (const expected of [
+      "can't be used",
+      "login name is already taken",
+      "Too short.",
+    ]) {
       await userEvent.click(screen.getByTestId("invite-submit"));
       await waitFor(() =>
         expect(screen.getByTestId("invite-error").textContent).toContain(

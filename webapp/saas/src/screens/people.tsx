@@ -10,6 +10,7 @@ import type { ApiError } from "../api/client";
 import {
   type AccountUser,
   type CreatedUser,
+  type InitialPassword,
   type Invitation,
   type Member,
   TEAM_ROLES,
@@ -142,6 +143,30 @@ export function OneTimeLink({
   );
 }
 
+/** A generated temporary password, shown once. */
+export function OneTimeSecret({
+  heading,
+  value,
+  note,
+  testId,
+}: {
+  heading: string;
+  value: string;
+  note: string;
+  testId: string;
+}) {
+  return (
+    <div role="status" className="notice ok" data-testid={testId}>
+      <p>
+        <strong>{heading}</strong> {note}
+      </p>
+      <p>
+        <code data-testid={`${testId}-value`}>{value}</code>
+      </p>
+    </div>
+  );
+}
+
 function hoursText(seconds: number): string {
   if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))} minutes`;
   const hours = Math.round(seconds / 3600);
@@ -172,8 +197,14 @@ function MembersTab() {
     url: string;
     note: string;
   } | null>(null);
+  const [secret, setSecret] = useState<{
+    heading: string;
+    value: string;
+    note: string;
+  } | null>(null);
   const [filter, setFilter] = useState("");
   const [confirm, setConfirm] = useState<Member | null>(null);
+  const [setPasswordFor, setSetPasswordFor] = useState<Member | null>(null);
   const filterId = useId();
 
   const refresh = () => {
@@ -184,6 +215,7 @@ function MembersTab() {
   const act = async (action: () => Promise<unknown>) => {
     setProblem(null);
     setNotice(null);
+    setSecret(null);
     try {
       await action();
     } catch (error) {
@@ -227,12 +259,27 @@ function MembersTab() {
       {canManage && (
         <AddPerson
           onCreated={(created, name) => {
-            issue(
-              `${name} was added.`,
-              created.setup_token,
-              created.expires_in_secs,
-              name,
-            );
+            setNotice(null);
+            setIssued(null);
+            setSecret(null);
+            if (created.generated_password !== undefined) {
+              setSecret({
+                heading: `${name} was added.`,
+                value: created.generated_password,
+                note: "Give them this temporary password now; it won't be shown again. They must choose their own the first time they sign in.",
+              });
+            } else if (created.setup_token !== undefined) {
+              issue(
+                `${name} was added.`,
+                created.setup_token,
+                created.expires_in_secs ?? 86_400,
+                name,
+              );
+            } else {
+              setNotice(
+                `${name} was added with the temporary password you typed. They must choose their own the first time they sign in.`,
+              );
+            }
             refresh();
           }}
           onProblem={setProblem}
@@ -252,6 +299,14 @@ function MembersTab() {
         <p role="status" className="notice ok">
           {notice}
         </p>
+      )}
+      {secret !== null && (
+        <OneTimeSecret
+          heading={secret.heading}
+          value={secret.value}
+          note={secret.note}
+          testId="onetime-password"
+        />
       )}
       {issued !== null && (
         <OneTimeLink
@@ -329,6 +384,10 @@ function MembersTab() {
                     <StateBadge state="suspended" />
                   ) : account?.locked === true ? (
                     <span className="badge">Locked</span>
+                  ) : account?.must_change_password === true ? (
+                    <span className="badge" data-testid="must-change-badge">
+                      Must change password
+                    </span>
                   ) : (
                     "Active"
                   )}
@@ -399,6 +458,15 @@ function MembersTab() {
                               >
                                 {`Reset password for ${name}`}
                               </button>
+                              {!ownerRow && (
+                                <button
+                                  type="button"
+                                  className="button"
+                                  onClick={() => setSetPasswordFor(member)}
+                                >
+                                  {`Set a new password for ${name}`}
+                                </button>
+                              )}
                               <button
                                 type="button"
                                 className="button"
@@ -447,6 +515,31 @@ function MembersTab() {
         <p className="muted small">
           Only owners and admins can change roles or remove people.
         </p>
+      )}
+      {setPasswordFor !== null && (
+        <SetPasswordDialog
+          member={setPasswordFor}
+          onClose={() => setSetPasswordFor(null)}
+          onDone={(result, name) => {
+            setNotice(null);
+            setIssued(null);
+            setSecret(
+              result.generated_password === undefined
+                ? null
+                : {
+                    heading: `New temporary password for ${name}.`,
+                    value: result.generated_password,
+                    note: "Give it to them now; it won't be shown again. They must choose their own at next sign-in, and they were signed out.",
+                  },
+            );
+            if (result.generated_password === undefined) {
+              setNotice(
+                `${name}'s password was changed. They must choose their own at next sign-in, and they were signed out.`,
+              );
+            }
+            refresh();
+          }}
+        />
       )}
       {confirm !== null && (
         <Modal title="Remove member" onClose={() => setConfirm(null)}>
@@ -498,7 +591,11 @@ function AddPerson({
   const [login, setLogin] = useState("");
   const [name, setName] = useState("");
   const [newRole, setNewRole] = useState("editor");
+  const [how, setHow] = useState<"link" | "typed" | "generate">("link");
+  const [typed, setTyped] = useState("");
   const [busy, setBusy] = useState(false);
+  const howId = useId();
+  const typedId = useId();
 
   if (!open) {
     return (
@@ -524,15 +621,24 @@ function AddPerson({
         setBusy(true);
         onProblem(null);
         people
-          .createUser(client, tenantId, {
-            login: login.trim(),
-            display_name: name.trim(),
-            role: newRole,
-          })
+          .createUser(
+            client,
+            tenantId,
+            {
+              login: login.trim(),
+              display_name: name.trim(),
+              role: newRole,
+            },
+            how === "typed"
+              ? ({ kind: "typed", password: typed } satisfies InitialPassword)
+              : ({ kind: how } satisfies InitialPassword),
+          )
           .then((created) => {
             onCreated(created, name.trim());
             setLogin("");
             setName("");
+            setTyped("");
+            setHow("link");
             setOpen(false);
           })
           .catch((error: unknown) => onProblem(asApiError(error)))
@@ -582,18 +688,194 @@ function AddPerson({
           ))}
         </select>
       </div>
+      <fieldset className="field wide-field" aria-describedby={`${howId}-hint`}>
+        <legend>First password</legend>
+        <label className="check">
+          <input
+            type="radio"
+            name={howId}
+            data-testid="addperson-how-link"
+            checked={how === "link"}
+            onChange={() => setHow("link")}
+          />
+          Send a link to choose their own
+        </label>
+        <label className="check">
+          <input
+            type="radio"
+            name={howId}
+            data-testid="addperson-how-typed"
+            checked={how === "typed"}
+            onChange={() => setHow("typed")}
+          />
+          I'll type a temporary password
+        </label>
+        <label className="check">
+          <input
+            type="radio"
+            name={howId}
+            data-testid="addperson-how-generate"
+            checked={how === "generate"}
+            onChange={() => setHow("generate")}
+          />
+          Generate a temporary password
+        </label>
+        <p id={`${howId}-hint`} className="muted small">
+          A temporary password must be changed by the person at their first
+          sign-in.
+        </p>
+      </fieldset>
+      {how === "typed" && (
+        <div className="field grow">
+          <label htmlFor={typedId}>Temporary password</label>
+          <input
+            id={typedId}
+            data-testid="addperson-temp-password"
+            type="password"
+            autoComplete="new-password"
+            value={typed}
+            maxLength={1024}
+            required
+            onChange={(event) => setTyped(event.target.value)}
+          />
+        </div>
+      )}
       <button
         type="submit"
         className="button primary"
         data-testid="addperson-submit"
-        disabled={busy || login.trim() === "" || name.trim() === ""}
+        disabled={
+          busy ||
+          login.trim() === "" ||
+          name.trim() === "" ||
+          (how === "typed" && typed === "")
+        }
       >
-        {busy ? "Adding…" : "Create and get link"}
+        {busy
+          ? "Adding…"
+          : how === "link"
+            ? "Create and get link"
+            : how === "typed"
+              ? "Create person"
+              : "Create and show password"}
       </button>
       <button type="button" className="button" onClick={() => setOpen(false)}>
         Cancel
       </button>
     </form>
+  );
+}
+
+/** Admin sets a temporary password for a person ranked below them. */
+function SetPasswordDialog({
+  member,
+  onClose,
+  onDone,
+}: {
+  member: Member;
+  onClose: () => void;
+  onDone: (
+    result: { must_change_password: boolean; generated_password?: string },
+    name: string,
+  ) => void;
+}) {
+  const { client, tenantId } = useReady();
+  const typedId = useId();
+  const groupId = useId();
+  const [how, setHow] = useState<"typed" | "generate">("generate");
+  const [typed, setTyped] = useState("");
+  const [problem, setProblem] = useState<ApiError | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <Modal
+      title={`Set a new password for ${member.display_name}`}
+      onClose={onClose}
+    >
+      <form
+        className="form"
+        data-testid="setpw-form"
+        onSubmit={(event: FormEvent) => {
+          event.preventDefault();
+          if (busy) return;
+          setBusy(true);
+          setProblem(null);
+          people
+            .setUserPassword(
+              client,
+              tenantId,
+              member.principal_id,
+              how === "typed" ? { password: typed } : { generate: true },
+            )
+            .then((result) => {
+              onDone(result, member.display_name);
+              onClose();
+            })
+            .catch((error: unknown) => {
+              setProblem(asApiError(error));
+              setBusy(false);
+            });
+        }}
+      >
+        <p className="muted">
+          The password is temporary: {member.display_name} is signed out
+          everywhere and must choose their own at next sign-in.
+        </p>
+        <label className="check">
+          <input
+            type="radio"
+            name={groupId}
+            data-testid="setpw-generate"
+            checked={how === "generate"}
+            onChange={() => setHow("generate")}
+          />
+          Generate one for me
+        </label>
+        <label className="check">
+          <input
+            type="radio"
+            name={groupId}
+            data-testid="setpw-typed"
+            checked={how === "typed"}
+            onChange={() => setHow("typed")}
+          />
+          I'll type it
+        </label>
+        {how === "typed" && (
+          <div className="field">
+            <label htmlFor={typedId}>Temporary password</label>
+            <input
+              id={typedId}
+              data-testid="setpw-password"
+              type="password"
+              autoComplete="new-password"
+              value={typed}
+              maxLength={1024}
+              required
+              onChange={(event) => setTyped(event.target.value)}
+            />
+          </div>
+        )}
+        {problem !== null && (
+          <div data-testid="setpw-error">
+            <ErrorNotice error={problem} />
+          </div>
+        )}
+        <div className="actions">
+          <button
+            type="submit"
+            className="button primary"
+            data-testid="setpw-submit"
+            disabled={busy || (how === "typed" && typed === "")}
+          >
+            {busy ? "Saving…" : "Set password"}
+          </button>
+          <button type="button" className="button" onClick={onClose}>
+            Cancel
+          </button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
@@ -920,7 +1202,10 @@ function InvitationsTab() {
   const [team, setTeam] = useState("");
   const [teamRole, setTeamRole] = useState("viewer");
   const [problem, setProblem] = useState<ApiError | null>(null);
-  const [link, setLink] = useState<{ email: string; url: string } | null>(null);
+  const [link, setLink] = useState<{
+    email: string | null;
+    url: string;
+  } | null>(null);
   const [copied, setCopied] = useState(false);
   const emailId = useId();
   const teamId = useId();
@@ -955,11 +1240,11 @@ function InvitationsTab() {
         client,
         tenantId,
         team,
-        email.trim(),
+        email.trim() === "" ? null : email.trim(),
         teamRole,
       );
       setLink({
-        email: email.trim(),
+        email: email.trim() === "" ? null : email.trim(),
         url: invitationLink(window.location.origin, created.token),
       });
       setEmail("");
@@ -982,12 +1267,11 @@ function InvitationsTab() {
       ) : (
         <form className="inline-form" onSubmit={(event) => void send(event)}>
           <div className="field grow">
-            <label htmlFor={emailId}>Email address</label>
+            <label htmlFor={emailId}>Email address (optional)</label>
             <input
               id={emailId}
               type="email"
               value={email}
-              required
               maxLength={254}
               onChange={(event) => setEmail(event.target.value)}
             />
@@ -1025,7 +1309,7 @@ function InvitationsTab() {
           <button
             type="submit"
             className="button primary"
-            disabled={email.trim() === "" || team === ""}
+            disabled={team === ""}
           >
             Create invitation
           </button>
@@ -1035,8 +1319,14 @@ function InvitationsTab() {
       {link !== null && (
         <div role="status" className="notice ok">
           <p>
-            Invitation for <strong>{link.email}</strong> created. Copy the link
-            now; it won't be shown again.
+            {link.email === null ? (
+              "Link-only invitation created."
+            ) : (
+              <>
+                Invitation for <strong>{link.email}</strong> created.
+              </>
+            )}{" "}
+            Copy the link now; it won't be shown again.
           </p>
           <p>
             <code>{link.url}</code>
@@ -1062,7 +1352,9 @@ function InvitationsTab() {
           {pending.value.items.map((invitation) => (
             <li key={invitation.id}>
               <div className="row-main">
-                <span className="row-title">{invitation.email}</span>
+                <span className="row-title">
+                  {invitation.email ?? "Link-only invitation"}
+                </span>
                 <span className="muted small">
                   {teamName(invitation.team_id)} · {roleLabel(invitation.role)}
                 </span>
@@ -1070,7 +1362,7 @@ function InvitationsTab() {
               <button
                 type="button"
                 className="button"
-                aria-label={`Revoke invitation for ${invitation.email}`}
+                aria-label={`Revoke invitation for ${invitation.email ?? "link-only invitation"}`}
                 onClick={() => {
                   setProblem(null);
                   people

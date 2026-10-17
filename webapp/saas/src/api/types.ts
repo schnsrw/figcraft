@@ -17,6 +17,8 @@ export interface SessionInfo {
   tenant: SessionTenant | null;
   session_expires_in?: number;
   bootstrap_required: boolean;
+  /** An administrator set the password: the session may only change it until then. */
+  must_change_password?: boolean;
   deployment: Deployment;
 }
 
@@ -76,4 +78,6 @@ export interface SignInMethods {
   open_registration: boolean;
   /** True while a single-tenant deployment still awaits its first owner (when the server says). */
   bootstrap_required?: boolean;
+  /** Whether the server can send email; false means show copyable links only. */
+  mail_configured?: boolean;
 }

@@ -12,6 +12,7 @@ import {
   UnsupportedScreen,
 } from "./screens/entry";
 import { BootstrapScreen } from "./screens/bootstrap";
+import { MustChangePasswordScreen } from "./screens/mustchange";
 import { ResetScreen } from "./screens/reset";
 import { InvitedSignUp, SetupScreen, SignInScreen } from "./screens/signin";
 import { InviteScreen, captureInviteToken } from "./screens/invite";
@@ -167,6 +168,8 @@ function Body({ branding }: { branding: Branding }) {
       return <UnsupportedScreen credential={state.credential} />;
     case "bootstrap_required":
       return <BootstrapScreen />;
+    case "must_change_password":
+      return <MustChangePasswordScreen />;
     case "choose_tenant":
       // An invitation can be accepted before choosing an organisation.
       return route.name === "invite" ? (
