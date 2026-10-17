@@ -292,7 +292,7 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(account_routes::resource_routes())
         .merge(me_routes::self_service_routes())
         .merge(me_api::me_routes())
-        .merge(hierarchy_api::routes())
+        .merge(hierarchy_api::hierarchy_routes())
         .merge(admin_users_routes::resource_routes())
         .merge(history_api::history_routes())
         .merge(documents_api::routes())

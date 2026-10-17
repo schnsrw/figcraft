@@ -49,7 +49,7 @@ async fn openapi() -> Response {
     ([(axum::http::header::CONTENT_TYPE, "application/json")], OPENAPI_JSON).into_response()
 }
 
-pub(crate) fn routes() -> Router<AppState> {
+pub(crate) fn hierarchy_routes() -> Router<AppState> {
     let tenant = "/tenants/{tenant}";
     Router::new()
         .route("/hierarchy/openapi.json", get(openapi))
