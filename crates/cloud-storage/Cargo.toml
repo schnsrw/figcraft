@@ -29,6 +29,8 @@ ring = "0.17"
 # S6-014: resolving webhook destinations and the delivery timeouts (net, rt, time only).
 tokio = { workspace = true }
 roxmltree = "0.21"
+# S6-032: NFC-normalised logins; already resolved in the workspace (MIT OR Apache-2.0).
+unicode-normalization = { version = "0.1", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 zip = { workspace = true }

@@ -1910,6 +1910,7 @@ dependencies = [
  "sha2 0.10.9",
  "sqlx",
  "tokio",
+ "unicode-normalization",
  "url",
  "webpki-roots",
  "zip",
