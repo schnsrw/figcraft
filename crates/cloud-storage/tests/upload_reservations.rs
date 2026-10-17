@@ -11,6 +11,16 @@ use figcraft_cloud_storage::uploads::{
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+/// Fixtures and raw inspection queries run as the administrator: row-level security (S4-014)
+/// hides every tenant row from the runtime role outside a tenant transaction. Repository calls
+/// still run as the runtime role.
+async fn admin_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+    let file = std::env::var("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE")
+        .map_err(|_| sqlx::Error::Configuration("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE is unset".into()))?;
+    let url = std::fs::read_to_string(file)?;
+    sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(url.trim_end()).await
+}
+
 const TENANT: &str = "a2000000-0000-4000-8000-000000000001";
 const OTHER_TENANT: &str = "a2000000-0000-4000-8000-000000000002";
 const PRINCIPAL: &str = "a2000000-0000-4000-8000-000000000009";
@@ -88,10 +98,10 @@ fn size(bytes: &[u8]) -> i64 {
 
 /// Force a committed reservation's expiry into the past (the table requires it to stay after
 /// `created_at`, which is the reserving transaction's start).
-async fn backdate(pool: &PgPool, id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
+async fn backdate(_pool: &PgPool, id: Uuid) -> Result<(), Box<dyn std::error::Error>> {
     sqlx::query("UPDATE upload_reservations SET expires_at = created_at + interval '1 microsecond' WHERE id = $1::uuid")
         .bind(id.to_string())
-        .execute(pool)
+        .execute(&admin_pool().await?)
         .await?;
     Ok(())
 }

@@ -15,9 +15,9 @@
 use figcraft_cloud_domain::{PrincipalId, TenantId, Uuid};
 use sqlx::PgPool;
 
-use crate::TenantTransaction;
 use crate::audit::record_audit_event;
 use crate::sessions::{constant_time_eq, random_token, session_token_hash, well_formed_token};
+use crate::{TenantTransaction, begin_tenant_transaction};
 
 /// Default bootstrap token lifetime (24 hours).
 pub const DEFAULT_BOOTSTRAP_LIFETIME_SECS: i64 = 24 * 60 * 60;
@@ -184,9 +184,12 @@ pub async fn complete_bootstrap(transaction: &mut TenantTransaction<'_>, token: 
 }
 
 /// True while `tenant_id` still needs bootstrap: no completed bootstrap row and no active
-/// `tenant_owner`. Read through the pool so request middleware can call it cheaply.
+/// `tenant_owner`. Reads in a short read-only transaction scoped to `tenant_id` (row-level
+/// security admits nothing outside one, S4-014).
 pub async fn bootstrap_required(pool: &PgPool, tenant_id: TenantId) -> Result<bool, BootstrapError> {
-    let done: bool = sqlx::query_scalar(OWNED_SQL).bind(tenant_id.to_string()).fetch_one(pool).await.map_err(|_| BootstrapError::Database)?;
+    let mut transaction = begin_tenant_transaction(pool, tenant_id).await.map_err(|_| BootstrapError::Database)?;
+    let done = already_owned(&mut transaction).await?;
+    transaction.rollback().await.map_err(|_| BootstrapError::Database)?;
     Ok(!done)
 }
 

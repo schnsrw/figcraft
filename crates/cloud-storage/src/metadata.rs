@@ -209,26 +209,22 @@ pub async fn get_tenant(transaction: &mut TenantTransaction<'_>) -> Result<Optio
 }
 
 /// Discover only tenants where the trusted principal has active membership. This is the
-/// pre-selection query; no tenant-scoped transaction exists yet.
+/// pre-selection query; no tenant-scoped transaction exists yet, so it reads through the SECURITY
+/// DEFINER lookup `figcraft_principal_tenants` (S4-014).
 pub async fn list_tenants_for_principal(
     pool: &PgPool,
     principal_id: PrincipalId,
     after: Option<TenantId>,
     size: PageSize,
 ) -> Result<Page<TenantRecord, TenantId>, RepositoryError> {
-    let rows: Vec<TenantRow> = sqlx::query_as(
-        "SELECT t.id::text, t.slug, t.name, t.state, t.plan_id, t.home_region \
-         FROM tenants t JOIN tenant_members m ON m.tenant_id = t.id \
-         WHERE m.principal_id = $1::uuid AND m.state = 'active' \
-           AND ($2::uuid IS NULL OR t.id > $2::uuid) \
-         ORDER BY t.id LIMIT $3",
-    )
-    .bind(principal_id.to_string())
-    .bind(after.map(|id| id.to_string()))
-    .bind(size.query_limit())
-    .fetch_all(pool)
-    .await
-    .map_err(database_error)?;
+    let rows: Vec<TenantRow> =
+        sqlx::query_as("SELECT id, slug, name, state, plan_id, home_region FROM figcraft_principal_tenants($1::uuid, $2::uuid, $3::integer, true)")
+            .bind(principal_id.to_string())
+            .bind(after.map(|id| id.to_string()))
+            .bind(size.query_limit())
+            .fetch_all(pool)
+            .await
+            .map_err(database_error)?;
     Ok(page(rows.into_iter().map(tenant).collect::<Result<Vec<_>, _>>()?, size, |item| item.id))
 }
 

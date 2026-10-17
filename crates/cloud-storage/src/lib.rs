@@ -146,6 +146,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
         DO $roles$
         DECLARE
             table_name TEXT;
+            function_signature TEXT;
             database_name TEXT := current_database();
         BEGIN
             IF octet_length(current_setting('figcraft.migrator_password')) < 32
@@ -204,6 +205,21 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                 ELSE
                     EXECUTE format('GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.%I TO figcraft_runtime', table_name);
                 END IF;
+            END LOOP;
+
+            -- S4-014: the SECURITY DEFINER pre-tenant lookups run as the migrator (so the
+            -- definer_lookup policies apply) and are executable by the runtime role only.
+            FOR function_signature IN
+                SELECT p.oid::regprocedure::text FROM pg_proc p
+                WHERE p.pronamespace = 'public'::regnamespace AND p.proname = ANY (ARRAY[
+                    'figcraft_live_share_link', 'figcraft_dead_share_links', 'figcraft_service_credential',
+                    'figcraft_invitation_tenant', 'figcraft_principal_tenants'
+                ])
+            LOOP
+                EXECUTE format('ALTER FUNCTION %s OWNER TO figcraft_migrator', function_signature);
+                EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC', function_signature);
+                EXECUTE format('REVOKE ALL ON FUNCTION %s FROM figcraft_runtime', function_signature);
+                EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO figcraft_runtime', function_signature);
             END LOOP;
         END
         $roles$

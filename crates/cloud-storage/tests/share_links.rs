@@ -10,6 +10,16 @@ use figcraft_cloud_storage::share_links::{
 };
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+/// Fixtures and raw inspection queries run as the administrator: row-level security (S4-014)
+/// hides every tenant row from the runtime role outside a tenant transaction. Repository calls
+/// still run as the runtime role.
+async fn admin_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+    let file = std::env::var("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE")
+        .map_err(|_| sqlx::Error::Configuration("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE is unset".into()))?;
+    let url = std::fs::read_to_string(file)?;
+    sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(url.trim_end()).await
+}
+
 const TENANT: &str = "b1000000-0000-4000-8000-000000000011";
 const OTHER_TENANT: &str = "b1000000-0000-4000-8000-000000000012";
 const ACTOR: &str = "b1000000-0000-4000-8000-000000000019";
@@ -92,12 +102,14 @@ async fn links_resolve_to_their_document_and_role_and_store_only_a_hash() -> Tes
     assert_eq!(resolved.created_by, ACTOR.parse::<PrincipalId>()?);
     assert_eq!(resolve_share_link(&pool, &viewer).await?.role, ShareRole::Viewer);
 
-    let stored: Vec<u8> =
-        sqlx::query_scalar("SELECT token_hash FROM share_links WHERE id = $1::uuid").bind(editor_id.to_string()).fetch_one(&pool).await?;
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM share_links WHERE id = $1::uuid")
+        .bind(editor_id.to_string())
+        .fetch_one(&admin_pool().await?)
+        .await?;
     assert_eq!(stored, share_token_hash(&editor).to_vec());
     let leaked: i64 = sqlx::query_scalar("SELECT count(*) FROM share_links WHERE encode(token_hash, 'escape') LIKE '%' || $1 || '%' OR label = $1")
         .bind(&editor)
-        .fetch_one(&pool)
+        .fetch_one(&admin_pool().await?)
         .await?;
     assert_eq!(leaked, 0);
     Ok(())
@@ -142,7 +154,7 @@ async fn unknown_malformed_revoked_expired_and_archived_links_are_refused_alike(
     assert!(resolve_share_link(&pool, &expiring.secret).await.is_ok());
     sqlx::query("UPDATE share_links SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' WHERE id = $1::uuid")
         .bind(expiring.id.to_string())
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await?;
     assert_eq!(resolve_share_link(&pool, &expiring.secret).await, Err(ShareLinkError::Refused));
 
@@ -251,8 +263,8 @@ mod c6 {
         Ok((link.id, link.secret))
     }
 
-    async fn now(pool: &PgPool) -> Result<i64, Box<dyn std::error::Error>> {
-        Ok(sqlx::query_scalar("SELECT floor(extract(epoch FROM now()))::bigint").fetch_one(pool).await?)
+    async fn now(_pool: &PgPool) -> Result<i64, Box<dyn std::error::Error>> {
+        Ok(sqlx::query_scalar("SELECT floor(extract(epoch FROM now()))::bigint").fetch_one(&admin_pool().await?).await?)
     }
 
     async fn revoke(pool: &PgPool, id: Uuid) -> TestResult {
@@ -379,7 +391,7 @@ mod c6 {
         revoke(&pool, revoked).await?;
         sqlx::query("UPDATE share_links SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' WHERE id = $1::uuid")
             .bind(expired.to_string())
-            .execute(&pool)
+            .execute(&admin_pool().await?)
             .await?;
         let mut transaction = begin_tenant_transaction(&pool, tenant).await.map_err(|error| format!("{error:?}"))?;
         archive_document(&mut transaction, archived).await?;

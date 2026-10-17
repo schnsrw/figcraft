@@ -283,7 +283,9 @@ pub async fn accept_invitation(
         return Err(InvitationError::Refused);
     }
     let hash = invitation_token_hash(token).to_vec();
-    let tenant: Option<String> = sqlx::query_scalar("SELECT tenant_id::text FROM team_invitations WHERE token_hash = $1")
+    // The token names the tenant, so this one lookup runs through the SECURITY DEFINER function
+    // (S4-014); everything else happens inside that tenant.
+    let tenant: Option<String> = sqlx::query_scalar("SELECT tenant FROM figcraft_invitation_tenant($1) AS tenant WHERE tenant IS NOT NULL")
         .bind(&hash)
         .fetch_optional(pool)
         .await

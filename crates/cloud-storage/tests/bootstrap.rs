@@ -10,6 +10,16 @@ use figcraft_cloud_storage::bootstrap::{
 use figcraft_cloud_storage::sessions::session_token_hash;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+/// Fixtures and raw inspection queries run as the administrator: row-level security (S4-014)
+/// hides every tenant row from the runtime role outside a tenant transaction. Repository calls
+/// still run as the runtime role.
+async fn admin_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+    let file = std::env::var("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE")
+        .map_err(|_| sqlx::Error::Configuration("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE is unset".into()))?;
+    let url = std::fs::read_to_string(file)?;
+    sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(url.trim_end()).await
+}
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
 async fn pool() -> Result<Option<PgPool>, Box<dyn std::error::Error>> {
@@ -25,24 +35,24 @@ fn suffix() -> String {
     Uuid::new_v4().simple().to_string().chars().skip(20).collect()
 }
 
-async fn tenant(pool: &PgPool) -> Result<TenantId, Box<dyn std::error::Error>> {
+async fn tenant(_pool: &PgPool) -> Result<TenantId, Box<dyn std::error::Error>> {
     let suffix = suffix();
     let id: TenantId = format!("c3b00000-0000-4000-8000-{suffix}").parse()?;
     sqlx::query("INSERT INTO tenants (id, slug, name, plan_id, home_region) VALUES ($1::uuid, $2, 'c3 bootstrap', 'test', 'local')")
         .bind(id.to_string())
         .bind(format!("c3-boot-{suffix}"))
-        .execute(pool)
+        .execute(&admin_pool().await?)
         .await?;
     Ok(id)
 }
 
-async fn user(pool: &PgPool, kind: &str, state: &str) -> Result<PrincipalId, Box<dyn std::error::Error>> {
+async fn user(_pool: &PgPool, kind: &str, state: &str) -> Result<PrincipalId, Box<dyn std::error::Error>> {
     let id: PrincipalId = format!("c3b10000-0000-4000-8000-{}", suffix()).parse()?;
     sqlx::query("INSERT INTO principals (id, kind, display_name, state) VALUES ($1::uuid, $2, 'c3 bootstrap user', $3)")
         .bind(id.to_string())
         .bind(kind)
         .bind(state)
-        .execute(pool)
+        .execute(&admin_pool().await?)
         .await?;
     Ok(id)
 }
@@ -86,8 +96,10 @@ async fn bootstrap_makes_the_first_user_owner_once() -> TestResult {
     let admin = user(&pool, "user", "active").await?;
     assert!(bootstrap_required(&pool, tenant).await?);
     let token = token(issue(&pool, tenant, DEFAULT_BOOTSTRAP_LIFETIME_SECS).await?)?;
-    let stored: Vec<u8> =
-        sqlx::query_scalar("SELECT token_hash FROM tenant_bootstrap WHERE tenant_id = $1::uuid").bind(tenant.to_string()).fetch_one(&pool).await?;
+    let stored: Vec<u8> = sqlx::query_scalar("SELECT token_hash FROM tenant_bootstrap WHERE tenant_id = $1::uuid")
+        .bind(tenant.to_string())
+        .fetch_one(&admin_pool().await?)
+        .await?;
     assert_eq!(stored, session_token_hash(&token).to_vec());
     assert!(bootstrap_required(&pool, tenant).await?);
 
@@ -97,7 +109,7 @@ async fn bootstrap_makes_the_first_user_owner_once() -> TestResult {
         sqlx::query_as("SELECT role, state FROM tenant_members WHERE tenant_id = $1::uuid AND principal_id = $2::uuid")
             .bind(tenant.to_string())
             .bind(admin.to_string())
-            .fetch_one(&pool)
+            .fetch_one(&admin_pool().await?)
             .await?;
     assert_eq!((role.as_str(), state.as_str()), ("tenant_owner", "active"));
     let audited: i64 = sqlx::query_scalar(
@@ -105,7 +117,7 @@ async fn bootstrap_makes_the_first_user_owner_once() -> TestResult {
     )
     .bind(tenant.to_string())
     .bind(admin.to_string())
-    .fetch_one(&pool)
+    .fetch_one(&admin_pool().await?)
     .await?;
     assert_eq!(audited, 1);
 
@@ -150,7 +162,7 @@ async fn wrong_expired_superseded_and_junk_tokens_are_refused() -> TestResult {
         "UPDATE tenant_bootstrap SET created_at = now() - interval '2 days', expires_at = now() - interval '1 second' WHERE tenant_id = $1::uuid",
     )
     .bind(tenant.to_string())
-    .execute(&pool)
+    .execute(&admin_pool().await?)
     .await?;
     assert_eq!(complete(&pool, tenant, &new, admin).await?, Err(BootstrapError::Refused));
     assert!(bootstrap_required(&pool, tenant).await?);
@@ -171,12 +183,12 @@ async fn an_existing_owner_means_no_bootstrap() -> TestResult {
     sqlx::query("INSERT INTO tenant_members (tenant_id, principal_id, role) VALUES ($1::uuid, $2::uuid, 'tenant_owner')")
         .bind(tenant.to_string())
         .bind(owner.to_string())
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await?;
     assert!(!bootstrap_required(&pool, tenant).await?);
     assert_eq!(issue(&pool, tenant, 60).await?, Ok(BootstrapStatus::Completed));
     // A suspended owner does not count.
-    sqlx::query("UPDATE principals SET state = 'suspended' WHERE id = $1::uuid").bind(owner.to_string()).execute(&pool).await?;
+    sqlx::query("UPDATE principals SET state = 'suspended' WHERE id = $1::uuid").bind(owner.to_string()).execute(&admin_pool().await?).await?;
     assert!(bootstrap_required(&pool, tenant).await?);
     // Unknown tenant.
     let unknown: TenantId = format!("c3b20000-0000-4000-8000-{}", suffix()).parse()?;

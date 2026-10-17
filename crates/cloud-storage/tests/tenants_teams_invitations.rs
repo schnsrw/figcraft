@@ -18,6 +18,16 @@ use figcraft_cloud_storage::tenants::{
 use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+/// Fixtures and raw inspection queries run as the administrator: row-level security (S4-014)
+/// hides every tenant row from the runtime role outside a tenant transaction. Repository calls
+/// still run as the runtime role.
+async fn admin_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+    let file = std::env::var("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE")
+        .map_err(|_| sqlx::Error::Configuration("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE is unset".into()))?;
+    let url = std::fs::read_to_string(file)?;
+    sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(url.trim_end()).await
+}
+
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 type Fallible<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -45,9 +55,12 @@ async fn tx(pool: &PgPool, tenant: TenantId) -> Fallible<TenantTransaction<'_>> 
     begin_tenant_transaction(pool, tenant).await.map_err(|error| format!("{error:?}").into())
 }
 
-async fn principal(pool: &PgPool) -> Fallible<PrincipalId> {
+async fn principal(_pool: &PgPool) -> Fallible<PrincipalId> {
     let id = c5();
-    sqlx::query("INSERT INTO principals (id, kind, display_name) VALUES ($1::uuid, 'user', 'c5 probe')").bind(id.to_string()).execute(pool).await?;
+    sqlx::query("INSERT INTO principals (id, kind, display_name) VALUES ($1::uuid, 'user', 'c5 probe')")
+        .bind(id.to_string())
+        .execute(&admin_pool().await?)
+        .await?;
     Ok(PrincipalId::try_from(id).map_err(|_| "nil")?)
 }
 
@@ -62,29 +75,29 @@ async fn tenant(pool: &PgPool) -> Fallible<(TenantId, PrincipalId)> {
     Ok((id, owner))
 }
 
-async fn add_tenant_member(pool: &PgPool, tenant: TenantId, member: PrincipalId, role: &str) -> TestResult {
+async fn add_tenant_member(_pool: &PgPool, tenant: TenantId, member: PrincipalId, role: &str) -> TestResult {
     sqlx::query("INSERT INTO tenant_members (tenant_id, principal_id, role) VALUES ($1::uuid, $2::uuid, $3)")
         .bind(tenant.to_string())
         .bind(member.to_string())
         .bind(role)
-        .execute(pool)
+        .execute(&admin_pool().await?)
         .await?;
     Ok(())
 }
 
-async fn audit_count(pool: &PgPool, tenant: TenantId, action: &str) -> Fallible<i64> {
+async fn audit_count(_pool: &PgPool, tenant: TenantId, action: &str) -> Fallible<i64> {
     Ok(sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE tenant_id = $1::uuid AND action = $2")
         .bind(tenant.to_string())
         .bind(action)
-        .fetch_one(pool)
+        .fetch_one(&admin_pool().await?)
         .await?)
 }
 
-async fn tenant_role(pool: &PgPool, tenant: TenantId, member: PrincipalId) -> Fallible<Option<(String, String)>> {
+async fn tenant_role(_pool: &PgPool, tenant: TenantId, member: PrincipalId) -> Fallible<Option<(String, String)>> {
     Ok(sqlx::query_as("SELECT role, state FROM tenant_members WHERE tenant_id = $1::uuid AND principal_id = $2::uuid")
         .bind(tenant.to_string())
         .bind(member.to_string())
-        .fetch_optional(pool)
+        .fetch_optional(&admin_pool().await?)
         .await?)
 }
 
@@ -123,10 +136,12 @@ async fn tenants_are_created_with_an_owner_and_move_through_their_lifecycle() ->
     let new = NewTenant { slug: &slug, name: "c5", plan_id: "team", home_region: "local" };
     assert_eq!(create_tenant_with_owner(&mut transaction, new, ghost).await, Err(TenantError::OwnerUnavailable));
     drop(transaction);
-    let existing: i64 = sqlx::query_scalar("SELECT count(*) FROM tenants WHERE id = $1::uuid").bind(fresh.to_string()).fetch_one(&pool).await?;
+    let existing: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM tenants WHERE id = $1::uuid").bind(fresh.to_string()).fetch_one(&admin_pool().await?).await?;
     assert_eq!(existing, 0);
     // A taken slug is a conflict.
-    let taken: String = sqlx::query_scalar("SELECT slug FROM tenants WHERE id = $1::uuid").bind(tenant_id.to_string()).fetch_one(&pool).await?;
+    let taken: String =
+        sqlx::query_scalar("SELECT slug FROM tenants WHERE id = $1::uuid").bind(tenant_id.to_string()).fetch_one(&admin_pool().await?).await?;
     let mut transaction = tx(&pool, fresh).await?;
     let new = NewTenant { slug: &taken, name: "c5", plan_id: "team", home_region: "local" };
     assert_eq!(create_tenant_with_owner(&mut transaction, new, owner).await, Err(TenantError::Conflict));
@@ -148,7 +163,7 @@ async fn tenants_are_created_with_an_owner_and_move_through_their_lifecycle() ->
     assert_eq!(audit_count(&pool, tenant_id, "tenant.plan_assign").await?, 1);
 
     // A deleting tenant cannot be suspended or reactivated.
-    sqlx::query("UPDATE tenants SET state = 'deleting' WHERE id = $1::uuid").bind(tenant_id.to_string()).execute(&pool).await?;
+    sqlx::query("UPDATE tenants SET state = 'deleting' WHERE id = $1::uuid").bind(tenant_id.to_string()).execute(&admin_pool().await?).await?;
     let mut transaction = tx(&pool, tenant_id).await?;
     assert_eq!(suspend_tenant(&mut transaction, owner, None).await, Err(TenantError::InvalidState));
     assert_eq!(reactivate_tenant(&mut transaction, owner).await, Err(TenantError::InvalidState));
@@ -168,7 +183,7 @@ async fn tenants_for_a_principal_are_listed_with_roles_in_bounded_keyset_pages()
     sqlx::query("UPDATE tenant_members SET state = 'suspended' WHERE tenant_id = $1::uuid AND principal_id = $2::uuid")
         .bind(hidden.to_string())
         .bind(owner.to_string())
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await?;
     let _ = (other_owner, third_owner);
 
@@ -322,7 +337,7 @@ async fn invitations_are_shown_once_accepted_atomically_and_refused_when_spent()
     let stored: (Vec<u8>, String, f64) =
         sqlx::query_as("SELECT token_hash, email, extract(epoch FROM expires_at - created_at)::float8 FROM team_invitations WHERE id = $1::uuid")
             .bind(created.id.to_string())
-            .fetch_one(&pool)
+            .fetch_one(&admin_pool().await?)
             .await?;
     assert_eq!(stored.0, invitation_token_hash(&created.token).to_vec());
     assert_eq!(stored.1, "ada@example.com");
@@ -348,7 +363,7 @@ async fn invitations_are_shown_once_accepted_atomically_and_refused_when_spent()
         sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1::uuid AND principal_id = $2::uuid AND state = 'active'")
             .bind(team.to_string())
             .bind(invitee.to_string())
-            .fetch_one(&pool)
+            .fetch_one(&admin_pool().await?)
             .await?;
     assert_eq!(team_role, "editor");
     assert_eq!(accept_invitation(&pool, &created.token, invitee, None).await, Err(InvitationError::Refused));
@@ -374,7 +389,7 @@ async fn invitations_are_shown_once_accepted_atomically_and_refused_when_spent()
     transaction.commit().await?;
     sqlx::query("UPDATE team_invitations SET created_at = now() - interval '8 days', expires_at = now() - interval '1 day' WHERE id = $1::uuid")
         .bind(expired.id.to_string())
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await?;
     let late = principal(&pool).await?;
     assert_eq!(accept_invitation(&pool, &second.token, late, None).await, Err(InvitationError::Refused));
@@ -411,7 +426,7 @@ async fn a_suspended_tenant_refuses_invitation_acceptance() -> TestResult {
     assert_eq!(tenant_role(&pool, tenant_id, invitee).await?, None);
     let accepted: Option<String> = sqlx::query_scalar("SELECT accepted_at::text FROM team_invitations WHERE id = $1::uuid")
         .bind(created.id.to_string())
-        .fetch_one(&pool)
+        .fetch_one(&admin_pool().await?)
         .await?;
     assert_eq!(accepted, None);
 
@@ -459,11 +474,13 @@ async fn concurrent_accepts_of_one_invitation_have_exactly_one_winner() -> TestR
         assert_eq!(winners, 1);
         let members: i64 = sqlx::query_scalar("SELECT count(*) FROM team_members WHERE team_id = $1::uuid AND role = 'editor'")
             .bind(team.to_string())
-            .fetch_one(&pool)
+            .fetch_one(&admin_pool().await?)
             .await?;
         assert_eq!(members, 1);
-        let tenant_members: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM tenant_members WHERE tenant_id = $1::uuid").bind(tenant_id.to_string()).fetch_one(&pool).await?;
+        let tenant_members: i64 = sqlx::query_scalar("SELECT count(*) FROM tenant_members WHERE tenant_id = $1::uuid")
+            .bind(tenant_id.to_string())
+            .fetch_one(&admin_pool().await?)
+            .await?;
         assert_eq!(tenant_members, 2);
         assert_eq!(audit_count(&pool, tenant_id, "invitation.accept").await?, 1);
     }

@@ -234,13 +234,11 @@ async fn live_link(pool: &PgPool, secret: &str) -> Result<ShareGrant, ShareLinkE
         return Err(ShareLinkError::Refused);
     }
     let max_session = i64::try_from(MAX_SHARE_SESSION_SECS).map_err(|_| ShareLinkError::InvalidInput)?;
+    // Before any tenant is known: through the SECURITY DEFINER lookup (S4-014), which returns
+    // only this one live row.
     let row: Option<LiveRow> = sqlx::query_as(
-        "SELECT s.id::text, s.tenant_id::text, s.document_id::text, s.role, s.created_by::text, \
-                floor(extract(epoch FROM s.expires_at))::bigint, \
-                floor(extract(epoch FROM LEAST(COALESCE(s.expires_at, 'infinity'::timestamptz), now() + make_interval(secs => $2::bigint))))::bigint \
-         FROM share_links s JOIN documents d ON d.tenant_id = s.tenant_id AND d.id = s.document_id JOIN tenants t ON t.id = s.tenant_id \
-         WHERE s.token_hash = $1 AND s.revoked_at IS NULL AND (s.expires_at IS NULL OR s.expires_at > now()) \
-           AND d.state = 'active' AND t.state = 'active'",
+        "SELECT id, tenant_id, document_id, role, created_by, link_expires_at, session_expires_at \
+         FROM figcraft_live_share_link($1, $2::bigint)",
     )
     .bind(share_token_hash(secret).to_vec())
     .bind(max_session)
@@ -356,7 +354,7 @@ pub async fn update_share_link(
 /// Of `links` (`(tenant, link id)` pairs, at most [`MAX_CHECKED_LINKS`]), those that no longer
 /// open anything: revoked, expired, deleted, not in the tenant given, or on a document or in a tenant that is not
 /// active. Like resolution it reads before any one tenant is chosen (the relay checks the links of
-/// every open document at once).
+/// every open document at once), so it goes through a SECURITY DEFINER lookup (S4-014).
 pub async fn dead_share_links(pool: &PgPool, links: &[(TenantId, Uuid)]) -> Result<Vec<(TenantId, Uuid)>, ShareLinkError> {
     if links.is_empty() {
         return Ok(Vec::new());
@@ -366,18 +364,12 @@ pub async fn dead_share_links(pool: &PgPool, links: &[(TenantId, Uuid)]) -> Resu
     }
     let tenants: Vec<String> = links.iter().map(|(tenant, _)| tenant.to_string()).collect();
     let ids: Vec<String> = links.iter().map(|(_, id)| id.to_string()).collect();
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT x.tenant_id::text, x.id::text FROM unnest($1::text[]::uuid[], $2::text[]::uuid[]) AS x (tenant_id, id) \
-         WHERE NOT EXISTS ( \
-             SELECT 1 FROM share_links s JOIN documents d ON d.tenant_id = s.tenant_id AND d.id = s.document_id JOIN tenants t ON t.id = s.tenant_id \
-             WHERE s.tenant_id = x.tenant_id AND s.id = x.id AND s.revoked_at IS NULL \
-               AND (s.expires_at IS NULL OR s.expires_at > now()) AND d.state = 'active' AND t.state = 'active')",
-    )
-    .bind(tenants)
-    .bind(ids)
-    .fetch_all(pool)
-    .await
-    .map_err(|_| ShareLinkError::Database)?;
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT tenant_id, id FROM figcraft_dead_share_links($1::text[]::uuid[], $2::text[]::uuid[])")
+        .bind(tenants)
+        .bind(ids)
+        .fetch_all(pool)
+        .await
+        .map_err(|_| ShareLinkError::Database)?;
     rows.into_iter()
         .map(|(tenant, id)| Ok((tenant.parse().map_err(|_| ShareLinkError::Database)?, id.parse().map_err(|_| ShareLinkError::Database)?)))
         .collect()

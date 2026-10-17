@@ -173,11 +173,15 @@ impl Fixture {
 
     fn snapshot_seqs(&self, document: CloudDocumentId) -> Vec<i64> {
         self.runtime.block_on(async {
-            sqlx::query_scalar("SELECT seq FROM document_snapshots WHERE document_id = $1::uuid ORDER BY seq")
+            // Row-level security (S4-014): reads happen inside the fixture tenant.
+            let mut transaction = begin_tenant_transaction(&self.pool, self.tenant()).await.unwrap();
+            let seqs = sqlx::query_scalar("SELECT seq FROM document_snapshots WHERE document_id = $1::uuid ORDER BY seq")
                 .bind(document.to_string())
-                .fetch_all(&self.pool)
+                .fetch_all(transaction.connection())
                 .await
-                .unwrap()
+                .unwrap();
+            transaction.rollback().await.unwrap();
+            seqs
         })
     }
 }
@@ -270,12 +274,12 @@ fn share_links_admit_with_their_role_and_refuse_everything_else_alike() -> TestR
     fixture.runtime.block_on(async {
         let mut transaction = begin_tenant_transaction(&fixture.pool, fixture.tenant()).await.unwrap();
         assert!(revoke_share_link(&mut transaction, revoked_id).await.unwrap());
-        transaction.commit().await.unwrap();
         sqlx::query("UPDATE share_links SET created_at = now() - interval '2 hours', expires_at = now() - interval '1 hour' WHERE id = $1::uuid")
             .bind(expired_id.to_string())
-            .execute(&fixture.pool)
+            .execute(transaction.connection())
             .await
             .unwrap();
+        transaction.commit().await.unwrap();
     });
 
     let mut backend = fixture.backend();

@@ -296,7 +296,8 @@ pub struct TenantMembership {
 /// The tenants where `principal_id` has an active membership, excluding tenants being deleted,
 /// ordered by tenant id with a keyset cursor and at most [`PageSize::MAX`] rows. Suspended
 /// tenants are listed (with their state) so the UI can explain why they cannot be opened. Runs
-/// before any tenant is selected, so it reads through the pool.
+/// before any tenant is selected, so it reads through the pool and the SECURITY DEFINER lookup
+/// `figcraft_principal_tenants` (S4-014).
 pub async fn list_tenants_for_principal(
     pool: &PgPool,
     principal_id: PrincipalId,
@@ -304,11 +305,7 @@ pub async fn list_tenants_for_principal(
     size: PageSize,
 ) -> Result<Page<TenantMembership, TenantId>, TenantError> {
     let rows: Vec<(String, String, String, String, String, String, String)> = sqlx::query_as(
-        "SELECT t.id::text, t.slug, t.name, t.state, t.plan_id, t.home_region, m.role \
-         FROM tenants t JOIN tenant_members m ON m.tenant_id = t.id \
-         WHERE m.principal_id = $1::uuid AND m.state = 'active' AND t.state NOT IN ('deleting', 'deleted') \
-           AND ($2::uuid IS NULL OR t.id > $2::uuid) \
-         ORDER BY t.id LIMIT $3",
+        "SELECT id, slug, name, state, plan_id, home_region, role FROM figcraft_principal_tenants($1::uuid, $2::uuid, $3::integer, false)",
     )
     .bind(principal_id.to_string())
     .bind(after.map(|id| id.to_string()))

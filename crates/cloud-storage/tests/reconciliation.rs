@@ -25,6 +25,16 @@ use rusty_s3::{Bucket, Credentials, S3Action, UrlStyle};
 use sha2::{Digest, Sha256};
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+/// Fixtures and raw inspection queries run as the administrator: row-level security (S4-014)
+/// hides every tenant row from the runtime role outside a tenant transaction. Repository calls
+/// still run as the runtime role.
+async fn admin_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+    let file = std::env::var("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE")
+        .map_err(|_| sqlx::Error::Configuration("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE is unset".into()))?;
+    let url = std::fs::read_to_string(file)?;
+    sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(url.trim_end()).await
+}
+
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type TestResult<T = ()> = Result<T, BoxError>;
 
@@ -113,18 +123,21 @@ async fn raw_listing(settings: &ObjectStoreSettings, prefix: &str) -> TestResult
 
 type RowSnapshot = Vec<(String, String, i64, String, Option<String>, Option<String>)>;
 
-async fn row_snapshot(pool: &PgPool) -> TestResult<(RowSnapshot, Vec<(String, String)>, i64)> {
+async fn row_snapshot(_pool: &PgPool) -> TestResult<(RowSnapshot, Vec<(String, String)>, i64)> {
     let rows: RowSnapshot = sqlx::query_as(concat!(
         "SELECT id::text, state, size_bytes, created_at::text, verified_at::text, deleted_at::text FROM objects ",
         "WHERE tenant_id = $1::uuid ORDER BY id"
     ))
     .bind(TENANT)
-    .fetch_all(pool)
+    .fetch_all(&admin_pool().await?)
     .await?;
     let reservations: Vec<(String, String)> =
-        sqlx::query_as("SELECT id::text, state FROM upload_reservations WHERE tenant_id = $1::uuid ORDER BY id").bind(TENANT).fetch_all(pool).await?;
+        sqlx::query_as("SELECT id::text, state FROM upload_reservations WHERE tenant_id = $1::uuid ORDER BY id")
+            .bind(TENANT)
+            .fetch_all(&admin_pool().await?)
+            .await?;
     let references: i64 =
-        sqlx::query_scalar("SELECT count(*) FROM object_references WHERE tenant_id = $1::uuid").bind(TENANT).fetch_one(pool).await?;
+        sqlx::query_scalar("SELECT count(*) FROM object_references WHERE tenant_id = $1::uuid").bind(TENANT).fetch_one(&admin_pool().await?).await?;
     Ok((rows, reservations, references))
 }
 
@@ -161,7 +174,7 @@ async fn register(transaction: &mut TenantTransaction<'_>, key: &str, bytes: &[u
 }
 
 /// Force a row's state and ages (seconds before now) with plain SQL.
-async fn force(pool: &PgPool, id: Uuid, state: &str, created_age: i64, deleted_age: Option<i64>) -> TestResult {
+async fn force(_pool: &PgPool, id: Uuid, state: &str, created_age: i64, deleted_age: Option<i64>) -> TestResult {
     sqlx::query(concat!(
         "UPDATE objects SET state = $2, created_at = now() - $3::bigint * interval '1 second', ",
         "verified_at = CASE WHEN $2 = 'verified' THEN now() - $3::bigint * interval '1 second' END, ",
@@ -173,13 +186,13 @@ async fn force(pool: &PgPool, id: Uuid, state: &str, created_age: i64, deleted_a
     .bind(created_age)
     .bind(deleted_age)
     .bind(id.to_string())
-    .execute(pool)
+    .execute(&admin_pool().await?)
     .await?;
     Ok(())
 }
 
 /// Insert a reservation whose staging key is planted in the bucket; `expires_in` may be negative.
-async fn reservation(pool: &PgPool, state: &str, expires_in: i64) -> TestResult<(Uuid, String)> {
+async fn reservation(_pool: &PgPool, state: &str, expires_in: i64) -> TestResult<(Uuid, String)> {
     let id = Uuid::new_v4();
     let key = keys::staging(tenant()?, id);
     sqlx::query(concat!(
@@ -194,7 +207,7 @@ async fn reservation(pool: &PgPool, state: &str, expires_in: i64) -> TestResult<
     .bind([7_u8; 32].as_slice())
     .bind(state)
     .bind(expires_in)
-    .execute(pool)
+    .execute(&admin_pool().await?)
     .await?;
     Ok((id, key))
 }

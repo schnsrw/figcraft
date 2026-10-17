@@ -11,6 +11,16 @@ use figcraft_cloud_storage::service_accounts::{
 use figcraft_cloud_storage::sessions::session_token_hash;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+/// Fixtures and raw inspection queries run as the administrator: row-level security (S4-014)
+/// hides every tenant row from the runtime role outside a tenant transaction. Repository calls
+/// still run as the runtime role.
+async fn admin_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+    let file = std::env::var("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE")
+        .map_err(|_| sqlx::Error::Configuration("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE is unset".into()))?;
+    let url = std::fs::read_to_string(file)?;
+    sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(url.trim_end()).await
+}
+
 const TENANT: &str = "c3a00000-0000-4000-8000-000000000001";
 const OTHER_TENANT: &str = "c3a00000-0000-4000-8000-000000000002";
 const ADMIN: &str = "c3a10000-0000-4000-8000-000000000001";
@@ -28,13 +38,13 @@ async fn pool() -> Result<Option<PgPool>, Error> {
     let pool = PgPoolOptions::new().max_connections(4).connect(database_url.trim_end()).await?;
     sqlx::query("INSERT INTO principals (id, kind, display_name) VALUES ($1::uuid, 'user', 'c3 service account admin') ON CONFLICT DO NOTHING")
         .bind(ADMIN)
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await?;
     for (tenant, slug) in [(TENANT, "c3-service-accounts"), (OTHER_TENANT, "c3-service-accounts-other")] {
         sqlx::query("INSERT INTO tenants (id, slug, name, plan_id, home_region) VALUES ($1::uuid, $2, 'c3 service accounts', 'test', 'local') ON CONFLICT DO NOTHING")
             .bind(tenant)
             .bind(slug)
-            .execute(&pool)
+            .execute(&admin_pool().await?)
             .await?;
     }
     Ok(Some(pool))
@@ -74,32 +84,34 @@ async fn credentials_authenticate_to_tenant_principal_and_scopes() -> TestResult
     assert_eq!(auth.scopes, vec![Scope::DocumentsRead, Scope::JobsRead]);
 
     // The principal is a service principal; only the hash is stored; last_used_at set.
-    let kind: String =
-        sqlx::query_scalar("SELECT kind FROM principals WHERE id = $1::uuid").bind(created.principal_id.to_string()).fetch_one(&pool).await?;
+    let kind: String = sqlx::query_scalar("SELECT kind FROM principals WHERE id = $1::uuid")
+        .bind(created.principal_id.to_string())
+        .fetch_one(&admin_pool().await?)
+        .await?;
     assert_eq!(kind, "service");
     let (hash, used): (Vec<u8>, bool) =
         sqlx::query_as("SELECT secret_hash, last_used_at IS NOT NULL FROM service_account_credentials WHERE id = $1::uuid")
             .bind(credential.to_string())
-            .fetch_one(&pool)
+            .fetch_one(&admin_pool().await?)
             .await?;
     assert_eq!(hash, session_token_hash(&secret).to_vec());
     assert!(used);
     // last_used_at writes are bounded: a second use inside the interval does not move it.
     sqlx::query("UPDATE service_account_credentials SET last_used_at = now() - interval '10 seconds' WHERE id = $1::uuid")
         .bind(credential.to_string())
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await?;
     authenticate_credential(&pool, &secret).await?;
     let age: f64 = sqlx::query_scalar("SELECT extract(epoch FROM now() - last_used_at)::float8 FROM service_account_credentials WHERE id = $1::uuid")
         .bind(credential.to_string())
-        .fetch_one(&pool)
+        .fetch_one(&admin_pool().await?)
         .await?;
     assert!(age >= 9.0, "last_used_at rewritten inside the interval");
 
     let audited: i64 = sqlx::query_scalar("SELECT count(*) FROM audit_events WHERE tenant_id = $1::uuid AND resource_id = $2::uuid")
         .bind(TENANT)
         .bind(created.id.to_string())
-        .fetch_one(&pool)
+        .fetch_one(&admin_pool().await?)
         .await?;
     assert_eq!(audited, 2, "create + issue audited");
     Ok(())
@@ -157,7 +169,7 @@ async fn revoked_expired_disabled_and_junk_credentials_are_refused_alike() -> Te
         "UPDATE service_account_credentials SET created_at = now() - interval '2 days', expires_at = now() - interval '1 second' WHERE id = $1::uuid",
     )
     .bind(expired_id.to_string())
-    .execute(&pool)
+    .execute(&admin_pool().await?)
     .await?;
     let token = live.strip_prefix(SECRET_PREFIX).ok_or("prefix")?.to_owned();
     for bad in [revoked.as_str(), expired.as_str(), "", SECRET_PREFIX, &token, &format!("fcsb_{token}"), &format!("{live} "), &"x".repeat(4096)] {
@@ -182,7 +194,10 @@ async fn revoked_expired_disabled_and_junk_credentials_are_refused_alike() -> Te
     assert!(authenticate_credential(&pool, &live).await.is_ok());
 
     // Suspended service principal: refused.
-    sqlx::query("UPDATE principals SET state = 'suspended' WHERE id = $1::uuid").bind(created.principal_id.to_string()).execute(&pool).await?;
+    sqlx::query("UPDATE principals SET state = 'suspended' WHERE id = $1::uuid")
+        .bind(created.principal_id.to_string())
+        .execute(&admin_pool().await?)
+        .await?;
     assert_eq!(authenticate_credential(&pool, &live).await, Err(ServiceAccountError::Refused));
 
     // Stored scopes no longer on the allowlist are dropped; none left means refused.
@@ -190,10 +205,13 @@ async fn revoked_expired_disabled_and_junk_credentials_are_refused_alike() -> Te
     let (_, secret) = issue(&pool, TENANT, other.id, DAY).await??;
     sqlx::query("UPDATE service_accounts SET scopes = ARRAY['jobs:read', 'legacy:admin'] WHERE id = $1::uuid")
         .bind(other.id.to_string())
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await?;
     assert_eq!(authenticate_credential(&pool, &secret).await?.scopes, vec![Scope::JobsRead]);
-    sqlx::query("UPDATE service_accounts SET scopes = ARRAY['legacy:admin'] WHERE id = $1::uuid").bind(other.id.to_string()).execute(&pool).await?;
+    sqlx::query("UPDATE service_accounts SET scopes = ARRAY['legacy:admin'] WHERE id = $1::uuid")
+        .bind(other.id.to_string())
+        .execute(&admin_pool().await?)
+        .await?;
     assert_eq!(authenticate_credential(&pool, &secret).await, Err(ServiceAccountError::Refused));
     Ok(())
 }
@@ -224,7 +242,7 @@ async fn rotation_issues_a_replacement_and_keeps_the_old_one_for_the_overlap() -
     let remaining: f64 =
         sqlx::query_scalar("SELECT extract(epoch FROM expires_at - now())::float8 FROM service_account_credentials WHERE id = $1::uuid")
             .bind(old_id.to_string())
-            .fetch_one(&pool)
+            .fetch_one(&admin_pool().await?)
             .await?;
     assert!(remaining <= 3600.5 && remaining > 3500.0, "{remaining}");
     // After the overlap (backdated) only the new one works.
@@ -232,7 +250,7 @@ async fn rotation_issues_a_replacement_and_keeps_the_old_one_for_the_overlap() -
         "UPDATE service_account_credentials SET created_at = now() - interval '2 days', expires_at = now() - interval '1 second' WHERE id = $1::uuid",
     )
     .bind(old_id.to_string())
-    .execute(&pool)
+    .execute(&admin_pool().await?)
     .await?;
     assert_eq!(authenticate_credential(&pool, &old).await, Err(ServiceAccountError::Refused));
     // The expired old credential cannot be rotated again.

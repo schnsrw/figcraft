@@ -12,6 +12,16 @@ use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
 use figcraft_cloud_storage::validation::Rejection;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 
+/// Fixtures and raw inspection queries run as the administrator: row-level security (S4-014)
+/// hides every tenant row from the runtime role outside a tenant transaction. Repository calls
+/// still run as the runtime role.
+async fn admin_pool() -> Result<sqlx::PgPool, sqlx::Error> {
+    let file = std::env::var("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE")
+        .map_err(|_| sqlx::Error::Configuration("FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE is unset".into()))?;
+    let url = std::fs::read_to_string(file)?;
+    sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(url.trim_end()).await
+}
+
 const TENANT: &str = "aa000000-0000-4000-8000-000000000001";
 const OTHER_TENANT: &str = "aa000000-0000-4000-8000-000000000002";
 const PRINCIPAL: &str = "aa000000-0000-4000-8000-000000000009";
@@ -43,7 +53,7 @@ async fn probe() -> Result<Option<Probe>, Box<dyn std::error::Error>> {
 
 /// Insert a fresh fixture document (prefix `aa3…`, random tail) with `current_seq`, so every run
 /// writes its own thumbnail and export keys.
-async fn new_document(pool: &PgPool, tenant: &str, current_seq: i64) -> Result<CloudDocumentId, Box<dyn std::error::Error>> {
+async fn new_document(_pool: &PgPool, tenant: &str, current_seq: i64) -> Result<CloudDocumentId, Box<dyn std::error::Error>> {
     let tail = u64::from_le_bytes(Uuid::new_v4().as_bytes()[..8].try_into()?) & 0xFFFF_FFFF_FFFF;
     let id: CloudDocumentId = format!("aa300000-0000-4000-8000-{tail:012x}").parse()?;
     let n = if tenant == TENANT { "1" } else { "2" };
@@ -56,7 +66,7 @@ async fn new_document(pool: &PgPool, tenant: &str, current_seq: i64) -> Result<C
     .bind(format!("aa100000-0000-4000-8000-00000000000{n}"))
     .bind(format!("aa200000-0000-4000-8000-00000000000{n}"))
     .bind(current_seq)
-    .execute(pool)
+    .execute(&admin_pool().await?)
     .await?;
     Ok(id)
 }
@@ -100,25 +110,25 @@ fn unique_webp(width: u32, height: u32) -> Vec<u8> {
     out
 }
 
-async fn job_row(pool: &PgPool, id: Uuid) -> Result<(String, String, i32, Option<String>, Option<String>, String), Box<dyn std::error::Error>> {
+async fn job_row(_pool: &PgPool, id: Uuid) -> Result<(String, String, i32, Option<String>, Option<String>, String), Box<dyn std::error::Error>> {
     Ok(sqlx::query_as("SELECT kind, state, attempts, error_code, result::text, input::text FROM jobs WHERE id = $1::uuid")
         .bind(id.to_string())
-        .fetch_one(pool)
+        .fetch_one(&admin_pool().await?)
         .await?)
 }
 
-async fn reference_owners(pool: &PgPool, object: Uuid) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
+async fn reference_owners(_pool: &PgPool, object: Uuid) -> Result<Vec<(String, String)>, Box<dyn std::error::Error>> {
     Ok(sqlx::query_as("SELECT owner_kind, owner_id::text FROM object_references WHERE object_id = $1::uuid ORDER BY owner_kind")
         .bind(object.to_string())
-        .fetch_all(pool)
+        .fetch_all(&admin_pool().await?)
         .await?)
 }
 
 /// The SQLSTATE of a direct update, proving the table refuses a state the code never writes.
-async fn sqlstate(pool: &PgPool, sql: &'static str, id: Uuid) -> Option<String> {
+async fn sqlstate(_pool: &PgPool, sql: &'static str, id: Uuid) -> Option<String> {
     sqlx::query(sql)
         .bind(id.to_string())
-        .execute(pool)
+        .execute(&admin_pool().await.ok()?)
         .await
         .err()
         .and_then(|error| error.as_database_error().and_then(|db| db.code()).map(String::from))
@@ -302,7 +312,7 @@ async fn exports_move_through_a_constraint_backed_state_machine_and_store_verifi
     sweep.rollback().await?;
     sqlx::query("UPDATE exports SET completed_at = completed_at - interval '2 days' WHERE id = $1::uuid")
         .bind(requested.id.to_string())
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await?;
     let mut sweep = scope!(&pool, tenant);
     let expired = expire_exports(&mut sweep, Duration::from_secs(24 * 60 * 60), i64::MAX).await?;
@@ -393,7 +403,7 @@ async fn thumbnails_are_validated_webp_one_per_sequence_and_newer_ones_replace_o
     assert_eq!(reference_owners(&pool, object.id).await?, Vec::new());
     let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM document_thumbnails WHERE document_id = $1::uuid")
         .bind(document.to_string())
-        .fetch_one(&pool)
+        .fetch_one(&admin_pool().await?)
         .await?;
     assert_eq!(rows, 1);
     let mut late = scope!(&pool, tenant);
@@ -413,7 +423,7 @@ async fn thumbnails_are_validated_webp_one_per_sequence_and_newer_ones_replace_o
         .bind(OTHER_TENANT)
         .bind(document.to_string())
         .bind(replaced.thumbnail.object.id.to_string())
-        .execute(&pool)
+        .execute(&admin_pool().await?)
         .await;
     assert_eq!(crossed.err().and_then(|error| error.as_database_error().and_then(|db| db.code()).map(String::from)).as_deref(), Some("23503"));
 

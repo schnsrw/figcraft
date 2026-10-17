@@ -17,9 +17,9 @@
 use figcraft_cloud_domain::{PrincipalId, TenantId, Uuid};
 use sqlx::PgPool;
 
-use crate::TenantTransaction;
 use crate::audit::record_audit_event;
 use crate::sessions::{random_token, session_token_hash, well_formed_token};
+use crate::{TenantTransaction, begin_tenant_transaction};
 
 /// Prefix of every credential secret (lets secret scanners recognise leaks).
 pub const SECRET_PREFIX: &str = "fcsa_";
@@ -390,15 +390,11 @@ pub async fn authenticate_credential(pool: &PgPool, secret: &str) -> Result<Auth
     if !well_formed_secret(secret) {
         return Err(ServiceAccountError::Refused);
     }
-    let row: Option<CredentialRow> = sqlx::query_as(concat!(
-        "SELECT c.id::text, c.tenant_id::text, a.id::text, a.principal_id::text, a.scopes, ",
-        "(c.last_used_at IS NULL OR c.last_used_at <= now() - make_interval(secs => $2::bigint)) ",
-        "FROM service_account_credentials c ",
-        "JOIN service_accounts a ON a.tenant_id = c.tenant_id AND a.id = c.service_account_id ",
-        "JOIN principals p ON p.id = a.principal_id JOIN tenants t ON t.id = c.tenant_id ",
-        "WHERE c.secret_hash = $1 AND c.revoked_at IS NULL AND c.expires_at > now() ",
-        "AND a.state = 'active' AND p.state = 'active' AND t.state = 'active'"
-    ))
+    // The tenant is not known yet, so the lookup goes through the SECURITY DEFINER function
+    // (S4-014), which returns only this credential's row.
+    let row: Option<CredentialRow> = sqlx::query_as(
+        "SELECT credential_id, tenant_id, service_account_id, principal_id, scopes, stale FROM figcraft_service_credential($1, $2::bigint)",
+    )
     .bind(session_token_hash(secret).to_vec())
     .bind(LAST_USED_INTERVAL_SECS)
     .fetch_optional(pool)
@@ -411,19 +407,23 @@ pub async fn authenticate_credential(pool: &PgPool, secret: &str) -> Result<Auth
     if scopes.is_empty() {
         return Err(ServiceAccountError::Refused);
     }
+    let tenant: TenantId = tenant_id.parse().map_err(|_| ServiceAccountError::Database)?;
     if stale {
+        let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| ServiceAccountError::Database)?;
         sqlx::query(concat!(
-            "UPDATE service_account_credentials SET last_used_at = now() WHERE id = $1::uuid ",
-            "AND (last_used_at IS NULL OR last_used_at <= now() - make_interval(secs => $2::bigint))"
+            "UPDATE service_account_credentials SET last_used_at = now() WHERE tenant_id = $1::uuid AND id = $2::uuid ",
+            "AND (last_used_at IS NULL OR last_used_at <= now() - make_interval(secs => $3::bigint))"
         ))
+        .bind(tenant.to_string())
         .bind(&credential_id)
         .bind(LAST_USED_INTERVAL_SECS)
-        .execute(pool)
+        .execute(transaction.connection())
         .await
         .map_err(|_| ServiceAccountError::Database)?;
+        transaction.commit().await.map_err(|_| ServiceAccountError::Database)?;
     }
     Ok(AuthenticatedServiceAccount {
-        tenant_id: tenant_id.parse().map_err(|_| ServiceAccountError::Database)?,
+        tenant_id: tenant,
         principal_id: principal_id.parse().map_err(|_| ServiceAccountError::Database)?,
         service_account_id: account_id.parse().map_err(|_| ServiceAccountError::Database)?,
         credential_id: credential_id.parse().map_err(|_| ServiceAccountError::Database)?,
