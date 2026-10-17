@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (20/25); S6 in progress (1/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (20/25); S6 in progress (2/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 20 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 1 / 31 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 2 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2412,7 +2412,8 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   gate constants in `apps/figcraft-cloud/src/main.rs`, `deploy/saas/smoke-preflight.sh` and docs
   still say `20261017000007` and must move to the newest migration (left to the S5 owner of
   `main.rs`); no admin API or UI to register hosts yet (S6-012).
-- [ ] **S6-002** Implement external tenant, workspace, principal and resource mappings.
+- [x] **S6-002** Implement external tenant, workspace, principal and resource mappings.
+  Evidence: `crates/cloud-storage/src/host_mappings.rs` and `tests/host_mappings.rs` (live PostgreSQL): a registered host maps its tenant, workspace, project, document and principal ids onto internal ids over the existing `external_mappings` table (no migration). Tests cover resolve, reverse lookup and unmap per kind; uniqueness per host and kind; refusal of empty, control-character and oversize external ids, unregistered hosts, duplicates (never re-pointed) and cross-tenant internal ids (one fixed NotFound); cross-tenant RLS isolation. Not done: no admin API to manage mappings (S6-012); principals are not auto-provisioned from `sub` claims; the per-host cap of 100000 mappings is checked in code and not load tested.
 - [ ] **S6-003** Implement short-lived embed-token validation and one-use `jti` consumption.
 - [ ] **S6-004** Enforce host maximum role and mapped resource boundary.
 - [ ] **S6-005** Add key rotation and issuer-disable behavior.
@@ -2714,3 +2715,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S5-011: emptied rooms stay warm for a configurable period before closing (saved, lease released); busy rooms snapshot by batch count or time instead of only on close. Hub housekeeping tick added (patch FP-008). S5 reaches 19/25. |
 | 2026-10-18 | S6-001: registered embedding host systems (issuer, audiences, exact https parent origins, max role, enabled flag) with rotating public EdDSA/ES256 keys, tenant RLS and a pre-tenant issuer lookup. S6 reaches 1/31. |
 | 2026-10-18 | S5-001: audited realtime tickets and covered them through the owner-routing path (a ticket at a non-owning replica is checked, passed on and checked again by the owner; attribution and access hold). S5 reaches 20/25. |
+| 2026-10-18 | S6-002: host-managed external id mappings (tenant, workspace, project, document, principal) that require a registered host and a same-tenant internal resource, with bounds and cross-tenant refusal. S6 reaches 2/31. |
