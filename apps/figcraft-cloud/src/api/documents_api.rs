@@ -1,0 +1,928 @@
+//! Workspace, project, document, member, team-grant and share-link APIs (S4-019), and the
+//! collaboration link the browser editor joins with.
+//!
+//! Every handler follows the same order: [`Authenticated`] (401 before any lookup) → a tenant
+//! transaction in the caller's tenant → `effective_roles` → [`authz::decide`] → the disclosure
+//! policy ([`authorize_resource`]): a resource that does not exist, lives in another tenant or is
+//! invisible to the caller answers `404`; a visible one the caller may not act on answers `403`.
+//! "Visible" means the caller may view it *or* perform the requested action (a workspace admin
+//! restoring a soft-deleted document can see it even though nobody can `view` a deleting one).
+//!
+//! Share-link credentials ([`CredentialKind::ShareLink`]) are refused on these routes (`403`):
+//! a link grants one document's realtime room, never the management API.
+//!
+//! Routes (relative to `/api/v1`) and the action each one needs are listed in [`ROUTES`]; the
+//! permission-matrix tests (S4-021) check every entry against an independently written table.
+
+pub(crate) mod admission;
+#[cfg(test)]
+mod tests;
+
+use std::sync::OnceLock;
+
+use axum::Json;
+use axum::Router;
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderValue, StatusCode, header};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{get, post, put};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use figcraft_cloud_auth::authz::{Action, Resource, SensitivePermission, Subject, decide};
+use figcraft_cloud_domain::{CloudDocumentId, ErrorCode, PrincipalId, ProjectId, ResourceState, Role, Uuid, WorkspaceId};
+use figcraft_cloud_storage::effective_roles::{
+    ResourceAccess, TenantAccess, resolve_document_access, resolve_project_access, resolve_tenant_access, resolve_workspace_access,
+};
+use figcraft_cloud_storage::memberships::{
+    MembershipError, parse_role, remove_document_member, remove_document_team_grant, remove_workspace_member, role_str, set_document_member,
+    set_document_team_grant, set_workspace_member,
+};
+use figcraft_cloud_storage::metadata::{
+    DocumentRecord, PageSize, ProjectRecord, RepositoryError, WorkspaceRecord, archive_document, create_document, create_project, create_workspace,
+    get_document, get_workspace, list_projects, rename_document, restore_document, soft_delete_document,
+};
+use figcraft_cloud_storage::resource_admin::{
+    MAX_LISTED, Transition, get_project_by_id, list_document_members, list_document_team_grants, list_documents, list_visible_workspaces,
+    list_workspace_members, rename_project, rename_workspace, transition_project, transition_workspace,
+};
+use figcraft_cloud_storage::share_links::{ShareLinkError, ShareRole, create_share_link, list_share_links, revoke_share_link};
+use figcraft_cloud_storage::{TenantTransaction, begin_tenant_transaction};
+use serde::Deserialize;
+use serde_json::{Value, json};
+
+use super::AppState;
+use super::auth::{Authenticated, CredentialKind};
+use super::error::{ApiError, ApiJson, authorize_resource};
+
+/// Default and largest page sizes for list endpoints.
+pub(crate) const DEFAULT_PAGE: u32 = 50;
+/// Longest a cursor string may be.
+pub(crate) const MAX_CURSOR_CHARS: usize = 96;
+/// Longest a resource name may be (the schema's limit).
+pub(crate) const MAX_NAME_CHARS: usize = 255;
+/// Lifetime of the share secret a collaboration link carries. The relay disconnects a session
+/// when its link expires, so this is a working session; the browser fetches a new link to
+/// reconnect after it.
+pub(crate) const COLLAB_LINK_SECS: u64 = 8 * 60 * 60;
+/// The label collaboration links are stored with (so managers can tell them from shared links).
+pub(crate) const COLLAB_LINK_LABEL: &str = "collaboration session";
+const DEFAULT_PUBLIC_URL: &str = "http://127.0.0.1:8080";
+
+/// One route: method, path template (relative to `/api/v1`) and the action it authorizes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RouteSpec {
+    pub(crate) method: &'static str,
+    pub(crate) path: &'static str,
+    pub(crate) action: Action,
+}
+
+const fn route(method: &'static str, path: &'static str, action: Action) -> RouteSpec {
+    RouteSpec { method, path, action }
+}
+
+/// Every route this module registers, with its action.
+pub(crate) const ROUTES: &[RouteSpec] = &[
+    route("GET", "/workspaces", Action::WorkspaceView),
+    route("POST", "/workspaces", Action::WorkspaceCreate),
+    route("GET", "/workspaces/{workspace_id}", Action::WorkspaceView),
+    route("PATCH", "/workspaces/{workspace_id}", Action::WorkspaceUpdate),
+    route("DELETE", "/workspaces/{workspace_id}", Action::WorkspaceDelete),
+    route("POST", "/workspaces/{workspace_id}/archive", Action::WorkspaceArchive),
+    route("POST", "/workspaces/{workspace_id}/restore", Action::WorkspaceRestore),
+    route("GET", "/workspaces/{workspace_id}/members", Action::WorkspaceView),
+    route("PUT", "/workspaces/{workspace_id}/members/{principal_id}", Action::WorkspaceManageMembers),
+    route("DELETE", "/workspaces/{workspace_id}/members/{principal_id}", Action::WorkspaceManageMembers),
+    route("GET", "/workspaces/{workspace_id}/projects", Action::WorkspaceView),
+    route("POST", "/workspaces/{workspace_id}/projects", Action::ProjectCreate),
+    route("GET", "/projects/{project_id}", Action::ProjectView),
+    route("PATCH", "/projects/{project_id}", Action::ProjectUpdate),
+    route("DELETE", "/projects/{project_id}", Action::ProjectDelete),
+    route("POST", "/projects/{project_id}/archive", Action::ProjectArchive),
+    route("POST", "/projects/{project_id}/restore", Action::ProjectRestore),
+    route("GET", "/projects/{project_id}/documents", Action::ProjectView),
+    route("POST", "/projects/{project_id}/documents", Action::DocumentCreate),
+    route("GET", "/documents/{document_id}", Action::DocumentView),
+    route("PATCH", "/documents/{document_id}", Action::DocumentRename),
+    route("DELETE", "/documents/{document_id}", Action::DocumentDelete),
+    route("POST", "/documents/{document_id}/archive", Action::DocumentArchive),
+    route("POST", "/documents/{document_id}/restore", Action::DocumentRestore),
+    route("GET", "/documents/{document_id}/members", Action::DocumentView),
+    route("PUT", "/documents/{document_id}/members/{principal_id}", Action::DocumentShare),
+    route("DELETE", "/documents/{document_id}/members/{principal_id}", Action::DocumentShare),
+    route("GET", "/documents/{document_id}/team-grants", Action::DocumentView),
+    route("PUT", "/documents/{document_id}/team-grants/{team_id}", Action::DocumentShare),
+    route("DELETE", "/documents/{document_id}/team-grants/{team_id}", Action::DocumentShare),
+    route("GET", "/documents/{document_id}/share-links", Action::DocumentShare),
+    route("POST", "/documents/{document_id}/share-links", Action::DocumentShare),
+    route("DELETE", "/documents/{document_id}/share-links/{link_id}", Action::DocumentShare),
+    route("GET", "/documents/{document_id}/collab-link", Action::DocumentJoinRealtime),
+];
+
+/// The router for [`ROUTES`] (mounted under `/api/v1`, in the `resources` router).
+pub(crate) fn routes() -> Router<AppState> {
+    Router::new()
+        .route("/workspaces", get(list_workspaces_handler).post(create_workspace_handler))
+        .route("/workspaces/{workspace_id}", get(get_workspace_handler).patch(rename_workspace_handler).delete(delete_workspace_handler))
+        .route("/workspaces/{workspace_id}/archive", post(archive_workspace_handler))
+        .route("/workspaces/{workspace_id}/restore", post(restore_workspace_handler))
+        .route("/workspaces/{workspace_id}/members", get(list_workspace_members_handler))
+        .route("/workspaces/{workspace_id}/members/{principal_id}", put(set_workspace_member_handler).delete(remove_workspace_member_handler))
+        .route("/workspaces/{workspace_id}/projects", get(list_projects_handler).post(create_project_handler))
+        .route("/projects/{project_id}", get(get_project_handler).patch(rename_project_handler).delete(delete_project_handler))
+        .route("/projects/{project_id}/archive", post(archive_project_handler))
+        .route("/projects/{project_id}/restore", post(restore_project_handler))
+        .route("/projects/{project_id}/documents", get(list_documents_handler).post(create_document_handler))
+        .route("/documents/{document_id}", get(get_document_handler).patch(rename_document_handler).delete(delete_document_handler))
+        .route("/documents/{document_id}/archive", post(archive_document_handler))
+        .route("/documents/{document_id}/restore", post(restore_document_handler))
+        .route("/documents/{document_id}/members", get(list_document_members_handler))
+        .route("/documents/{document_id}/members/{principal_id}", put(set_document_member_handler).delete(remove_document_member_handler))
+        .route("/documents/{document_id}/team-grants", get(list_document_team_grants_handler))
+        .route("/documents/{document_id}/team-grants/{team_id}", put(set_document_team_grant_handler).delete(remove_document_team_grant_handler))
+        .route("/documents/{document_id}/share-links", get(list_share_links_handler).post(create_share_link_handler))
+        .route("/documents/{document_id}/share-links/{link_id}", axum::routing::delete(revoke_share_link_handler))
+        .route("/documents/{document_id}/collab-link", get(collab_link_handler))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cursors
+
+/// Opaque list cursors. The wire string is a codec's business; handlers only hand it the kind of
+/// list and the last row's identifier. The integrator can switch every list endpoint to the
+/// shared cursor implementation (S4-020) by replacing [`CURSORS`].
+pub(crate) trait CursorCodec: Send + Sync {
+    /// The cursor that resumes `kind` after `last`.
+    fn encode(&self, kind: &'static str, last: &str) -> String;
+    /// The identifier `cursor` resumes after, `None` when it is malformed or for another list.
+    fn decode(&self, kind: &'static str, cursor: &str) -> Option<String>;
+}
+
+/// Minimal local codec: unpadded base64url of `<kind>.<id>`. Not a security boundary (the
+/// identifier is re-scoped by the tenant transaction and re-authorized), only opaque.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct LocalCursor;
+
+impl CursorCodec for LocalCursor {
+    fn encode(&self, kind: &'static str, last: &str) -> String {
+        URL_SAFE_NO_PAD.encode(format!("{kind}.{last}"))
+    }
+
+    fn decode(&self, kind: &'static str, cursor: &str) -> Option<String> {
+        if cursor.is_empty() || cursor.len() > MAX_CURSOR_CHARS {
+            return None;
+        }
+        let bytes = URL_SAFE_NO_PAD.decode(cursor).ok()?;
+        let text = String::from_utf8(bytes).ok()?;
+        let (found, last) = text.split_once('.')?;
+        (found == kind && !last.is_empty()).then(|| last.to_string())
+    }
+}
+
+/// The codec every list endpoint uses.
+pub(crate) const CURSORS: LocalCursor = LocalCursor;
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ListQuery {
+    limit: Option<u32>,
+    cursor: Option<String>,
+}
+
+impl ListQuery {
+    fn size(&self) -> Result<PageSize, ApiError> {
+        PageSize::new(self.limit.unwrap_or(DEFAULT_PAGE)).map_err(|_| invalid())
+    }
+
+    fn after<T: std::str::FromStr>(&self, kind: &'static str) -> Result<Option<T>, ApiError> {
+        match &self.cursor {
+            None => Ok(None),
+            Some(cursor) => CURSORS.decode(kind, cursor).and_then(|last| last.parse().ok()).map(Some).ok_or_else(invalid),
+        }
+    }
+}
+
+fn next(kind: &'static str, last: Option<String>) -> Value {
+    last.map_or(Value::Null, |last| Value::String(CURSORS.encode(kind, &last)))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Errors and authorization
+
+const fn invalid() -> ApiError {
+    ApiError::new(ErrorCode::InvalidRequest)
+}
+
+pub(crate) fn repository_error(error: RepositoryError) -> ApiError {
+    match error {
+        RepositoryError::InvalidPageSize | RepositoryError::Constraint => invalid(),
+        RepositoryError::Conflict => ApiError::new(ErrorCode::Conflict),
+        RepositoryError::InvalidState => ApiError::new(ErrorCode::ResourceInactive),
+        RepositoryError::Database => ApiError::unavailable(),
+        RepositoryError::CorruptRow => ApiError::new(ErrorCode::Internal),
+    }
+}
+
+pub(crate) fn membership_error(error: MembershipError) -> ApiError {
+    match error {
+        MembershipError::InvalidRole | MembershipError::Constraint | MembershipError::NotActiveMember => invalid(),
+        MembershipError::NotFound => ApiError::not_found(),
+        MembershipError::LastOwner | MembershipError::Conflict => ApiError::new(ErrorCode::Conflict),
+        MembershipError::Database => ApiError::unavailable(),
+        MembershipError::CorruptRow => ApiError::new(ErrorCode::Internal),
+    }
+}
+
+fn share_error(error: ShareLinkError) -> ApiError {
+    match error {
+        ShareLinkError::InvalidInput => invalid(),
+        ShareLinkError::Refused => ApiError::not_found(),
+        _ => ApiError::unavailable(),
+    }
+}
+
+/// The policy's view of the caller's tenant-level facts.
+pub(crate) fn subject(tenant: &TenantAccess) -> Subject {
+    Subject {
+        principal_active: tenant.principal_active,
+        tenant_state: tenant.tenant_state,
+        tenant_role: tenant.tenant_role,
+        permissions: tenant.permissions.iter().filter_map(|permission| SensitivePermission::parse(permission.as_str())).collect(),
+    }
+}
+
+/// The kind of resource a route acts on.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Kind {
+    Workspace,
+    Project,
+    Document,
+}
+
+impl Kind {
+    pub(crate) const fn resource(self, state: ResourceState, role: Option<Role>) -> Resource {
+        match self {
+            Self::Workspace => Resource::Workspace { state, role },
+            Self::Project => Resource::Project { state, role },
+            Self::Document => Resource::Document { state, role },
+        }
+    }
+
+    pub(crate) const fn view(self) -> Action {
+        match self {
+            Self::Workspace => Action::WorkspaceView,
+            Self::Project => Action::ProjectView,
+            Self::Document => Action::DocumentView,
+        }
+    }
+}
+
+pub(crate) fn allows(access: &ResourceAccess, kind: Kind, action: Action) -> bool {
+    decide(&subject(&access.tenant), &kind.resource(access.state, access.role), action).allow
+}
+
+/// The disclosure policy over a resolved resource: `404` unless the caller may view it or perform
+/// `action`, `403` when visible but not permitted.
+pub(crate) fn check(access: Option<ResourceAccess>, kind: Kind, action: Action) -> Result<ResourceAccess, ApiError> {
+    authorize_resource(access, |access| allows(access, kind, kind.view()) || allows(access, kind, action), |access| allows(access, kind, action))
+}
+
+async fn begin<'a>(state: &'a AppState, caller: &Authenticated) -> Result<TenantTransaction<'a>, ApiError> {
+    if caller.session.kind == CredentialKind::ShareLink {
+        return Err(ApiError::forbidden());
+    }
+    begin_tenant_transaction(state.pool(), caller.tenant.tenant_id()).await.map_err(|_| ApiError::unavailable())
+}
+
+async fn commit(transaction: TenantTransaction<'_>) -> Result<(), ApiError> {
+    transaction.commit().await.map_err(|_| ApiError::unavailable())
+}
+
+async fn workspace_access(
+    transaction: &mut TenantTransaction<'_>,
+    caller: &Authenticated,
+    id: &str,
+    action: Action,
+) -> Result<WorkspaceId, ApiError> {
+    let id: WorkspaceId = id.parse().map_err(|_| ApiError::not_found())?;
+    let access = resolve_workspace_access(transaction, caller.principal, id).await.map_err(membership_error)?;
+    check(access, Kind::Workspace, action)?;
+    Ok(id)
+}
+
+async fn project_access(transaction: &mut TenantTransaction<'_>, caller: &Authenticated, id: &str, action: Action) -> Result<ProjectId, ApiError> {
+    let id: ProjectId = id.parse().map_err(|_| ApiError::not_found())?;
+    let access = resolve_project_access(transaction, caller.principal, id).await.map_err(membership_error)?;
+    check(access, Kind::Project, action)?;
+    Ok(id)
+}
+
+async fn document_access(
+    transaction: &mut TenantTransaction<'_>,
+    caller: &Authenticated,
+    id: &str,
+    action: Action,
+) -> Result<(CloudDocumentId, ResourceAccess), ApiError> {
+    let id: CloudDocumentId = id.parse().map_err(|_| ApiError::not_found())?;
+    let access = resolve_document_access(transaction, caller.principal, id).await.map_err(membership_error)?;
+    Ok((id, check(access, Kind::Document, action)?))
+}
+
+/// Tenant-scope actions (no resource identifier): `403` when not permitted (policy rule 4).
+async fn tenant_access(transaction: &mut TenantTransaction<'_>, caller: &Authenticated, action: Action) -> Result<TenantAccess, ApiError> {
+    let access = resolve_tenant_access(transaction, caller.principal).await.map_err(membership_error)?.ok_or(ApiError::forbidden())?;
+    if decide(&subject(&access), &Resource::Tenant, action).allow { Ok(access) } else { Err(ApiError::forbidden()) }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Bodies and views
+
+fn valid_name(name: &str) -> Result<&str, ApiError> {
+    let name = name.trim();
+    let chars = name.chars().count();
+    if chars == 0 || chars > MAX_NAME_CHARS || name.chars().any(char::is_control) { Err(invalid()) } else { Ok(name) }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NameBody {
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateWorkspaceBody {
+    name: String,
+    #[serde(default)]
+    owning_team_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RoleBody {
+    role: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CreateShareLinkBody {
+    role: String,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    expires_in_secs: Option<u64>,
+}
+
+pub(crate) const fn state_str(state: ResourceState) -> &'static str {
+    match state {
+        ResourceState::Pending => "pending",
+        ResourceState::Active => "active",
+        ResourceState::Suspended => "suspended",
+        ResourceState::Archived => "archived",
+        ResourceState::Deleting => "deleting",
+        ResourceState::Deleted => "deleted",
+    }
+}
+
+fn workspace_view(record: &WorkspaceRecord) -> Value {
+    json!({
+        "id": record.id.to_string(),
+        "name": record.name,
+        "state": state_str(record.state),
+        "owning_team_id": record.owning_team_id.map(|id| id.to_string()),
+    })
+}
+
+fn project_view(record: &ProjectRecord) -> Value {
+    json!({
+        "id": record.id.to_string(),
+        "workspace_id": record.workspace_id.to_string(),
+        "name": record.name,
+        "state": state_str(record.state),
+    })
+}
+
+fn document_view(record: &DocumentRecord) -> Value {
+    json!({
+        "id": record.id.to_string(),
+        "workspace_id": record.workspace_id.to_string(),
+        "project_id": record.project_id.to_string(),
+        "name": record.name,
+        "state": state_str(record.state),
+    })
+}
+
+fn no_store(mut response: Response) -> Response {
+    response.headers_mut().insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn created(body: Value) -> Response {
+    (StatusCode::CREATED, Json(body)).into_response()
+}
+
+// ---------------------------------------------------------------------------------------------
+// Workspaces
+
+async fn list_workspaces_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let size = query.size()?;
+    let after: Option<WorkspaceId> = query.after("ws")?;
+    let mut transaction = begin(&state, &caller).await?;
+    let tenant = tenant_access(&mut transaction, &caller, Action::TenantView).await?;
+    let every = matches!(tenant.tenant_role, Some(Role::TenantOwner | Role::TenantAdmin));
+    let page = list_visible_workspaces(&mut transaction, caller.principal, every, after, size).await.map_err(repository_error)?;
+    let mut items = Vec::with_capacity(page.items.len());
+    for record in &page.items {
+        // Re-decide each row: the listing query is only a pre-filter.
+        let access = resolve_workspace_access(&mut transaction, caller.principal, record.id).await.map_err(membership_error)?;
+        if access.is_some_and(|access| {
+            allows(&access, Kind::Workspace, Action::WorkspaceView) || allows(&access, Kind::Workspace, Action::WorkspaceRestore)
+        }) {
+            items.push(workspace_view(record));
+        }
+    }
+    Ok(Json(json!({"items": items, "next_cursor": next("ws", page.next_cursor.map(|id| id.to_string()))})))
+}
+
+async fn create_workspace_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    ApiJson(body): ApiJson<CreateWorkspaceBody>,
+) -> Result<Response, ApiError> {
+    let name = valid_name(&body.name)?;
+    let team = body.owning_team_id.as_deref().map(Uuid::parse_str).transpose().map_err(|_| invalid())?;
+    let mut transaction = begin(&state, &caller).await?;
+    tenant_access(&mut transaction, &caller, Action::WorkspaceCreate).await?;
+    let record = create_workspace(&mut transaction, WorkspaceId::random(), name, team).await.map_err(repository_error)?;
+    commit(transaction).await?;
+    Ok(created(workspace_view(&record)))
+}
+
+async fn get_workspace_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceView).await?;
+    let record = get_workspace(&mut transaction, id).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    Ok(Json(workspace_view(&record)))
+}
+
+async fn rename_workspace_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<NameBody>,
+) -> Result<Json<Value>, ApiError> {
+    let name = valid_name(&body.name)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceUpdate).await?;
+    let record = rename_workspace(&mut transaction, id, name).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    commit(transaction).await?;
+    Ok(Json(workspace_view(&record)))
+}
+
+async fn workspace_transition(
+    state: &AppState,
+    caller: &Authenticated,
+    id: &str,
+    action: Action,
+    transition: Transition,
+) -> Result<Json<Value>, ApiError> {
+    let mut transaction = begin(state, caller).await?;
+    let id = workspace_access(&mut transaction, caller, id, action).await?;
+    let record = transition_workspace(&mut transaction, id, transition).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    commit(transaction).await?;
+    Ok(Json(workspace_view(&record)))
+}
+
+async fn delete_workspace_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    workspace_transition(&state, &caller, &id, Action::WorkspaceDelete, Transition::SoftDelete).await
+}
+
+async fn archive_workspace_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    workspace_transition(&state, &caller, &id, Action::WorkspaceArchive, Transition::Archive).await
+}
+
+async fn restore_workspace_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    workspace_transition(&state, &caller, &id, Action::WorkspaceRestore, Transition::Restore).await
+}
+
+fn grants_view<Id: ToString>(kind: &'static str, key: &'static str, grants: &[figcraft_cloud_storage::resource_admin::Grant<Id>]) -> Value {
+    let items: Vec<Value> = grants.iter().map(|grant| json!({key: grant.id.to_string(), "role": role_str(grant.role)})).collect();
+    let last = (i64::try_from(grants.len()).unwrap_or(i64::MAX) >= MAX_LISTED).then(|| grants.last().map(|grant| grant.id.to_string())).flatten();
+    json!({"items": items, "next_cursor": next(kind, last)})
+}
+
+async fn list_workspace_members_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let after: Option<PrincipalId> = query.after("wm")?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceView).await?;
+    let members = list_workspace_members(&mut transaction, id, after).await.map_err(repository_error)?;
+    Ok(Json(grants_view("wm", "principal_id", &members)))
+}
+
+async fn set_workspace_member_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, principal)): Path<(String, String)>,
+    ApiJson(body): ApiJson<RoleBody>,
+) -> Result<Json<Value>, ApiError> {
+    let role = parse_role(&body.role).ok_or_else(invalid)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceManageMembers).await?;
+    let principal: PrincipalId = principal.parse().map_err(|_| ApiError::not_found())?;
+    set_workspace_member(&mut transaction, id, principal, role).await.map_err(membership_error)?;
+    commit(transaction).await?;
+    Ok(Json(json!({"principal_id": principal.to_string(), "role": role_str(role)})))
+}
+
+async fn remove_workspace_member_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, principal)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceManageMembers).await?;
+    let principal: PrincipalId = principal.parse().map_err(|_| ApiError::not_found())?;
+    if !remove_workspace_member(&mut transaction, id, principal).await.map_err(membership_error)? {
+        return Err(ApiError::not_found());
+    }
+    commit(transaction).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Projects
+
+async fn list_projects_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let size = query.size()?;
+    let after: Option<ProjectId> = query.after("pr")?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = workspace_access(&mut transaction, &caller, &id, Action::WorkspaceView).await?;
+    let page = list_projects(&mut transaction, id, after, size).await.map_err(repository_error)?;
+    let items: Vec<Value> = page.items.iter().filter(|record| record.state != ResourceState::Deleted).map(project_view).collect();
+    Ok(Json(json!({"items": items, "next_cursor": next("pr", page.next_cursor.map(|id| id.to_string()))})))
+}
+
+async fn create_project_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<NameBody>,
+) -> Result<Response, ApiError> {
+    let name = valid_name(&body.name)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = workspace_access(&mut transaction, &caller, &id, Action::ProjectCreate).await?;
+    let record = create_project(&mut transaction, ProjectId::random(), id, name, None).await.map_err(repository_error)?;
+    commit(transaction).await?;
+    Ok(created(project_view(&record)))
+}
+
+async fn get_project_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let id = project_access(&mut transaction, &caller, &id, Action::ProjectView).await?;
+    let record = get_project_by_id(&mut transaction, id).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    Ok(Json(project_view(&record)))
+}
+
+async fn rename_project_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<NameBody>,
+) -> Result<Json<Value>, ApiError> {
+    let name = valid_name(&body.name)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = project_access(&mut transaction, &caller, &id, Action::ProjectUpdate).await?;
+    let record = rename_project(&mut transaction, id, name).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    commit(transaction).await?;
+    Ok(Json(project_view(&record)))
+}
+
+async fn project_transition(
+    state: &AppState,
+    caller: &Authenticated,
+    id: &str,
+    action: Action,
+    transition: Transition,
+) -> Result<Json<Value>, ApiError> {
+    let mut transaction = begin(state, caller).await?;
+    let id = project_access(&mut transaction, caller, id, action).await?;
+    let record = transition_project(&mut transaction, id, transition).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    commit(transaction).await?;
+    Ok(Json(project_view(&record)))
+}
+
+async fn delete_project_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    project_transition(&state, &caller, &id, Action::ProjectDelete, Transition::SoftDelete).await
+}
+
+async fn archive_project_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    project_transition(&state, &caller, &id, Action::ProjectArchive, Transition::Archive).await
+}
+
+async fn restore_project_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    project_transition(&state, &caller, &id, Action::ProjectRestore, Transition::Restore).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Documents
+
+async fn list_documents_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let size = query.size()?;
+    let after: Option<CloudDocumentId> = query.after("doc")?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = project_access(&mut transaction, &caller, &id, Action::ProjectView).await?;
+    let page = list_documents(&mut transaction, id, after, size).await.map_err(repository_error)?;
+    let items: Vec<Value> = page.items.iter().map(document_view).collect();
+    Ok(Json(json!({"items": items, "next_cursor": next("doc", page.next_cursor.map(|id| id.to_string()))})))
+}
+
+async fn create_document_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<NameBody>,
+) -> Result<Response, ApiError> {
+    let name = valid_name(&body.name)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let id = project_access(&mut transaction, &caller, &id, Action::DocumentCreate).await?;
+    let project = get_project_by_id(&mut transaction, id).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    let record = create_document(&mut transaction, CloudDocumentId::random(), project.workspace_id, id, name).await.map_err(repository_error)?;
+    commit(transaction).await?;
+    Ok(created(document_view(&record)))
+}
+
+async fn get_document_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, access) = document_access(&mut transaction, &caller, &id, Action::DocumentView).await?;
+    let record = get_document(&mut transaction, id).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    let mut view = document_view(&record);
+    view["role"] = access.role.map_or(Value::Null, |role| Value::String(role_str(role).to_string()));
+    view["can_edit"] = Value::Bool(allows(&access, Kind::Document, Action::DocumentEdit));
+    Ok(Json(view))
+}
+
+async fn rename_document_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<NameBody>,
+) -> Result<Json<Value>, ApiError> {
+    let name = valid_name(&body.name)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentRename).await?;
+    let record = rename_document(&mut transaction, id, name).await.map_err(repository_error)?.ok_or(ApiError::not_found())?;
+    commit(transaction).await?;
+    Ok(Json(document_view(&record)))
+}
+
+#[derive(Clone, Copy)]
+enum DocumentTransition {
+    Archive,
+    Restore,
+    Delete,
+}
+
+async fn document_transition(state: &AppState, caller: &Authenticated, id: &str, transition: DocumentTransition) -> Result<Json<Value>, ApiError> {
+    let action = match transition {
+        DocumentTransition::Archive => Action::DocumentArchive,
+        DocumentTransition::Restore => Action::DocumentRestore,
+        DocumentTransition::Delete => Action::DocumentDelete,
+    };
+    let mut transaction = begin(state, caller).await?;
+    let (id, _) = document_access(&mut transaction, caller, id, action).await?;
+    let record = match transition {
+        DocumentTransition::Archive => archive_document(&mut transaction, id).await,
+        DocumentTransition::Restore => restore_document(&mut transaction, id).await,
+        DocumentTransition::Delete => soft_delete_document(&mut transaction, id).await,
+    }
+    .map_err(repository_error)?
+    .ok_or(ApiError::not_found())?;
+    commit(transaction).await?;
+    Ok(Json(document_view(&record)))
+}
+
+async fn delete_document_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    document_transition(&state, &caller, &id, DocumentTransition::Delete).await
+}
+
+async fn archive_document_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    document_transition(&state, &caller, &id, DocumentTransition::Archive).await
+}
+
+async fn restore_document_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Json<Value>, ApiError> {
+    document_transition(&state, &caller, &id, DocumentTransition::Restore).await
+}
+
+// ---------------------------------------------------------------------------------------------
+// Document members and team grants
+
+async fn list_document_members_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let after: Option<PrincipalId> = query.after("dm")?;
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentView).await?;
+    let members = list_document_members(&mut transaction, id, after).await.map_err(repository_error)?;
+    Ok(Json(grants_view("dm", "principal_id", &members)))
+}
+
+async fn set_document_member_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, principal)): Path<(String, String)>,
+    ApiJson(body): ApiJson<RoleBody>,
+) -> Result<Json<Value>, ApiError> {
+    let role = parse_role(&body.role).ok_or_else(invalid)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
+    let principal: PrincipalId = principal.parse().map_err(|_| ApiError::not_found())?;
+    set_document_member(&mut transaction, id, principal, role).await.map_err(membership_error)?;
+    commit(transaction).await?;
+    Ok(Json(json!({"principal_id": principal.to_string(), "role": role_str(role)})))
+}
+
+async fn remove_document_member_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, principal)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
+    let principal: PrincipalId = principal.parse().map_err(|_| ApiError::not_found())?;
+    if !remove_document_member(&mut transaction, id, principal).await.map_err(membership_error)? {
+        return Err(ApiError::not_found());
+    }
+    commit(transaction).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn list_document_team_grants_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    Query(query): Query<ListQuery>,
+) -> Result<Json<Value>, ApiError> {
+    let after: Option<Uuid> = query.after("dt")?;
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentView).await?;
+    let grants = list_document_team_grants(&mut transaction, id, after).await.map_err(repository_error)?;
+    Ok(Json(grants_view("dt", "team_id", &grants)))
+}
+
+async fn set_document_team_grant_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, team)): Path<(String, String)>,
+    ApiJson(body): ApiJson<RoleBody>,
+) -> Result<Json<Value>, ApiError> {
+    let role = parse_role(&body.role).ok_or_else(invalid)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
+    let team = Uuid::parse_str(&team).map_err(|_| ApiError::not_found())?;
+    set_document_team_grant(&mut transaction, id, team, role).await.map_err(membership_error)?;
+    commit(transaction).await?;
+    Ok(Json(json!({"team_id": team.to_string(), "role": role_str(role)})))
+}
+
+async fn remove_document_team_grant_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, team)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
+    let team = Uuid::parse_str(&team).map_err(|_| ApiError::not_found())?;
+    if !remove_document_team_grant(&mut transaction, id, team).await.map_err(membership_error)? {
+        return Err(ApiError::not_found());
+    }
+    commit(transaction).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// ---------------------------------------------------------------------------------------------
+// Share links and the collaboration link
+
+async fn list_share_links_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Response, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
+    let links = list_share_links(&mut transaction, id).await.map_err(share_error)?;
+    let items: Vec<Value> = links
+        .iter()
+        .map(|link| {
+            json!({
+                "id": link.id.to_string(),
+                "role": link.role.as_str(),
+                "label": link.label,
+                "created_by": link.created_by.to_string(),
+                "created_at": link.created_at,
+                "expires_at": link.expires_at,
+                "revoked_at": link.revoked_at,
+            })
+        })
+        .collect();
+    Ok(no_store(Json(json!({"items": items})).into_response()))
+}
+
+async fn create_share_link_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path(id): Path<String>,
+    ApiJson(body): ApiJson<CreateShareLinkBody>,
+) -> Result<Response, ApiError> {
+    let role = ShareRole::parse(&body.role).ok_or_else(invalid)?;
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, access) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
+    // A link never grants more than its creator holds.
+    if role == ShareRole::Editor && !allows(&access, Kind::Document, Action::DocumentEdit) {
+        return Err(ApiError::forbidden());
+    }
+    let link =
+        create_share_link(&mut transaction, id, role, body.label.as_deref(), caller.principal, body.expires_in_secs).await.map_err(share_error)?;
+    commit(transaction).await?;
+    // The secret is returned once and never stored or logged.
+    Ok(no_store(created(json!({"id": link.id.to_string(), "role": role.as_str(), "secret": link.secret}))))
+}
+
+async fn revoke_share_link_handler(
+    State(state): State<AppState>,
+    caller: Authenticated,
+    Path((id, link)): Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, _) = document_access(&mut transaction, &caller, &id, Action::DocumentShare).await?;
+    let link = Uuid::parse_str(&link).map_err(|_| ApiError::not_found())?;
+    // The link must belong to this document (the path is authorized per document).
+    let links = list_share_links(&mut transaction, id).await.map_err(share_error)?;
+    if !links.iter().any(|record| record.id == link) || !revoke_share_link(&mut transaction, link).await.map_err(share_error)? {
+        return Err(ApiError::not_found());
+    }
+    commit(transaction).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `FIGCRAFT_PUBLIC_URL` (read once; the relay bootstrap reads the same variable).
+fn public_url() -> &'static str {
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        std::env::var("FIGCRAFT_PUBLIC_URL").ok().filter(|value| !value.trim().is_empty()).unwrap_or_else(|| DEFAULT_PUBLIC_URL.to_string())
+    })
+}
+
+/// The relay invite (`ws(s)://<host>/ws/v1/collab?file=<id>&token=<secret>`) and the editor URL
+/// that joins with it, for `public_url`.
+pub(crate) fn collab_urls(public_url: &str, document: CloudDocumentId, secret: &str) -> Result<(String, String), ApiError> {
+    let base = public_url.trim_end_matches('/');
+    let socket = if let Some(rest) = base.strip_prefix("https://") {
+        format!("wss://{rest}")
+    } else if let Some(rest) = base.strip_prefix("http://") {
+        format!("ws://{rest}")
+    } else {
+        return Err(ApiError::unavailable());
+    };
+    let invite = format!("{socket}{}?file={document}&token={secret}", crate::relay::RELAY_PATH);
+    let editor = crate::relay::editor_url(public_url, document, secret).map_err(|_| ApiError::unavailable())?;
+    Ok((invite, editor))
+}
+
+async fn collab_link_handler(State(state): State<AppState>, caller: Authenticated, Path(id): Path<String>) -> Result<Response, ApiError> {
+    let mut transaction = begin(&state, &caller).await?;
+    let (id, access) = document_access(&mut transaction, &caller, &id, Action::DocumentJoinRealtime).await?;
+    let edit = allows(&access, Kind::Document, Action::DocumentEdit);
+    let role = if edit { ShareRole::Editor } else { ShareRole::Viewer };
+    let link = create_share_link(&mut transaction, id, role, Some(COLLAB_LINK_LABEL), caller.principal, Some(COLLAB_LINK_SECS))
+        .await
+        .map_err(share_error)?;
+    commit(transaction).await?;
+    let (invite, editor_url) = collab_urls(public_url(), id, &link.secret)?;
+    Ok(no_store(
+        Json(json!({
+            "document_id": id.to_string(),
+            "access": if edit { "edit" } else { "view" },
+            "link_id": link.id.to_string(),
+            "expires_in_secs": COLLAB_LINK_SECS,
+            "invite": invite,
+            "editor_url": editor_url,
+        }))
+        .into_response(),
+    ))
+}

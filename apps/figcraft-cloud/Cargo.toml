@@ -9,6 +9,7 @@ description = "FigCraft's modular cloud application"
 [dependencies]
 figcraft-cloud-domain = { path = "../../crates/cloud-domain" }
 figcraft-cloud-storage = { path = "../../crates/cloud-storage" }
+figcraft-cloud-auth = { path = "../../crates/cloud-auth" }
 figcraft-cloud-relay = { path = "../../crates/cloud-relay" }
 figcraft-collab-net = { workspace = true }
 sqlx = { workspace = true }

@@ -29,6 +29,7 @@ pub mod oidc_logins;
 pub mod plugin_store;
 pub mod quarantine;
 pub mod reconciliation;
+pub mod resource_admin;
 pub mod service_accounts;
 pub mod sessions;
 pub mod share_links;
