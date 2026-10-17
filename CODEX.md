@@ -143,18 +143,24 @@ the continuation point, a blocker or a major decision changes.
    `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
    ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
    sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
-   S4 is in progress (20/25): API foundation, OIDC login routes, sessions, bootstrap gate,
-   service accounts, deny-by-default authz, tenants/teams/invitations, document APIs with HMAC
-   cursors, row-level security on every tenant table (pre-tenant lookups through SECURITY DEFINER
-   functions), membership revocation, support access and job recheck are done. Remaining:
-   S4-019 (handlers must call `revocation::apply_revocation` after member removal/suspension;
-   switch `documents_api` lists to `api/cursor.rs`), S4-021..023 at API level, S4-024 is accepted
-   (owner confirmed all defaults in `docs/saas/identity-mapping-policy.md`), S4-025 (Keycloak SAML
-   run per `docs/saas/saml-federation.md`), then the S4 gate. Also: a CLI that prints the bootstrap
-   token, browser relay admission by short-lived realtime tickets instead of share links, and
-   `snapshots::set_current_snapshot` should report NotFound for another tenant's document. S5 orchestration is decided
-   (owner, 2026-10-17): our own leases in PostgreSQL beside the fencing tokens, relay-to-owner
-   redirects and drain; not Plane or Rivet (see the S5 note in the tracker). Testing policy: targeted suites per step and a quick scan before push; run the full
+   STATE AT END OF 2026-10-17: S4 21/25, S5 5/25 (see the tracker header). Done in S4: login
+   (OIDC), sessions, bootstrap gate + `--print-bootstrap-token`, service accounts, authz core,
+   tenants/teams/invitations, document APIs with signed cursors, RLS everywhere, revocation hooks,
+   support access, job recheck, realtime tickets, identity policy (owner-accepted), full route x
+   caller matrix and API cross-tenant suite.
+   RESUME HERE (S4): S4-019 leftovers (project-level team grants, team-member search,
+   principal-suspension routes); S4-021 (relay action matrix beyond tickets); S4-023 (close the
+   ignored in-flight-HTTP race: recheck membership inside the mutating transaction); S4-025
+   (OIDC back-channel logout, groups claim, pin the Keycloak image); then S4-GATE.
+   RESUME HERE (S5): orchestration is decided (owner): our own PostgreSQL leases beside the
+   fencing tokens, any relay redirects to the owner, drain on shutdown; not Plane/Rivet. Next:
+   S5-003/004 lease rows, S5-006 redirect, S5-012 drain, S5-014 commenter/viewer enforcement at
+   message level, S5-016..018 quotas/presence/large assets, S5-020..023 two-replica and kill
+   tests. PRIORITY FINDING from S5-024 (`docs/saas/relay-performance.md`): the relay hub runs
+   commits and cold restores serially on one thread (a 20k-node restore blocked other rooms for
+   8 s); move storage work off the hub thread before multi-replica work.
+   Testing policy (owner): targeted suites per step, quick scan (fmt, clippy on dependents,
+   layers, affected tests) before push; full smoke/`cargo xtask ci` only when GitHub CI is red. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.
    Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
    plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight

@@ -89,10 +89,12 @@ pub(crate) async fn realtime_ticket_handler(
     if caller.session.kind != CredentialKind::BrowserSession {
         return Err(ApiError::forbidden());
     }
+    // Authorize first so an unconfigured deployment answers the disclosure policy's 404/403 like
+    // every other document route, and only an authorized caller learns tickets are unavailable.
+    let (document, edit) = super::documents_api::authorize_realtime(&state, &caller, &id).await?;
     if state.realtime_key().is_none() {
         return Err(ApiError::unavailable());
     }
-    let (document, edit) = super::documents_api::authorize_realtime(&state, &caller, &id).await?;
     let minted = mint_for(&state, &caller, document, edit)?;
     let mut response = Json(json!({
         "document_id": document.to_string(),

@@ -312,6 +312,7 @@ const ROWS: &[Row] = &[
     row("POST", "/documents/{document_id}/share-links", "/documents/{d}/share-links", Send::ShareLink, RES, EDITORS),
     row("DELETE", "/documents/{document_id}/share-links/{link_id}", "/documents/{d}/share-links/{link}", Send::Nothing, RES, EDITORS),
     row("GET", "/documents/{document_id}/collab-link", "/documents/{d}/collab-link", Send::Nothing, RES, ALL),
+    row("POST", "/documents/{document_id}/realtime-ticket", "/documents/{d}/realtime-ticket", Send::Nothing, RES, ALL),
 ];
 
 /// The expected outcome: `None` is any 2xx.
@@ -342,6 +343,9 @@ fn expected(row: &Row, who: Who) -> Expected {
         Who::NonMember | Who::Suspended | Who::ShareEditor | Who::ShareViewer => Some(403),
         // Service principals are not tenant members: no tenant role, no resource role, whatever
         // the scope. Their own tenant list is readable; people-only routes are 403.
+        // Realtime tickets are for browser sessions only: every other credential is refused before
+        // any lookup, so the answer does not depend on the document.
+        _ if who.service() && row.path.ends_with("/realtime-ticket") => Some(403),
         _ if who.service() => match row.kind {
             Kind::TenantsList => None,
             Kind::TenantsCreate | Kind::Accept | Kind::CallerTenant => Some(403),
@@ -403,7 +407,8 @@ fn app(pool: PgPool, identity: Arc<IdentityConfig>) -> Router {
         auth_rate_limit: RateLimitConfig { burst: 1_000_000, refill_every: Duration::from_millis(1), max_keys: 1_000 },
         ..ApiConfig::default()
     };
-    let state = AppState::new(pool, objects(), config).with_identity(identity);
+    let ticket_key = figcraft_cloud_storage::realtime_tickets::TicketKey::derive(b"e2-route-matrix-realtime-ticket-key").expect("test ticket key");
+    let state = AppState::new(pool, objects(), config).with_identity(identity).with_realtime_tickets(Arc::new(ticket_key));
     crate::health::app(CloudRole::Api, true, Some(api_router(state)), ContextSettings::new(CloudRole::Api, 256, Duration::from_secs(30), 1 << 20))
 }
 
@@ -455,7 +460,6 @@ const UNLISTED: &[&str] = &[
     "/documents/{d}/exports",
     "/documents/{d}/versions",
     "/documents/{d}/comments",
-    "/documents/{d}/realtime-ticket",
     "/documents/{d}/members/{m2}/role",
     "/documents/{d}/share-links/{link}/secret",
     "/objects/{d}",

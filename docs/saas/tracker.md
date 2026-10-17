@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 in progress (20/25); S5 in progress (5/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 in progress (21/25); S5 in progress (5/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -22,7 +22,7 @@ the same commit as the completed task.
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
-| S4 Identity, tenancy and authorization | in progress | 20 / 25 | Isolation and role suite passes |
+| S4 Identity, tenancy and authorization | in progress | 21 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 5 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
@@ -1736,6 +1736,43 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   invitation APIs belong to B2 and are not in this change, so S4-019 as a whole is only met once
   B2's part merges. Not done: audit records for these mutations, and workspace team-grant routes
   (the storage functions exist; no routes yet).
+  Partial (2026-10-17, round C): This finishes the C1 slice. (1) Revocation after member changes. A
+  new tenants_api::revoke_after_commit helper calls revocation::apply_revocation after each change
+  commits: - member DELETE → TenantMemberRemoved - member PATCH to state=suspended →
+  TenantMemberSuspended - tenant PATCH to suspended → TenantSuspended - team archive (PATCH or
+  DELETE) → TeamArchived - team-member removal → TeamMemberRemoved - workspace team-grant DELETE →
+  GrantRevoked If the follow-up fails, the change is not undone and the request still succeeds. The
+  failure goes to stderr with ids only, and access is still refused on every request. Principal
+  suspension has no API route, so PrincipalSuspended is not wired. The router test uses real browser
+  sessions through the production CredentialAuthenticator. A removed member's next request is 401
+  and both their sessions are revoked. The same holds for a suspended member. A member removed here
+  who still belongs to another active tenant gets 403 here, keeps their sessions and gets 200 in the
+  other tenant. The owner is untouched. (2) documents_api lists now use api/cursor.rs. The local
+  CursorCodec and LocalCursor are gone. Cursors are bound to the list kind, tenant, caller and
+  parent resource. Behaviour is unchanged: a bad limit is still 400 invalid_request, and a bad or
+  foreign cursor is 400 invalid_cursor (it was 400 invalid_request). Tests: pure binding tests,
+  end-to-end paging over 5 documents, and refusal of a workspaces cursor, another caller's cursor
+  and another project's cursor. (3) Realtime tickets. They are stateless, with no migration. A
+  ticket is "rt1_" + base64url of: version | tenant | principal | browser session | access | exp |
+  HMAC-SHA256 tag. It is 124 characters, which fits the invite's 128-character token limit. The key
+  is a subkey derived from SESSION_SIGNING_KEY. The document id is covered by the MAC but not
+  carried in the ticket. Lifetime is capped at 60 s; a ticket expiring more than 60 s + 5 s skew
+  ahead is refused. POST /api/v1/documents/{id}/realtime-ticket is for browser sessions only (403
+  for other credentials) and answers 503 without a key. It needs document.join_realtime: 404 when
+  the caller can't see the document, 403 when archived. Access is edit only with document.edit. It
+  returns {ticket, expires_in, ws_url, access, document_id} with Cache-Control: no-store. The
+  relay's CloudBackend::admit sends ticket-shaped tokens to admit_ticket. That checks MAC, expiry
+  and document, then re-checks the live session and effective role with dead_member_admissions, so
+  an edit ticket for someone who is now a viewer is refused. The principal is recorded as the batch
+  actor, and the relay watches the member for revocation sweeps. Share-link admission is unchanged.
+  GET /documents/{id}/collab-link gives a signed-in browser (with a key configured) a ticket invite
+  ("kind":"ticket", link_id null, 60 s) and mints no share link. Other cases get the 8-hour share
+  link as before ("kind":"share_link"). Tests through the real hub: edit and view admission, actor
+  recording, a forged edit ticket for a viewer refused, other document, expired, tampered and
+  logged-out tickets refused, share links still admit, a removed member is disconnected within 5 s,
+  and a relay with no key refuses tickets. S4-019 overall stays partial because these remain:
+  project-level team grants, team-member search, the S4-021 route-matrix integration, and
+  principal-suspension routes.
 - [x] **S4-020** Implement bounded search and opaque pagination cursors.
   Evidence: Bounded search and opaque, tamper-evident pagination cursors are implemented in
   apps/figcraft-cloud/src/api/cursor.rs. The cursor is URL-safe base64 of a versioned payload: kind,
@@ -1776,7 +1813,45 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   nobody can see them from here; (2) CloudBackend::admit does not call PrincipalAdmission yet. That
   is a hook in collab_backend.rs, which B5 owns, so the relay matrix is tested at the decision layer
   and not yet through a live hello.
-- [ ] **S4-022** Add cross-tenant API, repository, object, cache, job and realtime tests.
+  Partial (2026-10-17): apps/figcraft-cloud/src/api/route_matrix_tests.rs (fixture prefix e2) has
+  ROWS, a hand-written table of all 71 (method, route) pairs that api_router registers, with the
+  expected result for each one written from the product rules. These rules come from the authz,
+  tenants_api, teams_api, documents_api and authenticator docs and the error disclosure policy, not
+  from the handlers. Four tests check that the table is the router.
+  every_route_in_the_sources_has_a_row_and_every_row_is_in_the_sources reads every .route(...)
+  registration in auth_routes, tenants_api, teams_api and documents_api. It also checks that
+  api_router and tenants_api merge no other router. It requires the set of (method, path) pairs to
+  equal ROWS exactly, so an unlisted route fails the test and so does a stale row.
+  every_route_is_listed_and_nothing_else_is_registered sends each row through the real router. No
+  listed method may answer 405, and anonymous callers must get the expected 401, 404 or 503. Every
+  other method on a listed route must be 405. Every method on 35 plausible unlisted paths (download,
+  presign, exports, jobs, realtime tickets, service accounts, audit, support access and others) must
+  be 404 not_found. the_table_has_one_row_per_route_and_covers_the_documents_module checks for
+  duplicate rows and requires every documents_api::ROUTES entry to have a row.
+  every_route_and_caller_matches_the_expected_matrix runs 71 routes x 16 callers (1136 cells)
+  against the dev PostgreSQL with RLS on. It uses the production CredentialAuthenticator, real
+  sessions from sessions::create_session, one service-account bearer per scope (documents.read,
+  documents.write, exports.create, jobs.read), and share sessions exchanged from real editor and
+  viewer links. The callers are: anonymous; the four service scopes; tenant viewer, commenter and
+  editor (each holding that role on the workspace under test); workspace_admin; tenant_admin;
+  tenant_owner; a non-member; a suspended member; another tenant's owner; and the share editor and
+  share viewer. Mutating cells get fresh fixtures, and the restore rows archive their target first.
+  All 1136 cells match. The relay action matrix is in
+  apps/figcraft-cloud/tests/relay_action_matrix.rs. It drives the production CloudBackend::admit
+  with 30 hellos. Editor links get Edit and viewer links get View. Members with their session token
+  get V and C → View, and E, W, tenant admin and owner → Edit. These are refused with the uniform
+  REFUSED message: a revoked link; a link presented for another document in the same tenant; A's
+  link on B's document and B's link on A's; an archived document; an unknown or junk token; a tenant
+  member with no workspace role; a suspended member; a non-member; a logged-out session;
+  other-tenant sessions in all four combinations; an archived workspace for a member; and a service
+  credential used as a session or as a link. It is partial for one reason only: share links into an
+  archived workspace or archived project still admit with Edit (see issues). Those two cells are
+  recorded in KNOWN_GAPS, which keeps the expectation as REFUSE and fails once the gap is fixed.
+  Main has no realtime-ticket route, so member session tokens (member.<tenant>.<session>) are tested
+  as the realtime credential instead. Integration: the realtime-ticket route was added to the table;
+  its handler now authorizes before reporting a missing ticket key, so another tenant's owner gets
+  404 like every document route.
+- [x] **S4-022** Add cross-tenant API, repository, object, cache, job and realtime tests.
   Partial (2026-10-17): crates/cloud-storage/tests/cross_tenant_isolation.rs builds two fresh
   tenants, A and B, each with an owner (fixture prefix d6, random ids). A gets one of each of these:
   workspace, project and document; an editor member with an export permission; workspace and
@@ -1803,6 +1878,26 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   creating plugins, stored document snapshots and published library versions (their read paths are
   covered here, and their own suites have cross-tenant cases); and a run under RLS once B4's storage
   changes are integrated.
+  Evidence: cross_tenant_resources_are_invisible_to_another_tenants_owner creates every resource
+  kind in tenant A: workspace, project, document, team, team member, team workspace grant, owned
+  workspace and project, document member, document team grant, sensitive permission, share link and
+  invitation. Tenant B's owner then sends, through the real router and authenticator, every
+  resource-scoped and /tenants/{A} row of the matrix: read, update, delete, archive, restore, child
+  lists and share-link minting. Each resource route gets 404 and /tenants/{A}/... gets 403. Both
+  replies equal, byte for byte apart from request_id, the replies for random identifiers that do not
+  exist, so A's resources cannot be told apart from missing ones. B's own tenant paths aimed at A's
+  children (team, team members, invitations, members, permissions, grants, owned workspace and
+  project) get 404, again equal to the replies for unknown IDs. Adding A's member to B's team is
+  refused. None of the B list routes return any of A's identifiers: /tenants, /workspaces (also
+  after B creates a workspace), B's teams, members and invitations, and B's team members and team
+  invitations. A's share session presented with B's tenant header gets 403 on collab-link.
+  Afterwards A's owner reads every resource back with its original name and state, and A's
+  memberships, permissions, links and invitations are intact. For object download and presign:
+  api_router has no such route, and the sweep holds every method on /documents/{d}/download,
+  /presign, /content, /export(s), /objects, /assets, /downloads and /uploads at 404. Object-level
+  cross-tenant isolation is already covered by crates/cloud-storage/tests/cross_tenant_isolation.rs
+  and the realtime side by tests/cross_tenant_relay.rs plus the new relay matrix. Integration
+  (2026-10-17): the matrix also covers the realtime-ticket route added in the same round.
 - [ ] **S4-023** Add revocation race tests for active HTTP, job and WebSocket access.
   Partial (2026-10-17): crates/cloud-storage/tests/revocation_races.rs runs each racer on its own
   one-connection pool, so its backend pid is known, on a multi-thread runtime. The ordering is
@@ -1912,7 +2007,14 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 - [ ] **S5-001** Implement short-lived, document-bound realtime tickets. Depends on S3-GATE and
   S4-GATE.
+  Partial (2026-10-17): stateless HMAC realtime tickets (60 s, bound to tenant, principal, browser
+  session, document and access) are minted by `POST /api/v1/documents/{id}/realtime-ticket` and
+  admitted by the relay, which re-checks the live session and effective role (S4-019 round C). Open:
+  tickets are not yet tied to S5 room ownership routing.
 - [ ] **S5-002** Add relay admission that resolves authenticated principal, tenant and maximum role.
+  Partial (2026-10-17): relay admission resolves the principal, tenant and maximum role from a
+  realtime ticket and re-checks it on admission and in the revocation sweep; share-link admission
+  remains for unsigned access.
 - [ ] **S5-003** Implement Redis room registry with bounded, namespaced keys.
 - [ ] **S5-004** Implement renewable room leases and ownership identity.
 - [x] **S5-005** Implement monotonically increasing PostgreSQL fencing tokens.
@@ -1990,7 +2092,33 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 - [ ] **S5-022** Kill relay before commit and prove no edit was confirmed.
 - [ ] **S5-023** Kill relay after commit and prove the edit returns after reconnect.
 - [ ] **S5-024** Load-test reconnect storms, slow readers and maximum supported document size.
+  Partial (2026-10-17): crates/cloud-relay/examples/relay_load.rs starts a real collab_net hub with
+  CloudBackend on loopback against the dev PostgreSQL and S3. It creates documents and editor share
+  links in tenant transactions (fixture tenant prefix f1) and drives raw tungstenite editors that
+  send hello and then rename batches. The phases are steady, slow readers, reconnect storm, large
+  document and recovery; --phases selects them, --timeout sets the storage timeout and --cpu-nodes
+  times the collaboration core alone. Measured at 20 editors, 5 documents, 120 s and 2 batches/s:
+  4800 of 4800 batches were confirmed, with no failures. The hub dropped both slow readers 45 to 50
+  s in, after about 1024 queued messages, and the other editors kept committing. In a reconnect
+  storm, 20 editors reconnected and had a commit confirmed within 221 ms, with no failures. A
+  20k-frame document took 8.5 s to cold-open with a 60 s timeout, about 4 KiB RSS per node and a 616
+  kB welcome. With the relay's default 15 s storage timeout, that cold open was refused twice under
+  host load ("recovery timed out"). Not covered: multiple replicas, production scale, separate
+  client processes, and the 5M-node maximum document size.
 - [ ] **S5-025** Measure room recovery and commit latency against roadmap targets.
+  Partial (2026-10-17): docs/saas/relay-performance.md records the machine, the exact commands and
+  the results, and compares them with the product-requirements targets. It also adds a "Sizing from
+  measurements" section. Commit latency, send to confirmation including the PostgreSQL commit: p50
+  4.4 ms, p95 37.6 ms, p99 52.2 ms at host load 37. An earlier run at load 100+ gave a p95 of 111.5
+  ms. That is within the 50 ms p95 target at this scale, but needs re-measuring on a quiet host.
+  Room recovery on a fresh hub: 500 events with no snapshot gives a p95 of 66 ms. A 20k-frame
+  snapshot gives p50 8.5 s and p95 8.6 s; with 500 events after it, p50 8.3 s and p95 14.3 s. That
+  misses the 10 s target for 20k frames. CloudBackend::recover restores the server twice, and the
+  in-process restore takes 4.1 s at 20k frames, so the double restore accounts for about half the
+  cold-open time. Other figures: document_events grows by 152 B per row (about 350 B with indexes,
+  up to about 860 B of WAL), which is 7,172 rows and 1.04 MiB per editor-hour at 2 batches/s;
+  outbound traffic is 162 B/s per editor; RSS is about 2.3 MiB per open small document. Both
+  multi-replica and production-scale targets are still outstanding.
 
 ### S5 gate
 
@@ -2288,3 +2416,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S4 round A and CS-005: axum API foundation with auth rate limits and the disclosure policy; OIDC login (openidconnect, PKCE, nonce, key rotation); browser sessions, bootstrap administrator and service accounts; deny-by-default effective-role authorization with memberships, team grants and explicit sensitive permissions; tenants, teams and invitations; share-link exchange with live revocation; tenant-key audit; runtime-configurable branding from Docker env. S4 reaches 14/25 (S4-017 and S4-021 partial). |
 | 2026-10-17 | S4 round B: production authenticator and auth routes (OIDC login/callback, logout, bootstrap gate, share exchange), tenant/team/invitation/member and workspace/project/document APIs with HMAC cursors, row-level security on every tenant table with SECURITY DEFINER pre-tenant lookups, membership revocation closing sessions and relay connections, audited support access, job authorization recheck, cross-tenant and revocation race suites (which found and fixed a rotate-vs-revoke-all session race), identity-mapping policy draft and SAML procedure. S4 reaches 19/25. |
 | 2026-10-17 | S4 round C (part) and S5 round A: revocation races at HTTP, WebSocket and job level (S4-023 partial: one in-flight HTTP order); SAML through a Keycloak broker end to end (S4-025 partial: back-channel logout, groups claim); orchestration decided as our own PostgreSQL leases; filesystem-server and desktop session compatibility proven (S5-019); S5-005/007/009/013 recorded as delivered by S2/S3 work. S5 reaches 5/25. |
+| 2026-10-17 | S4 round C (rest) and S5 load harness: member-removal revocation hooks, signed cursors on document lists, `--print-bootstrap-token`, realtime tickets with relay admission; full route x caller permission matrix (1,152 cells) and API-level cross-tenant suite (S4-022); relay load and latency harness with measured sizing (S5-024/025 partial). Finding: commits and cold restores run serially on the relay hub thread (a 20k-node restore blocked other rooms for 8 s). S4 at 21/25, S5 at 5/25. |
