@@ -1,5 +1,6 @@
 //! Process entry point for FigCraft's cloud application.
 
+mod api;
 mod config;
 mod health;
 mod relay;
@@ -331,7 +332,7 @@ fn main() -> ExitCode {
                 eprintln!("figcraft-cloud: collaboration relay not started: dependencies are not ready");
                 None
             };
-            match health::serve(config.role, ready) {
+            match health::serve(&config, ready) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(_) => {
                     eprintln!("figcraft-cloud: unable to start the health endpoint server");

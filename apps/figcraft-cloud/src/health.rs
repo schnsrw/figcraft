@@ -1,16 +1,33 @@
+//! The HTTP server on port 8081: health and readiness probes for every role, the API transport
+//! probe and `/api/v1` for API roles, and the WebSocket upgrade diagnostic for relay roles.
+//!
+//! Every route runs behind [`crate::api::context::middleware`] (request ID, `traceparent`,
+//! structured request log, error envelope, in-flight cap, deadline, declared body size). The
+//! probe bodies and status codes are unchanged from the handwritten server this replaces.
+
 use std::io::{self, Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 
+use axum::Router;
+use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, WebSocketUpgrade, rejection::WebSocketUpgradeRejection};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Version, header};
+use axum::middleware::from_fn_with_state;
+use axum::response::{IntoResponse, Response};
+use axum::routing::get;
 use base64::Engine as _;
-use figcraft_cloud_domain::RequestId;
-use sha1::{Digest, Sha1};
 
-use crate::config::CloudRole;
+use crate::api::context::{self, ContextSettings};
+use crate::api::{self, ApiConfig, AppState};
+use crate::config::{CloudConfig, CloudRole};
 
-const MAX_REQUEST_BYTES: usize = 8 * 1024;
-const HEALTH_ADDR: &str = "0.0.0.0:8081";
-const WEBSOCKET_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const HEALTH_ADDR: ([u8; 4], u16) = ([0, 0, 0, 0], 8081);
+/// Concurrent requests served at once; the rest get `503`.
+const MAX_IN_FLIGHT: usize = 1024;
+/// A request that takes longer than this gets `503`.
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+/// Database connections the API holds at most.
+const API_POOL_CONNECTIONS: u32 = 16;
 
 pub(super) fn probe_ready() -> io::Result<bool> {
     probe_ready_at(SocketAddr::from(([127, 0, 0, 1], 8081)))
@@ -26,338 +43,291 @@ fn probe_ready_at(address: SocketAddr) -> io::Result<bool> {
     Ok(&status == b"HTTP/1.1 200 OK\r\n")
 }
 
-pub(super) fn serve(role: CloudRole, ready: bool) -> io::Result<()> {
-    let listener = TcpListener::bind(HEALTH_ADDR)?;
-    eprintln!("figcraft-cloud: health endpoints listening on {HEALTH_ADDR} for role '{}' (dependencies_ready={ready})", role.as_str());
-    for stream in listener.incoming() {
-        let mut stream = stream?;
-        handle_connection(&mut stream, role, ready)?;
-    }
-    Ok(())
+const fn serves_api(role: CloudRole) -> bool {
+    matches!(role, CloudRole::All | CloudRole::Api)
 }
 
-fn handle_connection(stream: &mut TcpStream, role: CloudRole, ready: bool) -> io::Result<()> {
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
-    let request = read_request(stream);
-    let context = RequestContext::from_request(request.as_ref().ok().map(String::as_str));
-    let result = match request {
-        Ok(request) => route(&request, role, ready),
-        Err(RequestError::TooLarge) => RouteResult::Http(413, "Payload Too Large", "{\"error\":\"request too large\"}".to_string()),
-        Err(RequestError::Invalid) => RouteResult::Http(400, "Bad Request", "{\"error\":\"invalid request\"}".to_string()),
-    };
-    let status = match result {
-        RouteResult::Http(status, reason, body) => {
-            let response = response(status, reason, &body, &context);
-            stream.write_all(response.as_bytes())?;
-            status
+const fn serves_relay(role: CloudRole) -> bool {
+    matches!(role, CloudRole::All | CloudRole::Relay)
+}
+
+/// Serve port 8081 until the listener fails. `ready` is the dependency check made at startup;
+/// `/api/v1` answers `503` while it is false.
+pub(super) fn serve(config: &CloudConfig, ready: bool) -> io::Result<()> {
+    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    runtime.block_on(async {
+        let api_config = ApiConfig { deployment: config.deployment, trusted_proxies: config.trusted_proxies.clone(), ..ApiConfig::default() };
+        let max_body = api_config.max_body_bytes;
+        let api = if serves_api(config.role) && ready { api_state(config, api_config).map(api::api_router) } else { None };
+        if serves_api(config.role) && ready && api.is_none() {
+            eprintln!("figcraft-cloud: the API could not be configured; /api/v1 will answer 503");
         }
-        RouteResult::WebSocket(accept) => {
-            let response = websocket_response(&accept, &context);
-            stream.write_all(response.as_bytes())?;
-            // The probe proves the upgrade path and immediately closes with a normal WebSocket
-            // close frame. Collaboration messages are implemented by a later relay milestone.
-            stream.write_all(&[0x88, 0x02, 0x03, 0xE8])?;
-            101
-        }
+        let settings = ContextSettings::new(config.role, MAX_IN_FLIGHT, REQUEST_DEADLINE, u64::try_from(max_body).unwrap_or(u64::MAX));
+        let app = app(config.role, ready, api, settings);
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(HEALTH_ADDR)).await?;
+        eprintln!(
+            "figcraft-cloud: HTTP server listening on {} for role '{}' (dependencies_ready={ready})",
+            SocketAddr::from(HEALTH_ADDR),
+            config.role.as_str()
+        );
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await
+    })
+}
+
+/// The API's shared state: a lazily connecting pool and the object store.
+fn api_state(config: &CloudConfig, api_config: ApiConfig) -> Option<AppState> {
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(API_POOL_CONNECTIONS)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect_lazy(config.database_url()?)
+        .ok()?;
+    let objects = figcraft_cloud_storage::objects::ObjectStore::new(&config.object_store_settings()?).ok()?;
+    Some(AppState::new(pool, objects, api_config))
+}
+
+/// The whole router for `role`. `api` is the `/api/v1` router when the API is configured; API
+/// roles without it answer `503` under `/api/v1` (the transport probe still answers).
+pub(crate) fn app(role: CloudRole, ready: bool, api: Option<Router>, settings: ContextSettings) -> Router {
+    let mut router = Router::new()
+        .route("/healthz", get(move || async move { json(StatusCode::OK, format!("{{\"status\":\"alive\",\"role\":\"{}\"}}", role.as_str())) }))
+        .route("/startupz", get(move || async move { json(StatusCode::OK, format!("{{\"status\":\"started\",\"role\":\"{}\"}}", role.as_str())) }))
+        .route("/readyz", get(move || async move { readiness(role, ready) }));
+    if serves_api(role) {
+        router = router.route("/api/v1/healthz", get(|| async { json(StatusCode::OK, "{\"status\":\"transport_ready\"}".to_string()) }));
+        router = router.merge(api.unwrap_or_else(api::unavailable_router));
+    }
+    if serves_relay(role) {
+        router = router.route("/ws/v1/health", get(websocket_probe));
+    }
+    router
+        .fallback(legacy_fallback)
+        .method_not_allowed_fallback(|| async { method_not_allowed() })
+        .layer(from_fn_with_state(settings, context::middleware))
+}
+
+fn readiness(role: CloudRole, ready: bool) -> Response {
+    if ready {
+        json(StatusCode::OK, format!("{{\"status\":\"transport_ready\",\"role\":\"{}\"}}", role.as_str()))
+    } else {
+        json(StatusCode::SERVICE_UNAVAILABLE, format!("{{\"status\":\"not_ready\",\"role\":\"{}\"}}", role.as_str()))
+    }
+}
+
+fn json(status: StatusCode, body: String) -> Response {
+    (status, [(header::CONTENT_TYPE, HeaderValue::from_static("application/json"))], body).into_response()
+}
+
+fn method_not_allowed() -> Response {
+    json(StatusCode::METHOD_NOT_ALLOWED, "{\"error\":\"method not allowed\"}".to_string())
+}
+
+/// Outside `/api/v1`: `405` for anything but `GET` (as the old server did), `404` otherwise.
+async fn legacy_fallback(method: Method) -> Response {
+    if method == Method::GET { json(StatusCode::NOT_FOUND, "{\"error\":\"not found\"}".to_string()) } else { method_not_allowed() }
+}
+
+/// Prove the upgrade path: validate the handshake, switch protocols and close normally at once.
+/// Collaboration traffic is served by the relay on port 8082.
+async fn websocket_probe(version: Version, headers: HeaderMap, upgrade: Result<WebSocketUpgrade, WebSocketUpgradeRejection>) -> Response {
+    let key_is_valid = headers
+        .get(header::SEC_WEBSOCKET_KEY)
+        .and_then(|key| base64::engine::general_purpose::STANDARD.decode(key.as_bytes()).ok())
+        .is_some_and(|key| key.len() == 16);
+    let upgrade = match upgrade {
+        Ok(upgrade) if version == Version::HTTP_11 && headers.contains_key(header::HOST) && key_is_valid => upgrade,
+        _ => return json(StatusCode::UPGRADE_REQUIRED, "{\"error\":\"websocket upgrade required\"}".to_string()),
     };
-    stream.flush()?;
-    write_request_log(role, status, &context);
-    Ok(())
-}
-
-enum RouteResult {
-    Http(u16, &'static str, String),
-    WebSocket(String),
-}
-
-#[derive(Clone, Copy)]
-enum RequestError {
-    TooLarge,
-    Invalid,
-}
-
-fn read_request(stream: &mut TcpStream) -> Result<String, RequestError> {
-    let mut request = Vec::with_capacity(1024);
-    let mut chunk = [0; 1024];
-    loop {
-        let count = stream.read(&mut chunk).map_err(|_| RequestError::Invalid)?;
-        if count == 0 {
-            return Err(RequestError::Invalid);
-        }
-        if request.len().saturating_add(count) > MAX_REQUEST_BYTES {
-            return Err(RequestError::TooLarge);
-        }
-        request.extend_from_slice(&chunk[..count]);
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            return String::from_utf8(request).map_err(|_| RequestError::Invalid);
-        }
-    }
-}
-
-struct RequestContext {
-    request_id: RequestId,
-    traceparent: Option<TraceParent>,
-}
-
-impl RequestContext {
-    fn from_request(request: Option<&str>) -> Self {
-        let traceparent = request.and_then(parse_traceparent);
-        Self { request_id: RequestId::random(), traceparent }
-    }
-}
-
-struct TraceParent {
-    value: String,
-    trace_id: String,
-    parent_id: String,
-}
-
-fn parse_traceparent(request: &str) -> Option<TraceParent> {
-    let value = request.lines().skip(1).take_while(|line| !line.is_empty()).find_map(|line| {
-        let (name, value) = line.split_once(':')?;
-        name.eq_ignore_ascii_case("traceparent").then(|| value.trim())
-    })?;
-    let mut parts = value.split('-');
-    let version = parts.next()?;
-    let trace_id = parts.next()?;
-    let parent_id = parts.next()?;
-    let flags = parts.next()?;
-    if parts.next().is_some()
-        || version != "00"
-        || trace_id.len() != 32
-        || parent_id.len() != 16
-        || flags.len() != 2
-        || !trace_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || !parent_id.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || !flags.bytes().all(|byte| byte.is_ascii_hexdigit())
-        || trace_id.bytes().all(|byte| byte == b'0')
-        || parent_id.bytes().all(|byte| byte == b'0')
-    {
-        return None;
-    }
-    Some(TraceParent { value: value.to_string(), trace_id: trace_id.to_string(), parent_id: parent_id.to_string() })
-}
-
-fn route(request: &str, role: CloudRole, ready: bool) -> RouteResult {
-    let Some(line) = request.lines().next() else {
-        return RouteResult::Http(400, "Bad Request", r#"{"error":"invalid request"}"#.to_string());
-    };
-    let mut parts = line.split_ascii_whitespace();
-    let (Some(method), Some(path), Some(version)) = (parts.next(), parts.next(), parts.next()) else {
-        return RouteResult::Http(400, "Bad Request", "{\"error\":\"invalid request\"}".to_string());
-    };
-    if parts.next().is_some() || (version != "HTTP/1.0" && version != "HTTP/1.1") {
-        return RouteResult::Http(400, "Bad Request", "{\"error\":\"invalid request\"}".to_string());
-    }
-    if method != "GET" {
-        return RouteResult::Http(405, "Method Not Allowed", "{\"error\":\"method not allowed\"}".to_string());
-    }
-
-    if path == "/api/v1/healthz" && matches!(role, CloudRole::All | CloudRole::Api) {
-        return RouteResult::Http(200, "OK", "{\"status\":\"transport_ready\"}".to_string());
-    }
-    if path == "/ws/v1/health" && matches!(role, CloudRole::All | CloudRole::Relay) {
-        return match websocket_accept(request) {
-            Some(accept) => RouteResult::WebSocket(accept),
-            None => RouteResult::Http(426, "Upgrade Required", "{\"error\":\"websocket upgrade required\"}".to_string()),
-        };
-    }
-
-    match path {
-        "/healthz" => RouteResult::Http(200, "OK", format!("{{\"status\":\"alive\",\"role\":\"{}\"}}", role.as_str())),
-        "/startupz" => RouteResult::Http(200, "OK", format!("{{\"status\":\"started\",\"role\":\"{}\"}}", role.as_str())),
-        "/readyz" if ready => RouteResult::Http(200, "OK", format!("{{\"status\":\"transport_ready\",\"role\":\"{}\"}}", role.as_str())),
-        "/readyz" => RouteResult::Http(503, "Service Unavailable", format!("{{\"status\":\"not_ready\",\"role\":\"{}\"}}", role.as_str())),
-        _ => RouteResult::Http(404, "Not Found", "{\"error\":\"not found\"}".to_string()),
-    }
-}
-
-fn websocket_accept(request: &str) -> Option<String> {
-    if request.lines().next()?.split_ascii_whitespace().nth(2)? != "HTTP/1.1" {
-        return None;
-    }
-    let header = |name: &str| {
-        request.lines().skip(1).take_while(|line| !line.is_empty()).find_map(|line| {
-            let (key, value) = line.split_once(':')?;
-            key.eq_ignore_ascii_case(name).then(|| value.trim())
-        })
-    };
-    header("host")?;
-    let upgrade = header("upgrade")?;
-    let connection = header("connection")?;
-    let version = header("sec-websocket-version")?;
-    let key = header("sec-websocket-key")?;
-    if !upgrade.eq_ignore_ascii_case("websocket")
-        || !connection.split(',').any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
-        || version != "13"
-        || base64::engine::general_purpose::STANDARD.decode(key).ok()?.len() != 16
-    {
-        return None;
-    }
-    let mut digest = Sha1::new();
-    digest.update(key.as_bytes());
-    digest.update(WEBSOCKET_GUID.as_bytes());
-    Some(base64::engine::general_purpose::STANDARD.encode(digest.finalize()))
-}
-
-fn response(status: u16, reason: &str, body: &str, context: &RequestContext) -> String {
-    let trace_header = context.traceparent.as_ref().map(|trace| format!("traceparent: {}\r\n", trace.value)).unwrap_or_default();
-    format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nX-Request-Id: {}\r\n{trace_header}Connection: close\r\n\r\n{body}",
-        body.len(),
-        context.request_id
-    )
-}
-
-fn websocket_response(accept: &str, context: &RequestContext) -> String {
-    format!(
-        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: {accept}\r\nX-Request-Id: {}\r\n\r\n",
-        context.request_id
-    )
-}
-
-fn write_request_log(role: CloudRole, status: u16, context: &RequestContext) {
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |duration| duration.as_millis());
-    let mut record = serde_json::json!({
-        "timestamp_unix_ms": timestamp,
-        "level": "info",
-        "event": "http_request",
-        "request_id": context.request_id.to_string(),
-        "role": role.as_str(),
-        "status": status,
-    });
-    if let Some(traceparent) = &context.traceparent {
-        record["trace_id"] = serde_json::Value::String(traceparent.trace_id.clone());
-        record["parent_span_id"] = serde_json::Value::String(traceparent.parent_id.clone());
-    }
-    if let Ok(line) = serde_json::to_string(&record) {
-        let _ = writeln!(io::stdout().lock(), "{line}");
-    }
-}
-
-#[cfg(test)]
-fn response_for(request: &str, role: CloudRole, ready: bool) -> String {
-    let context = RequestContext::from_request(Some(request));
-    match route(request, role, ready) {
-        RouteResult::Http(status, reason, body) => response(status, reason, &body, &context),
-        RouteResult::WebSocket(accept) => websocket_response(&accept, &context),
-    }
+    upgrade.on_upgrade(|mut socket| async move {
+        let _ = socket.send(Message::Close(Some(CloseFrame { code: 1000, reason: Utf8Bytes::from_static("") }))).await;
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::{Read, Write};
-    use std::net::{TcpListener, TcpStream};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
     use std::str::FromStr;
     use std::thread;
+    use std::time::Duration;
 
+    use axum::Router;
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
     use figcraft_cloud_domain::RequestId;
+    use tower::ServiceExt as _;
 
-    use super::{handle_connection, parse_traceparent, probe_ready_at, response_for};
+    use super::{app, probe_ready_at};
+    use crate::api::context::ContextSettings;
     use crate::config::CloudRole;
 
-    #[test]
-    fn liveness_startup_and_readiness_are_distinct_for_each_role() {
+    fn router(role: CloudRole, ready: bool) -> Router {
+        app(role, ready, None, ContextSettings::new(role, 16, Duration::from_secs(5), 1024))
+    }
+
+    async fn call(role: CloudRole, ready: bool, request: Request<Body>) -> (StatusCode, axum::http::HeaderMap, String) {
+        let response = router(role, ready).oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        (status, headers, String::from_utf8(body.to_vec()).unwrap())
+    }
+
+    async fn get(role: CloudRole, ready: bool, path: &str) -> (StatusCode, String) {
+        let (status, _, body) = call(role, ready, Request::get(path).body(Body::empty()).unwrap()).await;
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn liveness_startup_and_readiness_are_distinct_for_each_role() {
         for role in [CloudRole::All, CloudRole::Api, CloudRole::Relay, CloudRole::Worker] {
-            let health = response_for("GET /healthz HTTP/1.1\r\n\r\n", role, false);
-            let startup = response_for("GET /startupz HTTP/1.1\r\n\r\n", role, false);
-            let ready = response_for("GET /readyz HTTP/1.1\r\n\r\n", role, false);
-            assert!(health.starts_with("HTTP/1.1 200 OK"));
-            assert!(health.contains(role.as_str()));
-            assert!(startup.starts_with("HTTP/1.1 200 OK"));
-            assert!(startup.contains("started"));
-            assert!(ready.starts_with("HTTP/1.1 503 Service Unavailable"));
-            assert!(ready.contains("not_ready"));
-            assert!(response_for("GET /readyz HTTP/1.1\r\n\r\n", role, true).starts_with("HTTP/1.1 200 OK"));
+            let name = role.as_str();
+            assert_eq!(get(role, false, "/healthz").await, (StatusCode::OK, format!("{{\"status\":\"alive\",\"role\":\"{name}\"}}")));
+            assert_eq!(get(role, false, "/startupz").await, (StatusCode::OK, format!("{{\"status\":\"started\",\"role\":\"{name}\"}}")));
+            assert_eq!(
+                get(role, false, "/readyz").await,
+                (StatusCode::SERVICE_UNAVAILABLE, format!("{{\"status\":\"not_ready\",\"role\":\"{name}\"}}"))
+            );
+            assert_eq!(get(role, true, "/readyz").await, (StatusCode::OK, format!("{{\"status\":\"transport_ready\",\"role\":\"{name}\"}}")));
         }
     }
 
-    #[test]
-    fn api_transport_probe_is_available_only_in_api_roles() {
-        let request = "GET /api/v1/healthz HTTP/1.1\r\n\r\n";
-        assert!(response_for(request, CloudRole::All, true).starts_with("HTTP/1.1 200 OK"));
-        assert!(response_for(request, CloudRole::Api, true).contains("transport_ready"));
-        assert!(response_for(request, CloudRole::Relay, true).starts_with("HTTP/1.1 404"));
-        assert!(response_for(request, CloudRole::Worker, true).starts_with("HTTP/1.1 404"));
+    #[tokio::test]
+    async fn api_transport_probe_is_available_only_in_api_roles() {
+        for role in [CloudRole::All, CloudRole::Api] {
+            assert_eq!(get(role, false, "/api/v1/healthz").await, (StatusCode::OK, "{\"status\":\"transport_ready\"}".to_string()));
+            // Without a configured API every other API route is unavailable, in the envelope.
+            let (status, body) = get(role, false, "/api/v1/tenants").await;
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+            assert!(body.contains("\"code\":\"temporarily_unavailable\""), "{body}");
+        }
+        for role in [CloudRole::Relay, CloudRole::Worker] {
+            assert_eq!(get(role, true, "/api/v1/healthz").await, (StatusCode::NOT_FOUND, "{\"error\":\"not found\"}".to_string()));
+        }
     }
 
-    #[test]
-    fn websocket_probe_validates_the_upgrade_and_returns_the_rfc_accept_value() {
-        let request = concat!(
-            "GET /ws/v1/health HTTP/1.1\r\n",
-            "Host: localhost\r\n",
-            "Upgrade: websocket\r\n",
-            "Connection: keep-alive, Upgrade\r\n",
-            "Sec-WebSocket-Version: 13\r\n",
-            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    #[tokio::test]
+    async fn websocket_probe_requires_an_upgrade_and_only_in_relay_roles() {
+        let handshake = || {
+            Request::get("/ws/v1/health")
+                .header("host", "localhost")
+                .header("upgrade", "websocket")
+                .header("connection", "keep-alive, Upgrade")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            get(CloudRole::All, true, "/ws/v1/health").await,
+            (StatusCode::UPGRADE_REQUIRED, "{\"error\":\"websocket upgrade required\"}".to_string())
         );
-        let response = response_for(request, CloudRole::All, true);
-        assert!(response.starts_with("HTTP/1.1 101 Switching Protocols"));
-        assert!(response.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n"));
-        assert!(response_for("GET /ws/v1/health HTTP/1.1\r\n\r\n", CloudRole::All, true).starts_with("HTTP/1.1 426"));
-        assert!(response_for(request, CloudRole::Api, true).starts_with("HTTP/1.1 404"));
+        assert_eq!(call(CloudRole::Api, true, handshake()).await.0, StatusCode::NOT_FOUND);
+        // A bad key is refused before any upgrade.
+        let mut bad = handshake();
+        bad.headers_mut().insert("sec-websocket-key", "c2hvcnQ=".parse().unwrap());
+        assert_eq!(call(CloudRole::Relay, true, bad).await.0, StatusCode::UPGRADE_REQUIRED);
     }
 
-    #[test]
-    fn unknown_paths_methods_and_malformed_requests_fail_safely() {
-        assert!(response_for("GET /metrics HTTP/1.1\r\n\r\n", CloudRole::Api, false).starts_with("HTTP/1.1 404"));
-        assert!(response_for("POST /healthz HTTP/1.1\r\n\r\n", CloudRole::Api, false).starts_with("HTTP/1.1 405"));
-        assert!(response_for("not http", CloudRole::Api, false).starts_with("HTTP/1.1 400"));
+    #[tokio::test]
+    async fn unknown_paths_and_methods_fail_safely() {
+        assert_eq!(get(CloudRole::Api, false, "/metrics").await, (StatusCode::NOT_FOUND, "{\"error\":\"not found\"}".to_string()));
+        let post = |path: &str| Request::post(path).body(Body::empty()).unwrap();
+        let (status, _, body) = call(CloudRole::Api, false, post("/healthz")).await;
+        assert_eq!((status, body.as_str()), (StatusCode::METHOD_NOT_ALLOWED, "{\"error\":\"method not allowed\"}"));
+        assert_eq!(call(CloudRole::Worker, false, post("/metrics")).await.0, StatusCode::METHOD_NOT_ALLOWED);
     }
 
-    #[test]
-    fn request_ids_are_generated_and_returned() {
-        let response = response_for("GET /healthz HTTP/1.1\r\n\r\n", CloudRole::Api, false);
-        let id = response.lines().find_map(|line| line.strip_prefix("X-Request-Id: ")).expect("request ID header");
+    #[tokio::test]
+    async fn request_ids_are_generated_and_returned() {
+        let (_, headers, _) = call(CloudRole::Api, false, Request::get("/healthz").body(Body::empty()).unwrap()).await;
+        let id = headers.get("x-request-id").unwrap().to_str().unwrap();
         assert!(RequestId::from_str(id).is_ok());
+        let (_, again, _) = call(CloudRole::Api, false, Request::get("/healthz").body(Body::empty()).unwrap()).await;
+        assert_ne!(again.get("x-request-id").unwrap(), id);
     }
 
-    #[test]
-    fn valid_w3c_trace_context_is_forwarded_and_invalid_context_is_dropped() {
+    #[tokio::test]
+    async fn valid_w3c_trace_context_is_forwarded_and_invalid_context_is_dropped() {
         let valid = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-        let request = format!("GET /healthz HTTP/1.1\r\ntraceparent: {valid}\r\n\r\n");
-        assert!(response_for(&request, CloudRole::Api, false).contains(&format!("traceparent: {valid}\r\n")));
-        assert!(parse_traceparent("GET /healthz HTTP/1.1\r\ntraceparent: 00-00000000000000000000000000000000-00f067aa0ba902b7-01\r\n\r\n").is_none());
+        let request = Request::get("/healthz").header("traceparent", valid).body(Body::empty()).unwrap();
+        let (_, headers, _) = call(CloudRole::Api, false, request).await;
+        assert_eq!(headers.get("traceparent").unwrap(), valid);
+        let invalid = "00-00000000000000000000000000000000-00f067aa0ba902b7-01";
+        let request = Request::get("/healthz").header("traceparent", invalid).body(Body::empty()).unwrap();
+        let (_, headers, _) = call(CloudRole::Api, false, request).await;
+        assert!(headers.get("traceparent").is_none());
+    }
+
+    #[tokio::test]
+    async fn declared_bodies_over_the_limit_are_refused_on_every_route() {
+        let request = Request::get("/healthz").header("content-length", "4096").body(Body::from(vec![b'x'; 4096])).unwrap();
+        let (status, _, body) = call(CloudRole::Api, false, request).await;
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(body.contains("\"code\":\"invalid_request\""), "{body}");
+    }
+
+    #[tokio::test]
+    async fn oversized_headers_are_refused() {
+        let request = Request::get("/healthz").header("x-padding", "p".repeat(crate::api::context::MAX_HEADER_BYTES)).body(Body::empty()).unwrap();
+        let (status, headers, body) = call(CloudRole::Worker, false, request).await;
+        assert_eq!(status, StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+        assert!(headers.contains_key("x-request-id"));
+        assert!(body.contains("\"code\":\"invalid_request\""), "{body}");
+    }
+
+    /// Serve `role` on a loopback listener in a background runtime; returns its address.
+    fn spawn_server(role: CloudRole, ready: bool) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+                let app = router(role, ready);
+                axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+            });
+        });
+        address
+    }
+
+    fn exchange(address: SocketAddr, request: &[u8]) -> Vec<u8> {
+        let mut client = TcpStream::connect(address).unwrap();
+        client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        client.write_all(request).unwrap();
+        let mut response = Vec::new();
+        let _ = client.read_to_end(&mut response);
+        response
     }
 
     #[test]
     fn health_endpoint_serves_http_over_a_local_socket() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test socket");
-        let address = listener.local_addr().expect("test socket address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept test request");
-            handle_connection(&mut stream, CloudRole::Relay, false).expect("serve test request");
-        });
-
-        let mut client = TcpStream::connect(address).expect("connect test socket");
-        client.write_all(b"GET /readyz HTTP/1.1\r\nHost: localhost\r\n\r\n").expect("write test request");
-        let mut response = String::new();
-        client.read_to_string(&mut response).expect("read test response");
-        server.join().expect("health server thread");
-        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"));
+        let address = spawn_server(CloudRole::Relay, false);
+        let response = exchange(address, b"GET /readyz HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let response = String::from_utf8(response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 503 Service Unavailable"), "{response}");
         assert!(response.contains("\"role\":\"relay\""));
-        assert!(response.contains("X-Request-Id: "));
+        assert!(response.to_ascii_lowercase().contains("x-request-id: "));
+        // Malformed requests are refused by the HTTP parser.
+        let garbage = String::from_utf8(exchange(address, b"not http\r\n\r\n")).unwrap();
+        assert!(garbage.is_empty() || garbage.starts_with("HTTP/1.1 400"), "{garbage}");
+        // The readiness probe used by `--check-ready` reads the real server.
+        assert!(!probe_ready_at(address).unwrap());
+        assert!(probe_ready_at(spawn_server(CloudRole::Api, true)).unwrap());
     }
 
     #[test]
-    fn websocket_probe_writes_a_normal_close_frame_after_upgrade() {
-        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test socket");
-        let address = listener.local_addr().expect("test socket address");
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("accept test request");
-            handle_connection(&mut stream, CloudRole::All, true).expect("serve websocket probe");
-        });
-        let mut client = TcpStream::connect(address).expect("connect test socket");
-        client
-            .write_all(
-                b"GET /ws/v1/health HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
-            )
-            .expect("write websocket handshake");
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).expect("read websocket close");
-        server.join().expect("websocket handler thread");
-        assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"));
-        assert!(response.ends_with(&[0x88, 0x02, 0x03, 0xE8]));
+    fn websocket_probe_returns_the_rfc_accept_value_and_a_normal_close_frame() {
+        let address = spawn_server(CloudRole::All, true);
+        let response = exchange(
+            address,
+            b"GET /ws/v1/health HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
+        );
+        let text = String::from_utf8_lossy(&response).to_ascii_lowercase();
+        assert!(response.starts_with(b"HTTP/1.1 101 Switching Protocols\r\n"), "{text}");
+        assert!(text.contains("sec-websocket-accept: s3pplmbitxaq9kygzzhzrbk+xoo=\r\n"), "{text}");
+        assert!(text.contains("x-request-id: "));
+        assert!(response.ends_with(&[0x88, 0x02, 0x03, 0xE8]), "{response:?}");
     }
 
     #[test]

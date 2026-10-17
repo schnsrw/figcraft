@@ -46,6 +46,8 @@ pub(super) struct CloudConfig {
     s3_bucket: Option<String>,
     s3_force_path_style: bool,
     mounted_secrets: BTreeSet<&'static str>,
+    /// Peers whose `X-Forwarded-For` is believed (`FIGCRAFT_TRUSTED_PROXY_CIDRS`; default none).
+    pub(super) trusted_proxies: Vec<crate::api::client_ip::Cidr>,
 }
 
 impl Default for CloudConfig {
@@ -62,6 +64,7 @@ impl Default for CloudConfig {
             s3_bucket: None,
             s3_force_path_style: false,
             mounted_secrets: BTreeSet::new(),
+            trusted_proxies: Vec::new(),
         }
     }
 }
@@ -145,6 +148,7 @@ impl CloudConfig {
                     };
                 }
                 "FIGCRAFT_PUBLIC_URL" => config.public_url = Some(value.to_string()),
+                "FIGCRAFT_TRUSTED_PROXY_CIDRS" => config.trusted_proxies = crate::api::client_ip::parse_cidrs(value)?,
                 "OIDC_ISSUER" => config.oidc_issuer = Some(value.to_string()),
                 "S3_ENDPOINT" => config.s3_endpoint = Some(value.to_string()),
                 "S3_REGION" => config.s3_region = Some(value.to_string()),
@@ -260,6 +264,7 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_DEPLOYMENT",
         "FIGCRAFT_PUBLIC_URL",
         "FIGCRAFT_SINGLE_TENANT_ID",
+        "FIGCRAFT_TRUSTED_PROXY_CIDRS",
         "DATABASE_URL",
         "DATABASE_URL_FILE",
         "REDIS_URL",
@@ -297,6 +302,14 @@ mod tests {
     #[test]
     fn defaults_are_local_single_tenant_and_all_roles() {
         assert_eq!(CloudConfig::parse([]), Ok(CloudConfig::default()));
+    }
+
+    #[test]
+    fn trusted_proxies_default_to_none_and_must_be_cidrs() {
+        assert!(CloudConfig::default().trusted_proxies.is_empty());
+        let config = CloudConfig::parse([("FIGCRAFT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8, fd00::/8")]).unwrap();
+        assert_eq!(config.trusted_proxies.len(), 2);
+        assert!(CloudConfig::parse([("FIGCRAFT_TRUSTED_PROXY_CIDRS", "10.0.0.0/8,gateway")]).is_err());
     }
 
     #[test]
