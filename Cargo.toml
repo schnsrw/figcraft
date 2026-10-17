@@ -47,6 +47,9 @@ sqlx = { version = "0.9", default-features = false, features = ["macros", "migra
 rusty-s3 = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
 tokio = { version = "1", features = ["net", "rt", "time"] }
+# S4-001: OpenID Connect discovery, PKCE and ID-token validation (MIT). Default features off: its
+# HTTP client is our own reqwest 0.13 adapter over rustls/ring (crates/cloud-auth/src/oidc_http.rs).
+openidconnect = { version = "4", default-features = false }
 
 # rendering / formats
 tiny-skia = "0.12"

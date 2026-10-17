@@ -21,6 +21,7 @@ pub mod migration_plan;
 pub mod object_metadata;
 pub mod object_references;
 pub mod objects;
+pub mod oidc_logins;
 pub mod plugin_store;
 pub mod quarantine;
 pub mod reconciliation;
