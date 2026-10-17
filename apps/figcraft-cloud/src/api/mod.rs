@@ -32,6 +32,7 @@ pub(crate) mod documents_api;
 pub(crate) mod error;
 pub(crate) mod host_api;
 pub(crate) mod host_events;
+pub(crate) mod login_throttle;
 pub(crate) mod passwords;
 pub(crate) mod rate_limit;
 pub(crate) mod realtime;
@@ -102,6 +103,9 @@ pub(crate) struct AppState {
     realtime: Option<Arc<figcraft_cloud_storage::realtime_tickets::TicketKey>>,
     /// Password hashing for built-in accounts (S6-033); `None` leaves password routes answering `503`.
     passwords: Option<passwords::PasswordService>,
+    /// Failed-sign-in lockout policy and the per-login backoff table (S6-035).
+    lockout: figcraft_cloud_storage::credentials::LockoutPolicy,
+    login_throttle: Arc<login_throttle::LoginThrottle>,
 }
 
 impl AppState {
@@ -120,6 +124,8 @@ impl AppState {
             oidc: None,
             realtime: None,
             passwords: None,
+            lockout: figcraft_cloud_storage::credentials::LockoutPolicy::default(),
+            login_throttle: Arc::new(login_throttle::LoginThrottle::new(figcraft_cloud_storage::credentials::LockoutPolicy::default())),
         }
     }
 
@@ -147,6 +153,21 @@ impl AppState {
     pub(crate) fn with_passwords(mut self, service: passwords::PasswordService) -> Self {
         self.passwords = Some(service);
         self
+    }
+
+    /// Use `policy` for sign-in lockout and backoff.
+    pub(crate) fn with_lockout(mut self, policy: figcraft_cloud_storage::credentials::LockoutPolicy) -> Self {
+        self.lockout = policy;
+        self.login_throttle = Arc::new(login_throttle::LoginThrottle::new(policy));
+        self
+    }
+
+    pub(crate) const fn lockout(&self) -> figcraft_cloud_storage::credentials::LockoutPolicy {
+        self.lockout
+    }
+
+    pub(crate) fn login_throttle(&self) -> &login_throttle::LoginThrottle {
+        &self.login_throttle
     }
 
     pub(crate) fn passwords(&self) -> Option<&passwords::PasswordService> {

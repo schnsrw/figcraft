@@ -66,6 +66,8 @@ pub(super) struct CloudConfig {
     password_params: figcraft_cloud_auth::password::HashParams,
     /// Password hashes computed at once (`FIGCRAFT_PASSWORD_CONCURRENCY`).
     password_concurrency: usize,
+    /// Sign-in lockout (`FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD`, `_BASE_SECONDS`, `_MAX_SECONDS`).
+    login_lockout: figcraft_cloud_storage::credentials::LockoutPolicy,
 }
 
 impl Default for CloudConfig {
@@ -94,6 +96,7 @@ impl Default for CloudConfig {
             trusted_proxies: Vec::new(),
             password_params: figcraft_cloud_auth::password::HashParams::default(),
             password_concurrency: 4,
+            login_lockout: figcraft_cloud_storage::credentials::LockoutPolicy::default(),
         }
     }
 }
@@ -244,6 +247,18 @@ impl CloudConfig {
                     config.password_concurrency =
                         bounded(value, 1, 64, "FIGCRAFT_PASSWORD_CONCURRENCY must be a whole number from 1 to 64")? as usize;
                 }
+                "FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD" => {
+                    config.login_lockout.threshold =
+                        bounded(value, 1, 100, "FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD must be a whole number from 1 to 100")? as u32;
+                }
+                "FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS" => {
+                    config.login_lockout.base_secs =
+                        bounded(value, 1, 86_400, "FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS must be a whole number of seconds from 1 to 86400")? as i64;
+                }
+                "FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS" => {
+                    config.login_lockout.max_secs =
+                        bounded(value, 1, 86_400, "FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS must be a whole number of seconds from 1 to 86400")? as i64;
+                }
                 "OIDC_ISSUER" => config.oidc_issuer = Some(value.to_string()),
                 "OIDC_CLIENT_ID" => config.oidc_client_id = Some(value.to_string()),
                 "OIDC_REDIRECT_URL" => config.oidc_redirect_url = Some(value.to_string()),
@@ -274,6 +289,9 @@ impl CloudConfig {
             }
         }
 
+        if !config.login_lockout.is_valid() {
+            return Err("the sign-in lockout base seconds must not exceed its maximum seconds");
+        }
         config.validate_production()?;
         Ok(config)
     }
@@ -316,6 +334,11 @@ impl CloudConfig {
     /// The Argon2id cost for new password hashes.
     pub(super) const fn password_params(&self) -> figcraft_cloud_auth::password::HashParams {
         self.password_params
+    }
+
+    /// When and for how long failing sign-ins lock an account.
+    pub(super) const fn login_lockout(&self) -> figcraft_cloud_storage::credentials::LockoutPolicy {
+        self.login_lockout
     }
 
     /// How many password hashes may be computed at once.
@@ -503,6 +526,9 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_PASSWORD_PASSES",
         "FIGCRAFT_PASSWORD_LANES",
         "FIGCRAFT_PASSWORD_CONCURRENCY",
+        "FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD",
+        "FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS",
+        "FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS",
         "DATABASE_URL",
         "DATABASE_URL_FILE",
         "REDIS_URL",
@@ -649,6 +675,30 @@ mod tests {
         ] {
             assert!(CloudConfig::parse([(key, bad)]).is_err(), "{key}={bad}");
         }
+    }
+
+    #[test]
+    fn lockout_settings_are_bounded_and_consistent() {
+        use figcraft_cloud_storage::credentials::LockoutPolicy;
+        assert_eq!(CloudConfig::default().login_lockout(), LockoutPolicy::default());
+        let config = CloudConfig::parse([
+            ("FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD", "3"),
+            ("FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS", "10"),
+            ("FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS", "600"),
+        ])
+        .unwrap();
+        assert_eq!(config.login_lockout(), LockoutPolicy { threshold: 3, base_secs: 10, max_secs: 600 });
+        for (key, bad) in [
+            ("FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD", "0"),
+            ("FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD", "101"),
+            ("FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS", "0"),
+            ("FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS", "86401"),
+            ("FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS", "soon"),
+        ] {
+            assert!(CloudConfig::parse([(key, bad)]).is_err(), "{key}={bad}");
+        }
+        // The first lock may not be longer than the longest.
+        assert!(CloudConfig::parse([("FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS", "1000"), ("FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS", "10")]).is_err());
     }
 
     #[test]

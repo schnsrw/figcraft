@@ -374,6 +374,32 @@ pub async fn upgrade_hash(
     Ok(updated.rows_affected() == 1)
 }
 
+/// Record a password sign-in outcome for `principal_id` (`auth.password_login`, outcome
+/// `succeeded` or `failed`) with a fixed `reason` word (never the login or password). Failures are
+/// recorded only for existing, unlocked accounts, which lockout bounds.
+pub async fn record_login_audit(
+    transaction: &mut TenantTransaction<'_>,
+    principal_id: PrincipalId,
+    succeeded: bool,
+    reason: &'static str,
+) -> Result<(), CredentialError> {
+    crate::audit::record_audit_event(
+        transaction,
+        figcraft_cloud_domain::Uuid::new_v4(),
+        Some(principal_id.as_uuid()),
+        "auth.password_login",
+        "principal",
+        Some(principal_id.as_uuid()),
+        None,
+        None,
+        if succeeded { "succeeded" } else { "failed" },
+        &serde_json::json!({ "reason": reason }),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|_| CredentialError::Audit)
+}
+
 /// Enable or disable sign-in for `principal_id`. Returns true when the state changed. Audited as
 /// `credential.enable` or `credential.disable`. Ending the account's live sessions is the
 /// caller's job (it also touches membership and the session table).

@@ -93,8 +93,14 @@ fn app(state: AppState) -> Router {
 }
 
 fn state(pool: PgPool, identity: Arc<IdentityConfig>) -> AppState {
-    let config = ApiConfig { auth_rate_limit: RateLimitConfig { burst: 1000, ..RateLimitConfig::default() }, ..ApiConfig::default() };
-    let passwords = PasswordService::new(HashParams { memory_kib: 8 * 1024, passes: 1, lanes: 1 }, 4).expect("passwords");
+    state_with(pool, identity, HashParams { memory_kib: 8 * 1024, passes: 1, lanes: 1 }, 1000)
+}
+
+/// [`state`] with chosen hash parameters and per-address burst (a fresh app is a fresh "replica":
+/// its in-memory throttle starts empty while the database lockout persists).
+fn state_with(pool: PgPool, identity: Arc<IdentityConfig>, params: HashParams, burst: u32) -> AppState {
+    let config = ApiConfig { auth_rate_limit: RateLimitConfig { burst, ..RateLimitConfig::default() }, ..ApiConfig::default() };
+    let passwords = PasswordService::new(params, 4).expect("passwords");
     AppState::new(pool, objects(), config).with_identity(identity).with_passwords(passwords)
 }
 
@@ -482,5 +488,210 @@ async fn the_contract_is_served_unauthenticated_and_matches_the_checked_in_docum
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = to_bytes(response.into_body(), 1 << 22).await?;
     assert_eq!(bytes, super::super::accounts_contract::OPENAPI_JSON.as_bytes());
+    Ok(())
+}
+
+// ------------------------------------------------------------------------------------ S6-035
+
+const CHEAP: HashParams = HashParams { memory_kib: 8 * 1024, passes: 1, lanes: 1 };
+
+/// A password account in `w`'s tenant, made through the invitation route; returns its login and
+/// principal.
+async fn account(w: &World, app: &Router) -> Result<(String, String), Error> {
+    let login = email();
+    let token = w.invite(&login).await?;
+    let reply = post(app, "/api/v1/auth/password/signup", json!({"invitation": token, "display_name": "Login Person", "password": GOOD})).await;
+    assert_eq!(reply.status, StatusCode::CREATED, "{:?}", reply.body);
+    Ok((login, reply.body["principal_id"].as_str().ok_or("principal")?.to_string()))
+}
+
+fn login_body(w: &World, login: &str, password: &str) -> Value {
+    json!({"tenant": w.tenant.to_string(), "login": login, "password": password})
+}
+
+const LOGIN: &str = "/api/v1/auth/password/login";
+
+#[tokio::test]
+async fn password_login_signs_in_rotates_the_session_and_is_audited() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let id = identity(DeploymentMode::MultiTenant, None);
+    let app = app(state(w.pool.clone(), id));
+    let (login, principal) = account(&w, &app).await?;
+
+    // CSRF.
+    assert_eq!(call(&app, Method::POST, LOGIN, &[], Some(login_body(&w, &login, GOOD))).await.status, StatusCode::FORBIDDEN);
+    // A browser that already holds a session: it is revoked by the sign-in, the new cookie works.
+    let old = w.owner_cookie().await?;
+    let reply = call(&app, Method::POST, LOGIN, &[("origin", ORIGIN), ("cookie", &old)], Some(login_body(&w, &login.to_uppercase(), GOOD))).await;
+    assert_eq!(reply.status, StatusCode::OK, "{:?}", reply.body);
+    assert_eq!(reply.body["principal_id"], principal);
+    let set_cookie =
+        reply.headers.get_all(header::SET_COOKIE).iter().filter_map(|v| v.to_str().ok()).find(|v| v.starts_with(COOKIE)).ok_or("cookie")?.to_string();
+    assert!(set_cookie.contains("Secure") && set_cookie.contains("HttpOnly") && set_cookie.contains("Path=/"), "{set_cookie}");
+    let fresh = reply.session().ok_or("cookie")?;
+    let whoami = format!("/api/v1/tenants/{}/whoami", w.tenant);
+    assert_eq!(call(&app, Method::GET, &whoami, &[("cookie", &old)], None).await.status, StatusCode::UNAUTHORIZED, "the previous session is gone");
+    let reply = call(&app, Method::GET, &whoami, &[("cookie", &fresh)], None).await;
+    assert_eq!((reply.status, reply.body["principal"].as_str()), (StatusCode::OK, Some(principal.as_str())));
+    // Signing in again gives another distinct session.
+    let again = post(&app, LOGIN, login_body(&w, &login, GOOD)).await;
+    assert_ne!(again.session(), Some(fresh.clone()));
+    let audited: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM audit_events WHERE tenant_id = $1::uuid AND action = 'auth.password_login' AND outcome = 'succeeded' AND actor_principal_id = $2::uuid",
+    )
+    .bind(w.tenant.to_string())
+    .bind(&principal)
+    .fetch_one(&w.admin)
+    .await?;
+    assert_eq!(audited, 2);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unknown_and_known_accounts_are_indistinguishable() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, _) = account(&w, &app).await?;
+    let strip = |mut reply: Reply| {
+        reply.body["error"]["request_id"] = Value::Null;
+        (reply.status, reply.body, reply.headers.get(header::SET_COOKIE).is_some())
+    };
+    let wrong = strip(post(&app, LOGIN, login_body(&w, &login, "not the right password")).await);
+    let unknown = strip(post(&app, LOGIN, login_body(&w, "nobody@example.test", "not the right password")).await);
+    let malformed = strip(post(&app, LOGIN, login_body(&w, "no body \u{0} here", "not the right password")).await);
+    let other_tenant = strip(post(&app, LOGIN, json!({"tenant": Uuid::new_v4().to_string(), "login": login, "password": GOOD})).await);
+    assert_eq!(wrong.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(wrong, unknown);
+    assert_eq!(wrong, malformed);
+    assert_eq!(wrong, other_tenant);
+    // Timing: every path does one Argon2 computation (loose bound; the unit test in password.rs is tighter).
+    let time = |login: String, tenant: String| {
+        let app = app.clone();
+        async move {
+            let start = std::time::Instant::now();
+            for _ in 0..3 {
+                post(&app, LOGIN, json!({"tenant": tenant, "login": login, "password": "not the right password"})).await;
+            }
+            start.elapsed()
+        }
+    };
+    let known_time = time(login.clone(), w.tenant.to_string()).await;
+    let unknown_time = time("ghost@example.test".to_string(), w.tenant.to_string()).await;
+    let (low, high) = if known_time < unknown_time { (known_time, unknown_time) } else { (unknown_time, known_time) };
+    assert!(high.as_secs_f64() < low.as_secs_f64() * 3.0 + 0.05, "{known_time:?} vs {unknown_time:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn failures_lock_the_account_across_replicas_without_revealing_it() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let id = identity(DeploymentMode::MultiTenant, None);
+    let replica_a = app(state(w.pool.clone(), id.clone()));
+    let replica_b = app(state(w.pool.clone(), id.clone()));
+    let replica_c = app(state(w.pool.clone(), id));
+    let (login, principal) = account(&w, &replica_a).await?;
+
+    // Five wrong passwords: five 401s, then the per-login backoff answers 429 on this replica for
+    // a known and an unknown login alike.
+    for _ in 0..5 {
+        assert_eq!(post(&replica_a, LOGIN, login_body(&w, &login, "wrong wrong wrong 1")).await.status, StatusCode::UNAUTHORIZED);
+        assert_eq!(post(&replica_a, LOGIN, login_body(&w, "ghost@example.test", "wrong wrong wrong 1")).await.status, StatusCode::UNAUTHORIZED);
+    }
+    for who in [login.as_str(), "ghost@example.test"] {
+        let reply = post(&replica_a, LOGIN, login_body(&w, who, GOOD)).await;
+        assert_eq!((reply.status, reply.code()), (StatusCode::TOO_MANY_REQUESTS, "rate_limited"), "{who}");
+        assert!(reply.headers.get(header::RETRY_AFTER).is_some());
+    }
+    // Another replica has an empty table, but the database lock holds: even the right password is
+    // refused with the same 401 a wrong one gets.
+    let locked = post(&replica_b, LOGIN, login_body(&w, &login, GOOD)).await;
+    assert_eq!((locked.status, locked.code()), (StatusCode::UNAUTHORIZED, "unauthenticated"));
+    assert!(locked.session().is_none());
+    let (attempts, locked_for): (i32, bool) =
+        sqlx::query_as("SELECT failed_attempts, locked_until > now() FROM local_credentials WHERE principal_id = $1::uuid")
+            .bind(&principal)
+            .fetch_one(&w.admin)
+            .await?;
+    assert_eq!((attempts, locked_for), (5, true), "attempts while locked are not counted");
+    // When the lock lapses the right password works and clears the counters.
+    sqlx::query("UPDATE local_credentials SET locked_until = now() - interval '1 second' WHERE principal_id = $1::uuid")
+        .bind(&principal)
+        .execute(&w.admin)
+        .await?;
+    assert_eq!(post(&replica_c, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
+    let attempts: i32 = sqlx::query_scalar("SELECT failed_attempts FROM local_credentials WHERE principal_id = $1::uuid")
+        .bind(&principal)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(attempts, 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn the_per_address_bucket_limits_attempts_whatever_the_login() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state_with(w.pool.clone(), identity(DeploymentMode::MultiTenant, None), CHEAP, 3));
+    let mut statuses = Vec::new();
+    for n in 0..5 {
+        statuses.push(post(&app, LOGIN, login_body(&w, &format!("guess{n}@example.test"), "wrong wrong wrong 1")).await.status);
+    }
+    assert_eq!(statuses, [401, 401, 401, 429, 429].map(|code| StatusCode::from_u16(code).expect("status")));
+    Ok(())
+}
+
+#[tokio::test]
+async fn disabled_suspended_and_sso_only_accounts_are_refused() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let app = app(state(w.pool.clone(), identity(DeploymentMode::MultiTenant, None)));
+    let (login, principal) = account(&w, &app).await?;
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
+
+    // A disabled credential is refused with the generic 401, even with the right password.
+    sqlx::query("UPDATE local_credentials SET state = 'disabled' WHERE principal_id = $1::uuid").bind(&principal).execute(&w.admin).await?;
+    let reply = post(&app, LOGIN, login_body(&w, &login, GOOD)).await;
+    assert_eq!((reply.status, reply.code()), (StatusCode::UNAUTHORIZED, "unauthenticated"));
+    sqlx::query("UPDATE local_credentials SET state = 'active' WHERE principal_id = $1::uuid").bind(&principal).execute(&w.admin).await?;
+    // A suspended member likewise.
+    sqlx::query("UPDATE tenant_members SET state = 'suspended' WHERE principal_id = $1::uuid").bind(&principal).execute(&w.admin).await?;
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::UNAUTHORIZED);
+    sqlx::query("UPDATE tenant_members SET state = 'active' WHERE principal_id = $1::uuid").bind(&principal).execute(&w.admin).await?;
+    // Neither counted as password guesses.
+    let attempts: i32 = sqlx::query_scalar("SELECT failed_attempts FROM local_credentials WHERE principal_id = $1::uuid")
+        .bind(&principal)
+        .fetch_one(&w.admin)
+        .await?;
+    assert_eq!(attempts, 0);
+    // An SSO-only tenant refuses password sign-in outright, and says so on the methods endpoint.
+    w.settings(AccountSettings { password_enabled: false, ..AccountSettings::default() }).await?;
+    let reply = post(&app, LOGIN, login_body(&w, &login, GOOD)).await;
+    assert_eq!((reply.status, reply.code()), (StatusCode::FORBIDDEN, "forbidden"));
+    let methods = call(&app, Method::GET, &format!("/api/v1/auth/methods?tenant={}", w.tenant), &[], None).await;
+    assert_eq!(methods.body["password"], false);
+    w.settings(AccountSettings::default()).await?;
+    assert_eq!(post(&app, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
+    // Another tenant's login with the same name has no standing here.
+    let other = world().await?.ok_or("world")?;
+    assert_eq!(post(&app, LOGIN, login_body(&other, &login, GOOD)).await.status, StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_weaker_stored_hash_is_upgraded_at_sign_in() -> TestResult {
+    let Some(w) = world().await? else { return Ok(()) };
+    let id = identity(DeploymentMode::MultiTenant, None);
+    let old = app(state_with(w.pool.clone(), id.clone(), CHEAP, 1000));
+    let (login, principal) = account(&w, &old).await?;
+    let before: String =
+        sqlx::query_scalar("SELECT password_hash FROM local_credentials WHERE principal_id = $1::uuid").bind(&principal).fetch_one(&w.admin).await?;
+    assert!(before.contains("m=8192,t=1,p=1"), "{before}");
+    let stronger = app(state_with(w.pool.clone(), id, HashParams { memory_kib: 16 * 1024, passes: 2, lanes: 1 }, 1000));
+    assert_eq!(post(&stronger, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
+    let after: String =
+        sqlx::query_scalar("SELECT password_hash FROM local_credentials WHERE principal_id = $1::uuid").bind(&principal).fetch_one(&w.admin).await?;
+    assert!(after.contains("m=16384,t=2,p=1") && after != before, "{after}");
+    // The upgraded hash verifies, and so does the old replica (it accepts stronger hashes).
+    assert_eq!(post(&stronger, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
+    assert_eq!(post(&old, LOGIN, login_body(&w, &login, GOOD)).await.status, StatusCode::OK);
+    assert_eq!(post(&stronger, LOGIN, login_body(&w, &login, "still the wrong one 1")).await.status, StatusCode::UNAUTHORIZED);
     Ok(())
 }

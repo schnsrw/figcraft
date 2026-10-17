@@ -35,6 +35,7 @@ pub(crate) const ACCOUNT_ROUTES: &[AccountRoute] = &[
     route("GET", "/auth/methods", "getSignInMethods", "none"),
     route("POST", "/auth/password/signup", "passwordSignUp", "none"),
     route("POST", "/auth/password/bootstrap", "passwordBootstrap", "none"),
+    route("POST", "/auth/password/login", "passwordLogin", "none"),
     route("GET", "/tenants/{tenant}/account-settings", "getAccountSettings", "tenant.view"),
     route("PUT", "/tenants/{tenant}/account-settings", "putAccountSettings", "tenant.update_policy"),
 ];

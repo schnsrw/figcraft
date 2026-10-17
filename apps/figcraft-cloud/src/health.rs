@@ -177,6 +177,7 @@ async fn api_state(config: &CloudConfig, api_config: ApiConfig) -> Option<AppSta
         }
     };
     let mut state = AppState::new(pool, objects, api_config).with_identity(identity);
+    state = state.with_lockout(config.login_lockout());
     match api::passwords::PasswordService::new(config.password_params(), config.password_concurrency()) {
         Ok(service) => state = state.with_passwords(service),
         Err(_) => eprintln!("figcraft-cloud: the password hashing settings were refused; password sign-in will answer 503"),

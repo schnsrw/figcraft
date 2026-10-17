@@ -337,6 +337,7 @@ fn bootstrap_exempt(path: &str) -> bool {
             | "/api/v1/auth/session"
             | "/api/v1/auth/bootstrap/complete"
             | "/api/v1/auth/password/bootstrap"
+            | "/api/v1/auth/password/login"
             | "/api/v1/auth/methods"
             | "/api/v1/auth/openapi.json"
     )

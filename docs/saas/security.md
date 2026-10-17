@@ -108,6 +108,16 @@ hold both).
   audited): allowed sign-in methods (password, oidc; at least one on), open registration, second
   factor required. Contract: `apps/figcraft-cloud/openapi/accounts-api-v1.json`, served at
   `GET /api/v1/auth/openapi.json`.
+* **Sign-in** (S6-035, `POST /auth/password/login`): same-origin only; exactly one Argon2 computation
+  on every path; one fixed `401` for unknown login, wrong password, disabled credential, locked
+  account and suspended member (text and timing). Three independent limits: the per-address token
+  bucket of the auth router (10 burst, then 10 a minute), a per-replica backoff keyed by a hash of
+  tenant and login that answers `429` with `Retry-After` for known and unknown logins alike, and the
+  database lockout on existing accounts (default 5 failures, then 30 s doubling to 15 min; attempts
+  while locked are neither counted nor extend the lock, so an attacker cannot hold a victim out;
+  a correct password during a lock is refused with the same `401`). A success rotates the session
+  (the browser's previous one is revoked), clears the counters and, when the stored hash is weaker
+  than the configured parameters, replaces it. A tenant with passwords off answers `403`.
 * **Never** logged, returned or audited: passwords, hashes, reset or invitation tokens.
 
 ## Authorization controls

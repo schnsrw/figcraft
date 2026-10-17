@@ -6,6 +6,7 @@
 //! |---|---|
 //! | `GET auth/methods?tenant=` | the sign-in methods the workspace offers: `{tenant_id, password, oidc, open_registration}`. Unauthenticated (the sign-in screen needs it); `tenant` is an id or a slug, ignored in single-tenant mode; `404` for an unknown or inactive tenant |
 //! | `POST auth/password/signup` | `{invitation, display_name, password}` (the holder of an invitation creates their account; the login is the invited address) or `{tenant, login, display_name, password}` (only when the tenant turned open registration on). Creates the account and its membership atomically and signs the person in (session cookie, `201`) |
+//! | `POST auth/password/login` | `{tenant?, login, password}`: password sign-in (S6-035). Every failure (unknown login, wrong password, disabled or locked account, suspended member) is the same fixed `401`; a login that keeps failing is answered `429` with `Retry-After` whatever it is. A tenant that turned passwords off answers `403`. Success rotates the browser's session (the old cookie is revoked) and sets a new one |
 //! | `POST auth/password/bootstrap` | `{token, login, display_name, password}` while a single-tenant deployment awaits its owner: the person who holds the printed bootstrap token becomes `tenant_owner` with a password account, so a self-hoster needs no external identity provider (session cookie, `200`) |
 //! | `GET tenants/{tenant}/account-settings` | `tenant.view`: `{password_enabled, oidc_enabled, open_registration, require_totp}` |
 //! | `PUT tenants/{tenant}/account-settings` | `tenant.update_policy`: replaces them (audited) |
@@ -23,12 +24,15 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use figcraft_cloud_auth::authz::Action;
+use figcraft_cloud_auth::password::Verification;
 use figcraft_cloud_auth::session_policy::COOKIE_NAME;
 use figcraft_cloud_domain::{ErrorCode, PrincipalId, TenantId};
 use figcraft_cloud_storage::account_settings::{self, AccountSettings, SettingsError};
 use figcraft_cloud_storage::accounts::{self, AccountError};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::bootstrap::{self, BootstrapError};
+use figcraft_cloud_storage::credentials::{self, CredentialState};
+use figcraft_cloud_storage::memberships::{self, MemberState};
 use figcraft_cloud_storage::sessions;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -52,7 +56,11 @@ const MAX_NAME_INPUT_CHARS: usize = 512;
 
 /// Routes under `/api/v1/auth` (rate limited with the rest of the auth router).
 pub(crate) fn auth_routes() -> Router<AppState> {
-    Router::new().route("/methods", get(methods)).route("/password/signup", post(signup)).route("/password/bootstrap", post(bootstrap_password))
+    Router::new()
+        .route("/methods", get(methods))
+        .route("/password/signup", post(signup))
+        .route("/password/bootstrap", post(bootstrap_password))
+        .route("/password/login", post(password_login))
 }
 
 /// Routes under `/api/v1`.
@@ -243,6 +251,102 @@ async fn bootstrap_password(State(state): State<AppState>, headers: HeaderMap, A
     identity.mark_bootstrap_done();
     let reply = json!({ "tenant_id": tenant.to_string(), "principal_id": principal.to_string(), "role": "tenant_owner" });
     start_session(&state, &headers, principal, StatusCode::OK, reply).await
+}
+
+// ---------------------------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LoginBody {
+    tenant: Option<String>,
+    login: String,
+    password: String,
+}
+
+/// What the sign-in lookup found, read before any hashing so no connection is held during it.
+struct Lookup {
+    record: Option<credentials::CredentialRecord>,
+    member_active: bool,
+    password_enabled: bool,
+    tenant_active: bool,
+}
+
+async fn lookup(state: &AppState, tenant: TenantId, login: &str) -> Result<Lookup, ApiError> {
+    let mut transaction = begin_tenant_transaction(state.pool(), tenant).await.map_err(storage_unavailable)?;
+    let tenant_state: Option<String> = sqlx::query_scalar("SELECT state FROM tenants WHERE id = $1::uuid")
+        .bind(tenant.to_string())
+        .fetch_optional(transaction.connection())
+        .await
+        .map_err(storage_unavailable)?;
+    let settings = account_settings::get_settings(&mut transaction).await.map_err(storage_unavailable)?;
+    let record = credentials::find_by_login(&mut transaction, login).await.map_err(storage_unavailable)?;
+    let member_active = match &record {
+        Some(record) => memberships::get_tenant_member(&mut transaction, record.principal_id)
+            .await
+            .map_err(storage_unavailable)?
+            .is_some_and(|member| member.state == MemberState::Active),
+        None => false,
+    };
+    transaction.rollback().await.map_err(storage_unavailable)?;
+    Ok(Lookup { record, member_active, password_enabled: settings.password_enabled, tenant_active: tenant_state.as_deref() == Some("active") })
+}
+
+async fn password_login(State(state): State<AppState>, headers: HeaderMap, ApiJson(body): ApiJson<LoginBody>) -> Result<Response, ApiError> {
+    let identity = identity(&state)?;
+    require_same_origin(identity, &headers)?;
+    let service = passwords(&state)?;
+    if body.login.len() > MAX_LOGIN_INPUT_CHARS || body.password.len() > figcraft_cloud_auth::password::MAX_PASSWORD_INPUT_BYTES {
+        return Err(ApiError::new(ErrorCode::InvalidRequest));
+    }
+    let tenant = resolve_tenant(&state, body.tenant.as_deref()).await?;
+    let normalised = credentials::normalize_login(&body.login);
+    // Throttle on the normalised login (or the trimmed text when it is not a valid login).
+    let throttle_login = normalised.clone().unwrap_or_else(|| body.login.trim().to_lowercase());
+    let now = std::time::Instant::now();
+    if let Some(wait) = state.login_throttle().blocked(tenant, &throttle_login, now) {
+        return Err(ApiError::rate_limited(wait.as_secs() + 1));
+    }
+    let found = lookup(&state, tenant, &body.login).await?;
+    if found.tenant_active && !found.password_enabled {
+        return Err(ApiError::forbidden());
+    }
+    // Exactly one Argon2 computation on every path below, so timing says nothing about the account.
+    let eligible = found.tenant_active
+        && found.member_active
+        && found.record.as_ref().is_some_and(|record| record.state == CredentialState::Active && record.locked_for_secs == 0);
+    let verdict = match &found.record {
+        Some(record) => {
+            let verdict = service.verify(record.password_hash.clone(), body.password.clone()).await.map_err(|_| ApiError::unavailable())?;
+            if eligible { verdict } else { Verification::Invalid }
+        }
+        None => service.verify_unknown(body.password.clone()).await.map_err(|_| ApiError::unavailable())?,
+    };
+    let (Verification::Valid { needs_rehash }, Some(record)) = (verdict, found.record.as_ref()) else {
+        // Count the failure against an existing, unlocked account (the lock bounds the rows written).
+        if let Some(record) = found.record.as_ref().filter(|_| eligible) {
+            let mut transaction = begin_tenant_transaction(state.pool(), tenant).await.map_err(storage_unavailable)?;
+            credentials::record_failure(&mut transaction, record.principal_id, state.lockout()).await.map_err(storage_unavailable)?;
+            credentials::record_login_audit(&mut transaction, record.principal_id, false, "bad_credentials").await.map_err(storage_unavailable)?;
+            transaction.commit().await.map_err(storage_unavailable)?;
+        }
+        state.login_throttle().failed(tenant, &throttle_login, now);
+        return Err(ApiError::unauthenticated());
+    };
+    // A better hash of the same password, while we hold it (best effort; the sign-in stands either way).
+    let upgraded = if needs_rehash { service.hash_unchecked(body.password.clone()).await.ok() } else { None };
+    let mut transaction = begin_tenant_transaction(state.pool(), tenant).await.map_err(storage_unavailable)?;
+    credentials::record_success(&mut transaction, record.principal_id).await.map_err(storage_unavailable)?;
+    if let Some(hash) = upgraded {
+        credentials::upgrade_hash(&mut transaction, record.principal_id, &record.password_hash, &hash).await.map_err(storage_unavailable)?;
+    }
+    credentials::record_login_audit(&mut transaction, record.principal_id, true, "password").await.map_err(storage_unavailable)?;
+    transaction.commit().await.map_err(storage_unavailable)?;
+    state.login_throttle().succeeded(tenant, &throttle_login);
+    let reply = json!({ "principal_id": record.principal_id.to_string(), "tenant_id": tenant.to_string() });
+    start_session(&state, &headers, record.principal_id, StatusCode::OK, reply).await.map_err(|error| {
+        // A principal that cannot hold a session is indistinguishable from a bad password.
+        if error.code() == ErrorCode::ResourceInactive { ApiError::unauthenticated() } else { error }
+    })
 }
 
 // ---------------------------------------------------------------------------------------------

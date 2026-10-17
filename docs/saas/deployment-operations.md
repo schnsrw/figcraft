@@ -101,6 +101,13 @@ FIGCRAFT_PASSWORD_MEMORY_KIB=47104         # 8192 to 1048576
 FIGCRAFT_PASSWORD_PASSES=2                 # 1 to 10
 FIGCRAFT_PASSWORD_LANES=1                  # 1 to 8
 FIGCRAFT_PASSWORD_CONCURRENCY=4            # 1 to 64
+# Password sign-in lockout (S6-035): after THRESHOLD failures on an existing unlocked account it is
+# locked for BASE seconds, doubling per further failure up to MAX (attempts while locked are not
+# counted, so hammering cannot extend a lock). The same numbers drive the per-replica backoff that
+# answers 429 for any login, known or not. BASE must not exceed MAX.
+FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD=5         # 1 to 100
+FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS=30     # 1 to 86400
+FIGCRAFT_LOGIN_LOCKOUT_MAX_SECONDS=900     # 1 to 86400
 
 DATABASE_URL_FILE=/run/secrets/database_url
 REDIS_URL_FILE=/run/secrets/redis_url
