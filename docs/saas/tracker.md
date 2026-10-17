@@ -1,7 +1,6 @@
 # SaaS implementation tracker
 
 > **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (19/58) · **Last updated:** 2026-10-18
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (19/58) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -26,10 +25,73 @@ the same commit as the completed task.
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | in progress | 19 / 58 | All clients complete cloud workflows |
-| S6 Browser, desktop and embedded integration | in progress | 19 / 58 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
+
+## Priority track — a team hosts it and works in it (P0, owner decision 2026-10-18)
+
+Goal: a team (or one person) installs FigCraft Cloud on its own server or intranet, signs in without
+any external identity provider, creates a workspace, teams and projects, invites people, and
+edits and collaborates in the browser. This track comes **before everything else**. Billing,
+the production security gate and anything only a public multi-tenant SaaS needs are in the
+[backlog](#backlog-not-needed-for-a-team-self-host-yet) below, logged and not dropped. The tasks
+below reference the existing S4–S6 task ids where they are the same work; a task is checked when
+its acceptance evidence exists, and only then. The gate is a **real-browser run**, not unit tests.
+
+- [ ] **TS-001** One-command self-host: `docker compose up` plus one setup command creates the
+  first admin with a password, the first workspace and its owner, with no identity provider
+  (S6-051 scoped to a single workspace). The command prints the URL to open and nothing secret in
+  logs.
+- [ ] **TS-002** Browser sign-in without an identity provider: password sign-in, first-run owner
+  setup and accept-invitation-with-password screens in the web app, against the existing
+  password and invitation routes (S6-034, S6-035). The OIDC button appears only when a provider is
+  configured and the workspace allows it.
+- [ ] **TS-003** A real-browser smoke run of the whole path, repeatable from a script against the
+  Compose stack: sign in, create workspace, team, project and file, open the editor, make an edit.
+  Screenshots are kept as evidence. Every defect it finds is fixed under this track.
+- [ ] **TS-004** Two people edit one cloud file live from the workspace: open from the file page,
+  see each other's cursors and names, edit, lose the connection and reconnect without losing work,
+  export (S6-024; the minimum of S6-022 the flow needs). Verified in two real browser sessions.
+- [ ] **TS-005** Teams and projects work as a team expects: a team owns projects, files inherit
+  the team's access, members have roles, an admin adds people and a team lead (S6-052, the
+  team-lead part of S6-055), and the screens for it exist.
+- [ ] **TS-006** The admin can run the team from the browser without the command line: invite by
+  link (copy-link flow; email is backlog), disable and re-enable a person, send a password-reset
+  link, see who is in the workspace (S6-037 and its screens).
+- [ ] **TS-007** People are who they signed in as: collaborator names and colours come from the
+  account, and the workspace shows who edited a file last (S6-043 and the simple part of S6-039).
+- [ ] **TS-008** Recover from mistakes: per-file history with named versions and restore as a new
+  head that keeps history (S6-040 to S6-042).
+- [ ] **TS-009** Large images in documents sync and reload correctly through the relay (S5-018).
+- [ ] **TS-010** Self-host operations a team can follow: a "host it for your team" guide (domain,
+  TLS, first admin, invite people, upgrade), a backup and restore script for the database and
+  object store, and one restore drill run and recorded.
+- [ ] **TS-011** The team can find its work: recents, search across the workspace's files,
+  libraries and settings screens (rest of S6-020).
+- [ ] **TS-GATE** A team of three installs it from the guide on a clean machine, signs in with
+  passwords, creates a workspace, two teams and a project, invites two people, and all three edit
+  one file at the same time, close and reopen, and restore an earlier version. Recorded run with
+  screenshots; no unit-test substitute.
+
+### Backlog (not needed for a team self-host yet)
+
+Logged on purpose; the existing task ids keep their place and are picked up after the gate above
+or when going public multi-tenant SaaS:
+
+- **Billing and plans:** S8-001 to S8-006 (plan limits, usage counters, quotas, payment provider,
+  payment-failure handling, usage views), S6-048 plan assignment.
+- **Production security gate and hardening:** S8-018 to S8-020 and the rest of the S8 security and
+  scanning tasks, S6-017 attack tests, S6-025 WCAG audit, TOTP for workspace users (S6-038).
+  Intranet deployments accept the current controls (rate limits, lockout, row-level isolation,
+  revocation) until the public-SaaS decision.
+- **Operations at scale:** S8-007 to S8-017 (telemetry, dashboards, alerts, automated backup
+  policy, rolling upgrade), S9 rollout.
+- **Platform operator and host integrations:** the operator console and provisioning API
+  (S6-046 to S6-051 beyond TS-001), embedding polish (S6-006 to S6-010 remainder, S6-016,
+  S6-018, S6-019).
+- **Other clients and features:** desktop cloud client (S6-026 to S6-031), AI gateway and server
+  WASM (S7), SSO group sync (S6-057), email delivery of invitations.
 
 ## S0 — Documentation and fork governance
 
@@ -2973,3 +3035,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-045: platform admins sign in at /platform/v1 with Argon2id passwords and a mandatory TOTP second factor in their own cookie, with the one-time CLI bootstrap token, lockout, rate limits and audit; OpenAPI published. S6 reaches 17/57. |
 | 2026-10-18 | S6-046: workspace create (owner principal or invitation link), list, read, suspend, restore, archive, deletion request and cancel, plan and platform audit under /platform/v1, each change audited on both sides in one transaction. S6 reaches 18/57. |
 | 2026-10-18 | S6-036: profile (display name, palette colour), password change that revokes other sessions, own-session list and revoke. S6 reaches 19/58. |
+| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-011 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
