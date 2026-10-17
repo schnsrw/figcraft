@@ -58,7 +58,7 @@ pub(super) fn serve(config: &CloudConfig, ready: bool) -> io::Result<()> {
     runtime.block_on(async {
         let api_config = ApiConfig { deployment: config.deployment, trusted_proxies: config.trusted_proxies.clone(), ..ApiConfig::default() };
         let max_body = api_config.max_body_bytes;
-        let api = if serves_api(config.role) && ready { api_state(config, api_config).map(api::api_router) } else { None };
+        let api = if serves_api(config.role) && ready { api_state(config, api_config).await.map(api::api_router) } else { None };
         if serves_api(config.role) && ready && api.is_none() {
             eprintln!("figcraft-cloud: the API could not be configured; /api/v1 will answer 503");
         }
@@ -74,15 +74,41 @@ pub(super) fn serve(config: &CloudConfig, ready: bool) -> io::Result<()> {
     })
 }
 
-/// The API's shared state: a lazily connecting pool and the object store.
-fn api_state(config: &CloudConfig, api_config: ApiConfig) -> Option<AppState> {
+/// The API's shared state: a lazily connecting pool, the object store, the identity stack and,
+/// when configured and discoverable, the OIDC provider.
+async fn api_state(config: &CloudConfig, api_config: ApiConfig) -> Option<AppState> {
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(API_POOL_CONNECTIONS)
         .acquire_timeout(Duration::from_secs(5))
         .connect_lazy(config.database_url()?)
         .ok()?;
     let objects = figcraft_cloud_storage::objects::ObjectStore::new(&config.object_store_settings()?).ok()?;
-    Some(AppState::new(pool, objects, api_config))
+    // Single-tenant deployments default to the same tenant id the relay uses.
+    let single_tenant = config.single_tenant_id().or_else(|| "00000000-0000-0000-0000-000000000001".parse().ok());
+    let identity = match api::authenticator::IdentityConfig::new(
+        config.deployment,
+        single_tenant,
+        config.public_url(),
+        config.session_signing_key().map(str::as_bytes),
+    ) {
+        Ok(identity) => std::sync::Arc::new(identity),
+        Err(error) => {
+            eprintln!("figcraft-cloud: identity configuration refused: {error}");
+            return None;
+        }
+    };
+    let mut state = AppState::new(pool, objects, api_config).with_identity(identity);
+    if let Some((issuer, client_id, client_secret, redirect_url)) = config.oidc_settings() {
+        let oidc = figcraft_cloud_auth::oidc::OidcConfig::new(issuer, client_id, client_secret, redirect_url);
+        match tokio::time::timeout(Duration::from_secs(30), figcraft_cloud_auth::oidc::OidcProvider::discover(oidc)).await {
+            Ok(Ok(provider)) => state = state.with_oidc(std::sync::Arc::new(provider)),
+            Ok(Err(error)) => eprintln!("figcraft-cloud: OIDC discovery failed ({}); login will answer 503", error.code().as_str()),
+            Err(_) => eprintln!("figcraft-cloud: OIDC discovery timed out; login will answer 503"),
+        }
+    } else {
+        eprintln!("figcraft-cloud: OIDC_ISSUER, OIDC_CLIENT_ID and OIDC_REDIRECT_URL are not all set; login will answer 503");
+    }
+    Some(state)
 }
 
 /// The whole router for `role`. `api` is the `/api/v1` router when the API is configured; API

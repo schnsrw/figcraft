@@ -1817,6 +1817,7 @@ dependencies = [
  "figcraft-cloud-relay",
  "figcraft-cloud-storage",
  "figcraft-collab-net",
+ "ring",
  "serde",
  "serde_json",
  "sha2 0.10.9",

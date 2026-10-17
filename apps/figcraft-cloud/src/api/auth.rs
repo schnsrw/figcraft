@@ -5,7 +5,14 @@
 //! decides) before the handler sees it. The default authenticator denies everything, so a route
 //! is never reachable anonymously by accident. Session-cookie, service-account and share-link
 //! authenticators (S4-002/004/005) implement [`Authenticator`] and are installed with
-//! [`super::AppState::with_authenticator`].
+//! [`super::AppState::with_authenticator`]; the production one is
+//! [`super::authenticator::CredentialAuthenticator`], installed by
+//! [`super::AppState::with_identity`].
+//!
+//! [`Authenticated::grant`] says what the credential itself limits the caller to. Handlers
+//! authorize members with `figcraft_cloud_auth::authz::decide`, and must additionally call
+//! [`Authenticated::require_scope`] (service accounts) or [`Authenticated::require_document`]
+//! (share sessions) before acting.
 
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
@@ -14,7 +21,9 @@ use std::pin::Pin;
 use axum::extract::{ConnectInfo, FromRequestParts};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method};
-use figcraft_cloud_domain::{ErrorCode, PrincipalId, TenantContext};
+use figcraft_cloud_domain::{CloudDocumentId, ErrorCode, PrincipalId, TenantContext};
+use figcraft_cloud_storage::service_accounts::Scope;
+use figcraft_cloud_storage::share_links::ShareRole;
 
 use super::AppState;
 use super::client_ip;
@@ -39,12 +48,50 @@ pub(crate) struct SessionInfo {
     pub(crate) id: String,
 }
 
+/// What the credential limits the caller to, on top of role-based authorization.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Grant {
+    /// An active tenant member signed in through a browser session: the tenant role in
+    /// [`Authenticated::tenant`] and the resource roles apply, nothing more.
+    Member,
+    /// A service account: only these allowlisted scopes (sorted, deduplicated, never empty). Its
+    /// `tenant` role is a `viewer` placeholder: service principals are not tenant members.
+    ServiceAccount { scopes: Vec<Scope> },
+    /// A share session: this one document, at most this role. Its principal is the link's
+    /// creator (attribution only); the authenticator refuses it on every other route.
+    Share { document_id: CloudDocumentId, role: ShareRole, expires_at: i64 },
+}
+
 /// An authenticated caller in one tenant.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Authenticated {
     pub(crate) principal: PrincipalId,
     pub(crate) tenant: TenantContext,
     pub(crate) session: SessionInfo,
+    pub(crate) grant: Grant,
+}
+
+impl Authenticated {
+    /// `403` unless the credential carries `scope`. Browser members are not scope-limited; a
+    /// share session implies `documents:read`, plus `documents:write` for an editor link (its
+    /// document binding is [`Self::require_document`]).
+    pub(crate) fn require_scope(&self, scope: Scope) -> Result<(), ApiError> {
+        let allowed = match &self.grant {
+            Grant::Member => true,
+            Grant::ServiceAccount { scopes } => scopes.contains(&scope),
+            Grant::Share { role, .. } => scope == Scope::DocumentsRead || (scope == Scope::DocumentsWrite && *role == ShareRole::Editor),
+        };
+        if allowed { Ok(()) } else { Err(ApiError::forbidden()) }
+    }
+
+    /// `404` when a share session is used on a document other than its own (the caller cannot
+    /// see any other document); members and service accounts pass to the normal checks.
+    pub(crate) fn require_document(&self, document_id: CloudDocumentId) -> Result<(), ApiError> {
+        match &self.grant {
+            Grant::Share { document_id: own, .. } if *own != document_id => Err(ApiError::not_found()),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// Why a request was not authenticated. Each maps to one fixed public error.
