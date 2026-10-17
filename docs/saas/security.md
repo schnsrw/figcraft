@@ -70,6 +70,32 @@ platform level is a separate realm, not a super-tenant.
 - **Every platform action is audited** in `platform_audit_events` (actor, action, workspace,
   outcome, request id), including refused sign-ins, with no secrets in the metadata.
 
+## Workspace lifecycle (S6-047)
+
+A workspace (`tenants.state`) is `pending` (created for an owner who has not accepted yet), `active`,
+`suspended`, `archived` or `deleting` (pending deletion), and finally `deleted` (set only by the
+deletion job). The platform moves it with `/platform/v1/workspaces/{id}/suspend|restore|archive|
+request-deletion|cancel-deletion` (`cloud-domain::policy::lifecycle_transition_allowed` is the rule);
+an owner's acceptance moves `pending` to `active`.
+
+**Policy: only an active workspace is served; every other state refuses, it does not degrade to read-only.**
+No state deletes anything, and every move is audited on both sides.
+
+| Surface | In a non-active workspace |
+|---|---|
+| Workspace API, members | `409 resource_inactive` for members (they may know); `403` for everyone else, so nothing can be probed |
+| Browser sessions | stay valid (they belong to a person who may be a member elsewhere); the next request in this workspace is refused. `GET /api/v1/me/workspaces` still lists it with its state (not while `deleting`) |
+| Relay (rooms) | admission refused; live member admissions are found dead by the revocation sweep within one sweep interval (5 s by default) and disconnected; share-link holders likewise |
+| Service accounts and host API | the credential does not authenticate (`401`) |
+| Share links | exchange refused; an open share session is dead on its next check |
+| Host issuers, embed and host tokens | the issuer lookup returns nothing, so token exchange is refused |
+| Webhooks | no delivery is claimed; queued deliveries wait and are delivered after a restore |
+| Jobs and exports | the commit-time recheck fails closed |
+
+Tests: `crates/cloud-storage/tests/workspace_lifecycle.rs` runs every storage-level surface through
+suspended, archived and pending deletion and back; `platform_api/tests/lifecycle.rs` covers the HTTP
+view for members and outsiders.
+
 ## Authentication controls
 
 - OIDC signature, issuer, audience, nonce, state and time claims are mandatory.

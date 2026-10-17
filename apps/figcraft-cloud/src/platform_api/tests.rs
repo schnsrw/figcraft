@@ -25,6 +25,7 @@ use crate::api::passwords::PasswordService;
 use crate::api::{ApiConfig, AppState};
 use crate::config::CloudRole;
 
+mod lifecycle;
 mod workspaces;
 
 const ORIGIN: &str = "https://ops.figcraft.test";

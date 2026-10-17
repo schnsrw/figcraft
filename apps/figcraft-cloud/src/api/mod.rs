@@ -34,6 +34,7 @@ pub(crate) mod host_api;
 pub(crate) mod host_events;
 pub(crate) mod login_throttle;
 pub(crate) mod me_routes;
+pub(crate) mod me_api;
 pub(crate) mod passwords;
 pub(crate) mod rate_limit;
 pub(crate) mod realtime;
@@ -267,6 +268,7 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(tenants_api::routes())
         .merge(account_routes::resource_routes())
         .merge(me_routes::routes())
+        .merge(me_api::me_routes())
         .merge(documents_api::routes())
         .merge(host_api::router());
     // The platform realm (`/platform/v1`) is a separate router with its own authenticator.

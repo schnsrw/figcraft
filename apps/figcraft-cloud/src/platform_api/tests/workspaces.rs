@@ -10,14 +10,14 @@ use sqlx::PgPool;
 
 use super::{Reply, admin, call, cleanup, generous, pool, sign_in, state};
 
-struct Operator {
-    pool: PgPool,
-    app: Router,
+pub(super) struct Operator {
+    pub(super) pool: PgPool,
+    pub(super) app: Router,
     cookie: String,
     admin: Uuid,
 }
 
-async fn operator() -> Option<Operator> {
+pub(super) async fn operator() -> Option<Operator> {
     let pool = pool().await?;
     let state = state(pool.clone(), generous());
     let app = super::app(state.clone());
@@ -27,16 +27,16 @@ async fn operator() -> Option<Operator> {
 }
 
 impl Operator {
-    async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Reply {
+    pub(super) async fn call(&self, method: Method, path: &str, body: Option<Value>) -> Reply {
         call(&self.app, method, path, Some(&self.cookie), body).await
     }
 
-    async fn done(self) {
+    pub(super) async fn done(self) {
         cleanup(&self.pool, &[self.admin]).await;
     }
 }
 
-async fn user(pool: &PgPool) -> PrincipalId {
+pub(super) async fn user(pool: &PgPool) -> PrincipalId {
     let id = Uuid::new_v4();
     sqlx::query("INSERT INTO principals (id, kind, display_name) VALUES ($1::uuid, 'user', 'p2 owner')")
         .bind(id.to_string())
@@ -46,11 +46,11 @@ async fn user(pool: &PgPool) -> PrincipalId {
     id.try_into().expect("non-nil")
 }
 
-fn slug(prefix: &str) -> String {
+pub(super) fn slug(prefix: &str) -> String {
     format!("p2-{prefix}-{}", &Uuid::new_v4().simple().to_string()[..10])
 }
 
-fn tenant_of(reply: &Reply) -> TenantId {
+pub(super) fn tenant_of(reply: &Reply) -> TenantId {
     reply.body["id"].as_str().expect("id").parse().expect("tenant id")
 }
 

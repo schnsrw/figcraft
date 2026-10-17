@@ -239,7 +239,7 @@ pub(crate) struct TenantBody {
 }
 
 impl TenantBody {
-    fn new(record: TenantRecord, role: Option<String>) -> Self {
+    pub(crate) fn new(record: TenantRecord, role: Option<String>) -> Self {
         Self {
             id: record.id,
             slug: record.slug,

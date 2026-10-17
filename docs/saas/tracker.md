@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (19/58) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (20/58) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 19 / 58 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 20 / 58 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2722,10 +2722,25 @@ holds projects. The platform API calls the company `workspace` in its paths and 
   in `/api/v1/tenants` (multi-tenant mode, S4-007) is not yet switchable off by the platform; the
   platform cannot rename a workspace or change its region; owner-invitation acceptance has no HTTP
   route in the workspace API yet (storage function only).
-- [ ] **S6-047** Workspace lifecycle states (active, suspended, archived, pending-deletion) enforced
+- [x] **S6-047** Workspace lifecycle states (active, suspended, archived, pending-deletion) enforced
   on every surface: API, browser sessions, service accounts, relay admission and live rooms, share
   links, embed and host tokens, webhooks. A documented policy per state; live sessions end promptly
   through the existing revocation machinery; suspension never deletes data. Depends on S6-046.
+  Evidence: the policy and transition rule in `crates/cloud-domain/src/policy.rs` (unit tests) and the
+  surface table in `security.md` ("Workspace lifecycle"): only `active` is served, every other state
+  refuses. The existing enforcement points were audited and are now proven together:
+  `crates/cloud-storage/tests/workspace_lifecycle.rs` (3, live) walks one fixture workspace (member
+  access, relay member admission, service-account credential, share-link exchange and an open share
+  session, host issuer lookup, commit-time job recheck, webhook claim) through suspended, archived and
+  pending deletion, expecting every surface closed, and open again after restore with documents and
+  deliveries intact; it also shows a live relay admission found dead by the sweep after a suspend and
+  admitted again after a restore, and refuses the moves the policy forbids. New in this task: members
+  of a non-active workspace now get `409 resource_inactive` while outsiders keep the uniform `403`
+  (`authenticator.rs`, `effective_roles::has_active_membership`), and `GET /api/v1/me/workspaces`
+  (`api/me_api.rs`) lists a person's workspaces with state and role before any workspace is chosen
+  (`GET /api/v1/tenants` needs a workspace context). HTTP test `platform_api/tests/lifecycle.rs`.
+  Not done: no read-only export mode for an archived workspace; the relay closes admitted clients on
+  its sweep interval, not instantly; browser sessions are deliberately not revoked on suspension.
 - [ ] **S6-048** Plan assignment data model: plan id, a limits placeholder that references S8-001 and
   entitlements answered by one function (`entitlement(workspace, key)`), no payment logic. Depends
   on S6-044.
@@ -3036,3 +3051,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-046: workspace create (owner principal or invitation link), list, read, suspend, restore, archive, deletion request and cancel, plan and platform audit under /platform/v1, each change audited on both sides in one transaction. S6 reaches 18/57. |
 | 2026-10-18 | S6-036: profile (display name, palette colour), password change that revokes other sessions, own-session list and revoke. S6 reaches 19/58. |
 | 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-011 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
+| 2026-10-18 | S6-047: workspace lifecycle enforced and proven on every surface (members 409, relay, service accounts, share links, host issuers, webhooks, jobs); /me/workspaces lists a person's workspaces with state. S6 reaches 20/58. |

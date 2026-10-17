@@ -221,6 +221,21 @@ pub async fn resolve_tenant_access(
     Ok(Some(TenantAccess { principal_active, tenant_state, tenant_role, permissions }))
 }
 
+/// Whether `principal_id` has an active membership row in the transaction's tenant, whatever the
+/// tenant's own state. Lets the API tell a member of a suspended or archived workspace ("this
+/// workspace is not active", `409`) from someone who is not a member (`403`, existence not revealed).
+pub async fn has_active_membership(transaction: &mut TenantTransaction<'_>, principal_id: PrincipalId) -> Result<bool, MembershipError> {
+    sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM tenant_members m JOIN principals p ON p.id = m.principal_id \
+         WHERE m.tenant_id = $1::uuid AND m.principal_id = $2::uuid AND m.state = 'active' AND p.state = 'active')",
+    )
+    .bind(transaction.tenant_id().to_string())
+    .bind(principal_id.to_string())
+    .fetch_one(transaction.connection())
+    .await
+    .map_err(|_| MembershipError::Database)
+}
+
 /// Candidate roles on a workspace (and, when `document` is given, that document).
 async fn candidates(
     transaction: &mut TenantTransaction<'_>,

@@ -37,9 +37,10 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, Method, header};
 use base64::Engine as _;
 use figcraft_cloud_auth::session_policy::{COOKIE_NAME, EMBED_COOKIE_NAME, SessionPolicy};
+use figcraft_cloud_domain::policy::serves_workspace_traffic;
 use figcraft_cloud_domain::{CloudDocumentId, DeploymentMode, Permission, PrincipalId, Role, TenantContext, TenantId, Uuid};
 use figcraft_cloud_storage::access_guard::{self, AccessGuardError, HeldCredential, MembershipRequirement};
-use figcraft_cloud_storage::effective_roles::{TenantAccess, resolve_tenant_access};
+use figcraft_cloud_storage::effective_roles::{TenantAccess, has_active_membership, resolve_tenant_access};
 use figcraft_cloud_storage::memberships::MemberPermission;
 use figcraft_cloud_storage::service_accounts::{self, AuthenticatedServiceAccount, SECRET_PREFIX, ServiceAccountError};
 use figcraft_cloud_storage::sessions::{self, ResolvedSession, SessionError, SessionLimits};
@@ -472,7 +473,18 @@ impl CredentialAuthenticator {
     pub(crate) async fn member(&self, tenant: TenantId, principal: PrincipalId) -> Result<TenantContext, AuthRejection> {
         let mut transaction = begin_tenant_transaction(&self.pool, tenant).await.map_err(|_| AuthRejection::Unavailable)?;
         let access = resolve_tenant_access(&mut transaction, principal).await.map_err(|_| AuthRejection::Unavailable)?;
+        // A member of a workspace that is not active (suspended, archived, pending deletion) is told
+        // so (409); anyone else keeps the uniform 403, so workspaces cannot be probed.
+        let inactive_member = match &access {
+            Some(access) if access.tenant_role.is_none() && access.principal_active && !serves_workspace_traffic(access.tenant_state) => {
+                has_active_membership(&mut transaction, principal).await.map_err(|_| AuthRejection::Unavailable)?
+            }
+            _ => false,
+        };
         let _ = transaction.rollback().await;
+        if inactive_member {
+            return Err(AuthRejection::Inactive);
+        }
         member_context(&self.identity, tenant, principal, access)
     }
 
