@@ -57,8 +57,22 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
   the team's access, members have roles, an admin adds people and a team lead (S6-052, the
   team-lead part of S6-055), and the screens for it exist.
 - [ ] **TS-006** The admin can run the team from the browser without the command line: invite by
-  link (copy-link flow; email is backlog), disable and re-enable a person, send a password-reset
-  link, see who is in the workspace (S6-037 and its screens).
+  link (copy-link flow, or by email once TS-012 lands), disable and re-enable a person, send a
+  password-reset link, see who is in the workspace (S6-037 and its screens).
+- [ ] **TS-012** Email delivery, optional and off by default: one SMTP configuration for the
+  deployment (host, port, TLS mode, credentials from secret files, from-address), sending
+  invitations, password-reset links and a "your account was created" notice. Messages carry
+  links only, never passwords. Sending runs through a durable outbox with retries and a visible
+  failure state, so a down mail server never loses an invitation and never blocks the request. A
+  workspace without mail configured keeps working with copyable links. A "send test email" check
+  for the admin; no tracking pixels.
+- [ ] **TS-013** Admins can set passwords directly: when creating a person the admin may choose
+  "send an invitation" or "set an initial password" (typed or generated, shown once); the admin
+  can set a new password for an existing person at any time. A password set this way is
+  temporary: the person must choose their own at the next sign-in. Setting one ends that person's
+  other sessions, is audited (who, whom, when, never the value), is limited to workspace
+  owners and admins acting on people below them (not on the owner, not on themselves through this
+  route), and obeys the same length and common-password rules as any password.
 - [ ] **TS-007** People are who they signed in as: collaborator names and colours come from the
   account, and the workspace shows who edited a file last (S6-043 and the simple part of S6-039).
 - [ ] **TS-008** Recover from mistakes: per-file history with named versions and restore as a new
@@ -91,7 +105,7 @@ or when going public multi-tenant SaaS:
   (S6-046 to S6-051 beyond TS-001), embedding polish (S6-006 to S6-010 remainder, S6-016,
   S6-018, S6-019).
 - **Other clients and features:** desktop cloud client (S6-026 to S6-031), AI gateway and server
-  WASM (S7), SSO group sync (S6-057), email delivery of invitations.
+  WASM (S7), SSO group sync (S6-057).
 
 ## S0 — Documentation and fork governance
 
@@ -3050,5 +3064,6 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-045: platform admins sign in at /platform/v1 with Argon2id passwords and a mandatory TOTP second factor in their own cookie, with the one-time CLI bootstrap token, lockout, rate limits and audit; OpenAPI published. S6 reaches 17/57. |
 | 2026-10-18 | S6-046: workspace create (owner principal or invitation link), list, read, suspend, restore, archive, deletion request and cancel, plan and platform audit under /platform/v1, each change audited on both sides in one transaction. S6 reaches 18/57. |
 | 2026-10-18 | S6-036: profile (display name, palette colour), password change that revokes other sessions, own-session list and revoke. S6 reaches 19/58. |
-| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-011 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
+| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-013 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
 | 2026-10-18 | S6-047: workspace lifecycle enforced and proven on every surface (members 409, relay, service accounts, share links, host issuers, webhooks, jobs); /me/workspaces lists a person's workspaces with state. S6 reaches 20/58. |
+| 2026-10-18 | Priority track: added TS-012 email delivery (optional SMTP with a durable outbox) and TS-013 admin-set and admin-reset passwords (temporary, change at next sign-in); email delivery removed from the backlog. |
