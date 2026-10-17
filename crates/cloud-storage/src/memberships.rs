@@ -9,7 +9,8 @@
 //!   `deleted` and drops the member's direct workspace/document memberships, team memberships and
 //!   sensitive permissions in the same transaction.
 //! * Last-owner protection: demoting, suspending or removing the last *active* `tenant_owner`
-//!   fails with [`MembershipError::LastOwner`]. The tenant row is locked first (`FOR UPDATE`), so
+//!   fails with [`MembershipError::LastOwner`]. The tenant row is locked first (`FOR NO KEY UPDATE`: it serialises owner changes but, unlike
+//!   `FOR UPDATE`, does not block the foreign-key checks of concurrent audit inserts), so
 //!   concurrent owner changes serialize and cannot both pass the check.
 //! * Direct memberships and sensitive grants can only be given to *active* tenant members.
 //! * Sensitive permissions are only ever explicit rows; nothing here derives one from a role.
@@ -174,7 +175,7 @@ pub struct TenantMember {
 pub const MAX_LIST: i64 = 100;
 
 async fn lock_tenant(transaction: &mut TenantTransaction<'_>) -> Result<(), MembershipError> {
-    let found: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tenants WHERE id = $1::uuid FOR UPDATE")
+    let found: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tenants WHERE id = $1::uuid FOR NO KEY UPDATE")
         .bind(transaction.tenant_id().to_string())
         .fetch_optional(transaction.connection())
         .await

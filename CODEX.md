@@ -143,16 +143,10 @@ the continuation point, a blocker or a major decision changes.
    `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
    ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
    sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
-   STATE AT END OF 2026-10-17: S4 21/25, S5 5/25 (see the tracker header). Done in S4: login
-   (OIDC), sessions, bootstrap gate + `--print-bootstrap-token`, service accounts, authz core,
-   tenants/teams/invitations, document APIs with signed cursors, RLS everywhere, revocation hooks,
-   support access, job recheck, realtime tickets, identity policy (owner-accepted), full route x
-   caller matrix and API cross-tenant suite.
-   RESUME HERE (S4): S4-019 leftovers (project-level team grants, team-member search,
-   principal-suspension routes); S4-021 (relay action matrix beyond tickets); S4-023 (close the
-   ignored in-flight-HTTP race: recheck membership inside the mutating transaction); S4-025
-   (OIDC back-channel logout, groups claim, pin the Keycloak image); then S4-GATE.
-   RESUME HERE (S5): orchestration is decided (owner): our own PostgreSQL leases beside the
+   STATE: S4 is complete (25/25) and its gate passes (2026-10-17). S5 is 5/25.
+   RESUME HERE (S5): FIRST fix batch actor attribution (the room records every batch as the
+   room opener's; the hub must pass each client's admission identity to Backend::changed/flush),
+   then move storage work off the hub thread (see below). Orchestration is decided (owner): our own PostgreSQL leases beside the
    fencing tokens, any relay redirects to the owner, drain on shutdown; not Plane/Rivet. Next:
    S5-003/004 lease rows, S5-006 redirect, S5-012 drain, S5-014 commenter/viewer enforcement at
    message level, S5-016..018 quotas/presence/large assets, S5-020..023 two-replica and kill

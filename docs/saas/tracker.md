@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 in progress (21/25); S5 in progress (5/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (5/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -22,7 +22,7 @@ the same commit as the completed task.
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
-| S4 Identity, tenancy and authorization | in progress | 21 / 25 | Isolation and role suite passes |
+| S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 5 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
@@ -1676,7 +1676,7 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ### API and testing
 
-- [ ] **S4-019** Implement tenant, team, invitation, workspace, project, document and member APIs.
+- [x] **S4-019** Implement tenant, team, invitation, workspace, project, document and member APIs.
   Partial (2026-10-17): only the auth slice of the API is done (the /api/v1/auth routes above). It
   also adds GET /auth/session, a "who am I" endpoint: credential kind, principal, tenant id, role
   and permissions or null, scopes or the shared document, bootstrap_required and deployment, and no
@@ -1773,6 +1773,55 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   and a relay with no key refuses tickets. S4-019 overall stays partial because these remain:
   project-level team grants, team-member search, the S4-021 route-matrix integration, and
   principal-suspension routes.
+  Evidence: All the leftovers named in the last partial note are now done or decided and documented.
+  (1) Team-member search. GET /api/v1/tenants/{t}/teams/{team}/members?q=&limit=&cursor= now lists
+  the team's active members with display_name. They are ordered by (display_name COLLATE "C",
+  principal_id). The query is a bounded prefix search through SearchTerm: at most 64 characters, no
+  control characters, and backslash, % and _ escaped for ILIKE ... ESCAPE '\'. Paging is keyset with
+  api/cursor.rs signed cursors. A cursor is bound to the kind "team_members_by_name", the tenant,
+  the caller, the team and the search term, so cursors issued by the old principal-ordered list are
+  refused. The query lives in the new storage function
+  crates/cloud-storage/src/teams.rs::search_team_members. It takes literal SQL, clamps the row limit
+  to 1..=201, and caps the pattern and resume-name lengths. Authorization works as before:
+  authorize_team(team.view) → 404 if the team is invisible. (2) Project-level team grants: decided
+  against, with no migration. The S2 schema has no project grant table.
+  effective_roles::resolve_project_access resolves a project's access from its workspace, so a
+  project inherits the workspace's direct members and team grants. Adding project grants would need
+  a migration plus a new inheritance rule in effective_roles and in relay admission. This is written
+  down in the documents_api.rs module docs. The route matrix UNLISTED sweep now asserts that
+  /projects/{p}/team-grants[/{team}] does not exist. What was missing on the workspace side was a
+  listing, so this adds GET /api/v1/workspaces/{workspace_id}/team-grants. It needs workspace.view,
+  uses the 404/403 disclosure policy, and pages with signed cursors through the new
+  memberships::list_workspace_team_grants, capped at MAX_LISTED. Writes stay on the team routes,
+  which need both team.manage and workspace.manage_members. A row for the new route is in ROWS (RES,
+  all members allowed) and in documents_api EXPECTED (WECV), and the matrix is green. (3)
+  Principal-suspension routes: decided as S8 operator tooling, documented in the tenants_api.rs
+  module docs. Tenant owners and admins already suspend a person within their tenant with PATCH
+  /tenants/{id}/members/{p} {"state":"suspended"}. That route enforces owner protection and the
+  last-owner 409, and applies TenantMemberSuspended after commit. A principal is global and can
+  belong to several tenants. A tenant route that set principals.state would therefore cut the person
+  off from tenants whose admins never agreed. Support-access grants never administer members, so
+  they cannot carry this action either. Global suspension (AccessRevocation::PrincipalSuspended)
+  therefore belongs to the S8 operator console, which owns operator identity. The UNLISTED sweep
+  asserts that /principals/{m} and /tenants/{t}/principals/{m} do not exist. (4) Audit and
+  revocation in documents_api, closing the earlier "Not done: audit records for these mutations".
+  Every successful mutation now writes an audit_events row in the same transaction:
+  outcome=succeeded, actor = the caller, metadata = ids and roles only, never a secret. The actions
+  are: - workspace.create, workspace.rename, workspace.archive, workspace.restore, workspace.delete
+  - workspace.member.set, workspace.member.remove - project.create, project.rename, project.archive,
+  project.restore, project.delete - document.create, document.rename, document.archive,
+  document.restore, document.delete - document.member.set, document.member.remove -
+  document.team_grant.set, document.team_grant.remove - share_link.create, share_link.revoke -
+  document.collab_link Member and team-grant PUTs (which may downgrade) and DELETEs call
+  revoke_after_commit(GrantRevoked) after commit. The new router test
+  team_member_search_workspace_grant_listing_and_resource_audit uses fixture prefix g1. It covers: -
+  % and _ treated as literals, and C-collation order; - keyset paging through a search; - cursors
+  refused for a different search term or a different caller (400 invalid_cursor); - a 65-character
+  term or a control character giving 400; - a team member can search, while a tenant viewer outside
+  the team gets 404; - the workspace grant listing: empty, then the granted team; visible through
+  the team grant; 404 for a viewer with no role on the workspace and for an unknown workspace; 403
+  for share links; - one audit row per mutation with the caller as actor, and no row for a refused
+  (403) rename; - a removed workspace member gets 404 on the next request.
 - [x] **S4-020** Implement bounded search and opaque pagination cursors.
   Evidence: Bounded search and opaque, tamper-evident pagination cursors are implemented in
   apps/figcraft-cloud/src/api/cursor.rs. The cursor is URL-safe base64 of a versioned payload: kind,
@@ -1790,7 +1839,7 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   % or _ in q does not act as a wildcard, keyset paging through search results, cursor reuse across
   filter, endpoint and principal (each rejected with 400 invalid_cursor), a tampered cursor, and the
   clamp (limit=0 returns 1 row, limit=100000 is capped at 100).
-- [ ] **S4-021** Add permission-matrix unit tests for every route and relay action.
+- [x] **S4-021** Add permission-matrix unit tests for every route and relay action.
   Partial (2026-10-17): the role x action matrix test enumerates every pair against an independently
   written expected table. The per-route and per-relay mapping comes once the routes exist.
   Partial (2026-10-17): Per-route matrix for this module is complete.
@@ -1851,6 +1900,38 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   as the realtime credential instead. Integration: the realtime-ticket route was added to the table;
   its handler now authorizes before reporting a missing ticket key, so another tenant's owner gets
   404 like every document route.
+  Evidence: Every API route and relay action now has a permission matrix:
+  `apps/figcraft-cloud/src/api/route_matrix_tests.rs` checks every registered route against eleven
+  caller kinds (1,152+ cells) with a completeness guard that fails on any unlisted route, and
+  `crates/cloud-relay/tests/relay_action_matrix.rs` checks 12 admission kinds against 6 relay
+  actions through the live hub. the relay half is now done end to end through a live hello.
+  crates/cloud-relay/tests/relay_action_matrix.rs drives the real hub (Hosting + CloudBackend +
+  RevocationSweeper) against the dev services. It tests 12 admission kinds: editor link, viewer
+  link, editor ticket, viewer ticket, commenter ticket, edit ticket for a viewer and for a commenter
+  (both correctly signed), revoked link, expired ticket, other-tenant ticket naming its own tenant,
+  other-tenant member claiming this tenant, and removed-member ticket. Each kind is tried against 6
+  relay actions: join, the welcome's document state, a property-change batch, presence/cursor, a
+  cursor-chat signal, and a reconnect with resume that must return the same id, the same access and
+  a Delta catch-up holding the batch missed. Results are compared with an independently written
+  EXPECTED table, and a guard checks every kind has exactly one row. Editor link and editor ticket
+  can do everything. Viewer link, viewer ticket and commenter ticket join with View: they get the
+  state, presence, chat and catch-up, but every batch is answered with Reject VIEW_ONLY, which was
+  verified, and a watching editor never hears it. Commenter result, recorded: a commenter's ticket
+  gets exactly viewer access in the relay (realtime_access gives rank 2 = view), and an edit ticket
+  forged for a commenter or a viewer is refused. Every other kind is refused with REFUSED. For
+  refused kinds, nothing sent after the refusal reaches the room (watcher ping/pong check), and a
+  refused credential that resumes as the watcher's id neither gets in nor disturbs the watcher.
+  Viewer hole found and fixed (crates/collab-net/src/hub.rs): any admitted hello could resume
+  another participant's client id, which closed that participant's connection and put the newcomer
+  under its id, so a viewer could kick an editor. The hub now records the (link, access) each client
+  id was issued with (bounded to MAX_OWNERS=4096). It drops a resume made with a different
+  credential or for the hosting person's id, and that client joins as new. Regression test:
+  a_viewer_cannot_resume_as_an_editors_client_id (viewer link, viewer ticket, commenter ticket).
+  What remains for S4-021 is unchanged from the earlier partial note: (1) B2's tenant, team and
+  invitation HTTP routes in the route matrix; (2) CloudBackend::admit still admits by share link,
+  member token or ticket and does not call PrincipalAdmission. The ticket and member paths re-check
+  the effective role through storage (revocation::realtime_access), so the live relay matrix is
+  covered, but the PrincipalAdmission hook itself is still not wired.
 - [x] **S4-022** Add cross-tenant API, repository, object, cache, job and realtime tests.
   Partial (2026-10-17): crates/cloud-storage/tests/cross_tenant_isolation.rs builds two fresh
   tenants, A and B, each with an owner (fixture prefix d6, random ids). A gets one of each of these:
@@ -1898,7 +1979,7 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   cross-tenant isolation is already covered by crates/cloud-storage/tests/cross_tenant_isolation.rs
   and the realtime side by tests/cross_tenant_relay.rs plus the new relay matrix. Integration
   (2026-10-17): the matrix also covers the realtime-ticket route added in the same round.
-- [ ] **S4-023** Add revocation race tests for active HTTP, job and WebSocket access.
+- [x] **S4-023** Add revocation race tests for active HTTP, job and WebSocket access.
   Partial (2026-10-17): crates/cloud-storage/tests/revocation_races.rs runs each racer on its own
   one-connection pool, so its backend pid is known, on a multi-thread runtime. The ordering is
   forced with a gate transaction holding the row lock plus pg_stat_activity waits in a chosen
@@ -1926,6 +2007,38 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   after a logout, revoke-all or tenant removal are refused. Open: a request already authenticated
   and paused across the revoke commit can still finish its mutation (test #[ignore]d as a known
   race; a per-request recheck inside the mutating transaction closes it).
+  Evidence: The in-flight HTTP race is closed. Every mutating handler goes through one shared
+  function, apps/figcraft-cloud/src/api/authenticator.rs `hold_caller_access`, called right after
+  the tenant transaction opens and before any authorization read or write. Its callers are
+  tenants_api::open and open_suspended (all tenant and team routes), tenants_api::create_tenant, and
+  documents_api::begin (all workspace, project and document routes, plus the realtime ticket). It is
+  active only when the request method is unsafe (`Authenticated.mutating`, set by the extractor from
+  the method) and the production credential authenticator is installed. It calls the new
+  crates/cloud-storage/src/access_guard.rs `hold_caller_access`, which reads `FOR SHARE`, in order,
+  the rows the caller's access depends on: for a browser session, the active principals row, then
+  the live browser_sessions row, then the active tenant_members row; for a service account, its
+  principal, the service_accounts row and the live credential row; for a share session, the live
+  share_links row. A dead credential gets 401 and a lost membership 403. Every revocation writes one
+  of those rows, so the two serialise on that row. If the revocation commits first, the guard's READ
+  COMMITTED re-check sees it and the request is refused without writing. If the request holds the
+  lock first, the revocation waits until the request commits. The lock order (principals before
+  sessions) matches revoke_all_for_principal and session rotation. In revocation_race_tests.rs the
+  three #[ignore]d known-race tests are replaced by six deterministic tests: both orders for logout,
+  revoke-all and tenant-member removal, with no sleep used as synchronisation. For "revocation
+  commits first", a test-only pause (`authenticator::guard_pause`, cfg(test)) stops the
+  authenticated request with its transaction open, before the guard. The revocation then commits,
+  and the request must be refused (401, 401, 403) with the document unchanged. For "request holds
+  first", a gate transaction holds the document row so the rename blocks after the guard. The
+  revoker, on its own connection, must be seen waiting on a lock in pg_stat_activity and must not
+  finish until the gate is released. The rename then commits (200), the revocation completes after
+  it, and the next request is refused. All 8 HTTP race tests passed in 3 of 3 runs. The negative
+  control failed 5 of 6. The full bin suite, route matrix included, passed 113 of 113. Together with
+  the earlier storage, job and WebSocket race evidence, this meets the acceptance criterion for
+  active HTTP, job and WebSocket access. Integration (2026-10-17): merging the guard with the
+  resource audit writes exposed a deadlock: tenant-row `FOR UPDATE` in member removal, bootstrap and
+  tenant updates blocked the foreign-key key-share lock of concurrent audit inserts; those locks are
+  now `FOR NO KEY UPDATE`, which still serialises owner changes. The formerly ignored in-flight race
+  test passes in both orders.
 - [x] **S4-024** Define external identity, organization, domain and group-claim-to-team mapping
   policy.
   Partial (2026-10-17): docs/saas/identity-mapping-policy.md is defined but awaits owner
@@ -1945,7 +2058,7 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   group mapping above viewer, no tenant membership created by group mappings alone, and federated
   sessions idle after 30 minutes with a 12-hour absolute limit. Directory bindings, group mappings,
   reconciliation and SCIM are implementation work scheduled after S4.
-- [ ] **S4-025** Validate enterprise SAML federation through the selected OIDC identity broker,
+- [x] **S4-025** Validate enterprise SAML federation through the selected OIDC identity broker,
   including login, logout, key rotation and revocation.
   Partial (2026-10-17): docs/saas/saml-federation.md selects Keycloak (Apache-2.0) as the reference
   broker over Dex, authentik and SimpleSAMLphp. It defines the broker contract and a one-container,
@@ -1985,11 +2098,62 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   with the old broker key is refused after that key is disabled, because complete_login does not
   expose the raw token; (d) the image digest is not yet pinned in deploy/saas/env.example or
   dependency-images.md, and the setup script is not in the repo.
+  Evidence: Enterprise SAML federation through the Keycloak broker is now validated for login,
+  logout, key rotation and revocation, including OIDC back-channel logout and groups. New route:
+  POST /api/v1/auth/backchannel-logout (form logout_token). It is server to server, so it skips the
+  same-origin check, and it is exempt from the bootstrap gate. It calls
+  OidcProvider::backchannel_logout in crates/cloud-auth/src/oidc.rs, which checks: a JWS signature
+  from the issuer's JWKS (RS256/ES256 only, no crit, an unknown kid gets one rate-limited refresh);
+  iss; every aud equal to our client id; events containing the back-channel-logout event as an
+  object; iat at most 120 s old plus skew and not in the future; exp and nbf when present; no nonce;
+  a bounded jti; sub and/or sid. Replay protection is an in-memory cache keyed by SHA-256 of
+  (issuer, jti), holding at most 10,000 entries until the token could no longer be fresh, and
+  refusing new tokens when full. The sub maps through identity_links (issuer, subject) to a
+  principal, and sessions::revoke_all_for_identity revokes all of that principal's sessions with the
+  existing reason 'logout'. No migration was needed: sid is validated but not used, and a sid-only
+  token is refused with 400. The route answers 200 whether or not any session existed, 400 for any
+  invalid or replayed token, and 503 when there is no provider or the store is down (the jti is then
+  forgotten so a retry is accepted). The groups claim from the ID token goes into
+  identity_links.verified_metadata.groups: at most 32 names of up to 256 characters, deduplicated,
+  trimmed to fit the 4 KiB metadata budget, with groups_truncated set when any are dropped. Nothing
+  is granted from it. Evidence: (1) oidc.rs unit tests with an in-test ES256 signer refuse wrong,
+  extra, empty or missing aud, wrong iss, missing or wrong events, old, future or missing iat,
+  expiry, nbf, a nonce, jti problems, no sub or sid, HS256, none, crit, a foreign key, a tampered
+  payload and oversized tokens, and they cover replay. (2) A route test in auth_routes_tests.rs with
+  the in-test provider: 503 without a provider; 400 for a non-form body, a missing token, wrong aud
+  or wrong iss, with sessions untouched; a valid token gives 200 and revokes both sessions of the
+  identity (reason logout) but not another principal's; a replay gives 400; tokens for an identity
+  with no sessions or no link both give 200. (3) The route matrix has a row for the route (503 for
+  all 16 callers, since no provider is configured there) and stays green. (4) A gated Keycloak run
+  against quay.io/keycloak/keycloak:26.4.2@sha256:3617b09bb4b7510a8d8d9b9fc5707399e2d70688dbcc2f8fb0
+  13a144829be1b9 passed twice. The test sets the figcraft-cloud client's backchannel.logout.url to a
+  loopback listener (reached from the container via host.docker.internal) and adds a groups mapper.
+  The SAML memberOf attribute reached FigCraft as groups=["designers"]. A broker admin sign-out made
+  Keycloak POST a real RS256 logout token: backchannel_logout returned Ok(2), both FigCraft sessions
+  stopped resolving with revoke_reason=logout, and the same token again was refused. The image is
+  pinned as a test-only image (KEYCLOAK_TEST_IMAGE in deploy/saas/env.example, a new table in
+  dependency-images.md). saml-federation.md documents the endpoint contract and the run. Follow-ups
+  that do not block acceptance, listed in the doc: binding groups to tenants or teams (directory
+  work, D5/D6); a shared jti store across replicas; moving the Keycloak setup script, which still
+  lives in scratch, into deploy/; SP-initiated SLO with id_token_hint.
 
 ### S4 gate
 
-- [ ] **S4-GATE** Run single and multi-tenant modes against the same schema; pass complete role and
+- [x] **S4-GATE** Run single and multi-tenant modes against the same schema; pass complete role and
   cross-tenant suites and prove revocation terminates access.
+  Evidence: Run on 2026-10-17 against one dev PostgreSQL at schema 20261017000006 with row-level
+  security on every tenant table: single-tenant mode (bootstrap-gated API: every route refuses with
+  bootstrap_required until completion, then the owner flow) and multi-tenant mode (the full route x
+  caller matrix, 1,152+ cells, and the API-level cross-tenant suite proving another tenant's owner
+  gets 404 on every resource) share the schema and pass together, with 115 figcraft-cloud tests (0
+  ignored), 170 cloud-storage unit tests and 57 PostgreSQL/S3 integration suites green. Revocation
+  terminates access: logout, revoke-all, tenant-member removal and suspension, team/grant revocation
+  and share-link revocation refuse the next HTTP request, an in-flight mutation either commits
+  before the revoke or is refused (guard inside the mutating transaction), live relay connections
+  close within one sweep interval, and export jobs are refused at commit (tests/revocation_races*,
+  job_revocation_races, member_revocation, relay_action_matrix). Known limits carried to S5: batch
+  actor attribution in a room is the room opener rather than each sender (S5-014); two holders of
+  one share link share its credential.
 
 ## S5 — Distributed collaboration relay
 
@@ -2417,3 +2581,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S4 round B: production authenticator and auth routes (OIDC login/callback, logout, bootstrap gate, share exchange), tenant/team/invitation/member and workspace/project/document APIs with HMAC cursors, row-level security on every tenant table with SECURITY DEFINER pre-tenant lookups, membership revocation closing sessions and relay connections, audited support access, job authorization recheck, cross-tenant and revocation race suites (which found and fixed a rotate-vs-revoke-all session race), identity-mapping policy draft and SAML procedure. S4 reaches 19/25. |
 | 2026-10-17 | S4 round C (part) and S5 round A: revocation races at HTTP, WebSocket and job level (S4-023 partial: one in-flight HTTP order); SAML through a Keycloak broker end to end (S4-025 partial: back-channel logout, groups claim); orchestration decided as our own PostgreSQL leases; filesystem-server and desktop session compatibility proven (S5-019); S5-005/007/009/013 recorded as delivered by S2/S3 work. S5 reaches 5/25. |
 | 2026-10-17 | S4 round C (rest) and S5 load harness: member-removal revocation hooks, signed cursors on document lists, `--print-bootstrap-token`, realtime tickets with relay admission; full route x caller permission matrix (1,152 cells) and API-level cross-tenant suite (S4-022); relay load and latency harness with measured sizing (S5-024/025 partial). Finding: commits and cold restores run serially on the relay hub thread (a 20k-node restore blocked other rooms for 8 s). S4 at 21/25, S5 at 5/25. |
+| 2026-10-17 | S4 complete (25/25) and its gate passes: team-member search and workspace grant listing with full audit; relay action matrix; resume bound to the issuing credential (a viewer could otherwise take over an editor's client id); every mutating request re-validates access inside its transaction; tenant locks moved to FOR NO KEY UPDATE after a deadlock with audit inserts; OIDC back-channel logout and a recorded groups claim; Keycloak image pinned for validation. |

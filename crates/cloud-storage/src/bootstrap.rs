@@ -97,7 +97,7 @@ pub async fn ensure_bootstrap(transaction: &mut TenantTransaction<'_>, lifetime_
         return Err(BootstrapError::InvalidInput);
     }
     // Serialize concurrent issuers for this tenant.
-    let locked: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tenants WHERE id = $1::uuid FOR UPDATE")
+    let locked: Option<i32> = sqlx::query_scalar("SELECT 1 FROM tenants WHERE id = $1::uuid FOR NO KEY UPDATE")
         .bind(transaction.tenant_id().to_string())
         .fetch_optional(transaction.connection())
         .await

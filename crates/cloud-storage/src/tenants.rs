@@ -194,7 +194,7 @@ pub async fn create_tenant_with_owner(
 
 async fn locked_tenant(transaction: &mut TenantTransaction<'_>) -> Result<TenantRecord, TenantError> {
     let row: Option<TenantRow> =
-        sqlx::query_as("SELECT id::text, slug, name, state, plan_id, home_region FROM tenants WHERE id = $1::uuid FOR UPDATE")
+        sqlx::query_as("SELECT id::text, slug, name, state, plan_id, home_region FROM tenants WHERE id = $1::uuid FOR NO KEY UPDATE")
             .bind(transaction.tenant_id().to_string())
             .fetch_optional(transaction.connection())
             .await
