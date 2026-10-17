@@ -1,13 +1,39 @@
-import { type Branding, DEFAULT_BRANDING } from "./branding";
+import { type ReactNode, useEffect, useRef } from "react";
 
-const workspaceItems = ["Recent", "Projects", "Libraries"] as const;
+import type { ApiClient } from "./api/client";
+import { type Branding, DEFAULT_BRANDING } from "./branding";
+import { Link, RouterProvider, signInHref, useRouter } from "./router";
+import {
+  AccountMenu,
+  NoTenantScreen,
+  NotFoundScreen,
+  SignedOutScreen,
+  TenantPicker,
+  UnavailableScreen,
+  UnsupportedScreen,
+} from "./screens/entry";
+import { BootstrapScreen } from "./screens/bootstrap";
+import { ReadyRoutes } from "./screens/routes";
+import { SessionProvider, useSession } from "./session";
 
 export interface AppProps {
   /** Validated runtime branding (`parseBranding`); defaults to the FigCraft look. */
   branding?: Branding;
+  /** Tests inject a client around a fake `fetch`. */
+  client?: ApiClient;
 }
 
-export function App({ branding = DEFAULT_BRANDING }: AppProps) {
+export function App({ branding = DEFAULT_BRANDING, client }: AppProps) {
+  return (
+    <SessionProvider {...(client === undefined ? {} : { client })}>
+      <RouterProvider>
+        <Shell branding={branding} />
+      </RouterProvider>
+    </SessionProvider>
+  );
+}
+
+function Shell({ branding }: { branding: Branding }) {
   const footerLinks = [
     { label: "Support", href: branding.supportUrl },
     { label: "Terms", href: branding.termsUrl },
@@ -16,13 +42,17 @@ export function App({ branding = DEFAULT_BRANDING }: AppProps) {
     (link): link is { label: string; href: string } => link.href !== null,
   );
   const showFooter = footerLinks.length > 0 || branding.footerText !== null;
+  const { state } = useSession();
 
   return (
     <div className="app-shell">
+      <a className="skip-link" href="#main">
+        Skip to content
+      </a>
       <header className="topbar">
-        <a
+        <Link
           className="brand"
-          href="/"
+          to="/"
           aria-label={`${branding.productName} workspace home`}
         >
           {branding.logoUrl === null ? (
@@ -36,44 +66,19 @@ export function App({ branding = DEFAULT_BRANDING }: AppProps) {
             />
           )}
           <span>{branding.productName}</span>
-        </a>
-        <span className="environment-label">SaaS workspace</span>
+        </Link>
+        {state.kind === "ready" && (
+          <nav className="topnav" aria-label="Main">
+            <Link to="/">Files</Link>
+            <Link to="/people">People</Link>
+          </nav>
+        )}
+        <AccountMenu />
       </header>
 
-      <div className="workspace-layout">
-        <nav className="sidebar" aria-label="Workspace">
-          <p className="eyebrow">Workspace</p>
-          <ul>
-            {workspaceItems.map((item, index) => (
-              <li key={item}>
-                <a
-                  className={index === 0 ? "active" : undefined}
-                  href={`#${item.toLowerCase()}`}
-                >
-                  {item}
-                </a>
-              </li>
-            ))}
-          </ul>
-        </nav>
-
-        <main className="workspace-main">
-          <p className="eyebrow">Cloud foundation</p>
-          <h1>Your design workspace</h1>
-          <p className="intro">
-            The account and workspace shell is ready. The existing Rust/WASM
-            editor will mount into this application through a versioned bridge.
-          </p>
-
-          <section className="status-card" aria-labelledby="runtime-heading">
-            <div>
-              <p className="status-label">Editor runtime</p>
-              <h2 id="runtime-heading">Rust/WASM boundary preserved</h2>
-            </div>
-            <span className="status-pill">Foundation</span>
-          </section>
-        </main>
-      </div>
+      <Main>
+        <Body branding={branding} />
+      </Main>
 
       {showFooter && (
         <footer className="site-footer">
@@ -91,4 +96,73 @@ export function App({ branding = DEFAULT_BRANDING }: AppProps) {
       )}
     </div>
   );
+}
+
+/** The page's `<main>`: takes focus when the route changes so keyboard and screen-reader users land on the new content. */
+function Main({ children }: { children: ReactNode }) {
+  const { path } = useRouter();
+  const ref = useRef<HTMLElement>(null);
+  const first = useRef(true);
+  useEffect(() => {
+    if (first.current) {
+      first.current = false;
+      return;
+    }
+    ref.current?.focus({ preventScroll: true });
+  }, [path]);
+  return (
+    <main id="main" className="page" tabIndex={-1} ref={ref}>
+      {children}
+    </main>
+  );
+}
+
+function Body({ branding }: { branding: Branding }) {
+  const { state } = useSession();
+  const { path, route } = useRouter();
+  useDocumentTitle(branding, route.name);
+
+  switch (state.kind) {
+    case "loading":
+      return (
+        <p role="status" className="muted">
+          Loading…
+        </p>
+      );
+    case "signed_out":
+      return (
+        <SignedOutScreen
+          productName={branding.productName}
+          signInHref={signInHref(path)}
+          deepLink={route.name === "file" || route.name === "workspace"}
+        />
+      );
+    case "unavailable":
+      return <UnavailableScreen error={state.error} />;
+    case "unsupported":
+      return <UnsupportedScreen credential={state.credential} />;
+    case "bootstrap_required":
+      return <BootstrapScreen />;
+    case "choose_tenant":
+      return <TenantPicker tenants={state.tenants} />;
+    case "no_tenant":
+      return <NoTenantScreen deployment={state.session.deployment} />;
+    case "ready":
+      return route.name === "not_found" ? <NotFoundScreen /> : <ReadyRoutes />;
+  }
+}
+
+const TITLES: Record<string, string> = {
+  home: "Files",
+  workspace: "Workspace",
+  file: "File",
+  people: "People",
+  invite: "Invitation",
+  not_found: "Page not found",
+};
+
+function useDocumentTitle(branding: Branding, route: string) {
+  useEffect(() => {
+    document.title = `${TITLES[route] ?? ""} · ${branding.productName}`;
+  }, [branding.productName, route]);
 }
