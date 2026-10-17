@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (8/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (9/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 8 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 9 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2232,7 +2232,14 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 ### Roles, presence and large data
 
 - [ ] **S5-014** Enforce viewer, commenter and editor capabilities at relay message handling.
-- [ ] **S5-015** Disconnect sessions whose grant is revoked.
+- [x] **S5-015** Disconnect sessions whose grant is revoked.
+  Evidence: the cloud relay starts `RevocationSweeper` alongside its hub. The sweeper rechecks
+  watched share links and member admissions against PostgreSQL and asks the hub to disconnect
+  connections admitted through a revoked link or session; a fresh hello is refused. The live
+  PostgreSQL/S3 probes `member_revocation` and `revocation_races_ws` passed on 2026-10-17:
+  tenant, team and document removal, session logout, editor downgrade and share-link revocation
+  close only affected clients within one sweep while unaffected clients keep editing. The race
+  probe also bounds the in-flight commit window.
 - [ ] **S5-016** Keep cursor, selection, chat and spotlight ephemeral and separately rate-limited.
 - [ ] **S5-017** Add bounded room, connection, message, rate and outbound-byte quotas.
 - [ ] **S5-018** Move large image transfer to verified asset references and negotiated capability.
@@ -2600,3 +2607,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S5-024/025: repeated the release load on disposable PostgreSQL/S3 after the recovery fix: 4,800/4,800 edits confirmed, commit p95 3.7 ms, 20k-frame plus 500-event recovery p95 4.24 s, two slow readers evicted, 20 reconnects committed within 110 ms. Capped cloud rooms at the measured 20,001 nodes and verified both the boundary and an oversized stored snapshot. S5 reaches 8/25; production-scale and multi-replica tests remain in the gate. |
 | 2026-10-17 | S5 lease prerequisite: corrected cloud startup and Compose preflight to require the checked-in `20261017000006` row-level security migration; the previous `...05` bound left a fully migrated service unready. S5 remains 8/25. |
 | 2026-10-17 | S5-003/004 partial: added tenant-scoped PostgreSQL lease rows, atomic acquisition with a fencing claim, lookup, renewal and compare-and-release. Live relay integration and routing remain open; S5 stays 8/25. |
+| 2026-10-17 | S5-015 audit: confirmed the already wired relay revocation sweeper with live PostgreSQL/S3 member and WebSocket race probes; checked off grant revocation. S5 reaches 9/25. |
