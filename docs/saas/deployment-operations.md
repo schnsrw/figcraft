@@ -86,6 +86,13 @@ FIGCRAFT_ROOM_IDLE_SECONDS=30
 # batches (1 to 1000000, default 1000), whichever comes first: a crash replays at most that much.
 FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS=300
 FIGCRAFT_SNAPSHOT_AFTER_EVENTS=1000
+# Relay quotas, per replica (every one is bounded; these are the defaults):
+FIGCRAFT_RELAY_MAX_ROOMS=1024              # documents open at once (1 to 100000)
+FIGCRAFT_RELAY_MAX_CONNECTIONS=1024        # connections at once (1 to 100000)
+FIGCRAFT_RELAY_MAX_PEERS_PER_ROOM=256      # clients in one room (1 to 10000)
+FIGCRAFT_RELAY_MESSAGES_PER_SECOND=100     # per connection, burst 4x; past it the connection is dropped (1 to 10000)
+FIGCRAFT_RELAY_MAX_MESSAGE_BYTES=67108864  # largest message a client may send (1024 to 67108864)
+FIGCRAFT_RELAY_MAX_QUEUED_BYTES=167772160  # outbound bytes queued per connection; a reader this far behind is dropped
 
 DATABASE_URL_FILE=/run/secrets/database_url
 REDIS_URL_FILE=/run/secrets/redis_url

@@ -17,7 +17,7 @@ use figcraft_cloud_storage::share_links::{ShareRole, create_share_link};
 use figcraft_collab_net::NetLimits;
 use figcraft_collab_net::hub::Hosting;
 
-use crate::config::CloudConfig;
+use crate::config::{CloudConfig, RelayQuotas};
 
 /// Where the relay listens (inside the container; the gateway reaches it as `cloud:8082`).
 pub(crate) const RELAY_ADDR: ([u8; 4], u16) = ([0, 0, 0, 0], 8082);
@@ -33,15 +33,20 @@ const DEVELOPMENT_WORKSPACE: &str = "00000000-0000-4000-8000-00000000c0d1";
 const DEVELOPMENT_PROJECT: &str = "00000000-0000-4000-8000-00000000c0d2";
 
 /// Transport limits for the cloud relay: every connection arrives through the gateway (one
-/// address), so the per-address cap is off and the totals bound the process.
-pub(crate) fn net_limits() -> NetLimits {
+/// address), so the per-address cap is off and the totals bound the process. The operator's quotas
+/// (`FIGCRAFT_RELAY_*`) set the connection, rate, message and outbound-queue bounds.
+pub(crate) fn net_limits(quotas: &RelayQuotas) -> NetLimits {
     NetLimits {
-        max_connections: 1024,
+        max_connections: quotas.max_connections,
         max_per_address: 0,
+        rate: quotas.messages_per_second as f64,
+        burst: (quotas.messages_per_second * 4) as f64,
+        max_client_message: quotas.max_message_bytes,
+        max_queued_bytes: quotas.max_queued_bytes,
         max_queued_total: 1 << 30,
         max_reading_total: 512 << 20,
         max_in_flight: 512 << 20,
-        reserve_for_sessions: 64,
+        reserve_for_sessions: 64.min(quotas.max_connections / 8),
         ..NetLimits::default()
     }
 }
@@ -66,13 +71,17 @@ pub(crate) fn start(config: &CloudConfig) -> Result<Relay, &'static str> {
     // where it can be reached; a single relay needs none.
     backend_config.leases = config.relay_advertise_url().map(figcraft_cloud_relay::collab_backend::LeaseConfig::new);
     // Empty rooms stay warm for a while, and busy rooms snapshot on a schedule (S5-011).
+    let quotas = config.relay_quotas();
+    backend_config.max_open = quotas.max_rooms;
+    backend_config.limits.max_peers = quotas.max_peers_per_room;
+    backend_config.limits.max_message_bytes = quotas.max_message_bytes;
     backend_config.idle_close_after = config.room_idle();
     backend_config.snapshot_every = config.snapshot_interval();
     backend_config.snapshot_after_events = config.snapshot_after_events();
     let backend = CloudBackend::connect(&backend_config).map_err(|_| "the relay's storage couldn't be set up")?;
     let watch = backend.revocation_watch();
     let listener = TcpListener::bind(SocketAddr::from(RELAY_ADDR)).map_err(|_| "the relay's port couldn't be opened")?;
-    let hosting = Hosting::serve(listener, backend, net_limits()).map_err(|_| "the relay couldn't start")?;
+    let hosting = Hosting::serve(listener, backend, net_limits(config.relay_quotas())).map_err(|_| "the relay couldn't start")?;
     let revocations = RevocationSweeper::start(&backend_config, watch, hosting.addr(), REVOCATION_INTERVAL)
         .map_err(|_| "the relay's revocation sweeper couldn't start")?;
     Ok(Relay { hosting, _revocations: revocations })
@@ -175,6 +184,29 @@ async fn bootstrap(
 
 #[cfg(test)]
 mod tests {
+    use super::net_limits;
+    use crate::config::{CloudConfig, RelayQuotas};
+
+    #[test]
+    fn the_quotas_become_the_transports_limits() {
+        let quotas = RelayQuotas {
+            max_rooms: 7,
+            max_connections: 80,
+            max_peers_per_room: 9,
+            messages_per_second: 25,
+            max_message_bytes: 1 << 20,
+            max_queued_bytes: 8 << 20,
+        };
+        let limits = net_limits(&quotas);
+        assert_eq!((limits.max_connections, limits.rate, limits.burst), (80, 25.0, 100.0));
+        assert_eq!((limits.max_client_message, limits.max_queued_bytes), (1 << 20, 8 << 20));
+        assert_eq!(limits.max_per_address, 0, "every client arrives through the gateway: one address");
+        assert!(limits.reserve_for_sessions <= limits.max_connections / 8, "a small relay keeps room for ordinary clients");
+        // The defaults keep what the relay used before the quotas were configurable.
+        let default = net_limits(CloudConfig::default().relay_quotas());
+        assert_eq!((default.max_connections, default.rate, default.burst, default.reserve_for_sessions), (1024, 100.0, 400.0, 64));
+    }
+
     use super::*;
 
     #[test]

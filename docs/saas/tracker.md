@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (20/25); S6 in progress (5/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (21/25); S6 in progress (5/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 20 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 21 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | in progress | 5 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2320,7 +2320,21 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   accepted edit batches. The shared hub's `presence_is_throttled_and_the_latest_wins` and
   `signals_reach_only_clients_that_read_them_and_are_rate_limited` loopback tests exercise both
   limits, and `cursor_chat_and_spotlight_between_apps` covers delivery.
-- [ ] **S5-017** Add bounded room, connection, message, rate and outbound-byte quotas.
+- [x] **S5-017** Add bounded room, connection, message, rate and outbound-byte quotas.
+  Evidence (2026-10-18): the relay's limits existed only as code defaults. Six are now operator
+  settings, each bounded and validated at startup: `FIGCRAFT_RELAY_MAX_ROOMS`,
+  `FIGCRAFT_RELAY_MAX_CONNECTIONS`, `FIGCRAFT_RELAY_MAX_PEERS_PER_ROOM`,
+  `FIGCRAFT_RELAY_MESSAGES_PER_SECOND` (burst four times that), `FIGCRAFT_RELAY_MAX_MESSAGE_BYTES`
+  and `FIGCRAFT_RELAY_MAX_QUEUED_BYTES` (outbound bytes per connection; the existing queue-depth
+  and total-bytes limits stay), with the previous behaviour as defaults. Tests (config bounds and
+  the mapping onto the transport limits; `relay_quotas`, live through the real hub): a document
+  past the room quota is refused with the unavailable message while open rooms still take clients,
+  and a closed room frees its slot; the next client of a full room is refused ("the session is
+  full") until one leaves; a connection that floods past the rate quota is dropped promptly while
+  the other client in the room keeps editing; a message past the size cap ends that connection
+  (small ones pass) and later clients see only what was accepted. Slow-reader eviction by queued
+  bytes is the transport's existing, separately tested behaviour (S5-024 measured it); per-tenant
+  and per-plan quotas are S8 work.
 - [ ] **S5-018** Move large image transfer to verified asset references and negotiated capability.
 - [x] **S5-019** Preserve compatibility with current filesystem-server and desktop-hosted sessions.
   Evidence: Compatibility with self-hosted sessions is proven by three new test files; all pass. (1)
@@ -2723,3 +2737,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-004: embed exchange enforces the host's maximum role and resolves tenant, workspace, document and subject only through that host's mappings inside its own tenant (active document in the mapped workspace, active member). S6 reaches 4/31. |
 | 2026-10-18 | S6-005: key rotation (overlap, expiry, retirement) and issuer disable verified end to end through the embed exchange against PostgreSQL. S6 reaches 5/31 and the first S6 block (host registration and tokens) is complete except the unstarted embed behaviour tasks. |
 | 2026-10-18 | Relay: a restarted replica reclaims its own stale room lease at once (same advertised address, fence moves past the dead process; `acquire_or_reclaim_room`), and one flush commits different rooms concurrently: measured 999 commits/s at 1.6 ms median where serial commits reached 570 to 799 at 104 to 126 ms. |
+| 2026-10-18 | S5-017: relay quotas (rooms, connections, clients per room, messages per second, message size, outbound queue bytes) are bounded operator settings, enforced and tested live through the real hub. S5 reaches 21/25. |

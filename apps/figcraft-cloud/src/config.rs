@@ -47,6 +47,7 @@ pub(super) struct CloudConfig {
     room_idle_seconds: u64,
     snapshot_interval_seconds: u64,
     snapshot_after_events: u64,
+    relay_quotas: RelayQuotas,
     oidc_issuer: Option<String>,
     /// `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URL` (S4 auth wiring): login is enabled only when
     /// these and `OIDC_ISSUER` are all set.
@@ -76,6 +77,7 @@ impl Default for CloudConfig {
             room_idle_seconds: DEFAULT_ROOM_IDLE_SECONDS,
             snapshot_interval_seconds: DEFAULT_SNAPSHOT_INTERVAL_SECONDS,
             snapshot_after_events: DEFAULT_SNAPSHOT_AFTER_EVENTS,
+            relay_quotas: RelayQuotas::default(),
             oidc_issuer: None,
             oidc_client_id: None,
             oidc_redirect_url: None,
@@ -169,6 +171,35 @@ impl CloudConfig {
                     };
                 }
                 "FIGCRAFT_PUBLIC_URL" => config.public_url = Some(value.to_string()),
+                "FIGCRAFT_RELAY_MAX_ROOMS" => {
+                    config.relay_quotas.max_rooms =
+                        bounded(value, 1, 100_000, "FIGCRAFT_RELAY_MAX_ROOMS must be a whole number from 1 to 100000")? as usize
+                }
+                "FIGCRAFT_RELAY_MAX_CONNECTIONS" => {
+                    config.relay_quotas.max_connections =
+                        bounded(value, 1, 100_000, "FIGCRAFT_RELAY_MAX_CONNECTIONS must be a whole number from 1 to 100000")? as usize;
+                }
+                "FIGCRAFT_RELAY_MAX_PEERS_PER_ROOM" => {
+                    config.relay_quotas.max_peers_per_room =
+                        bounded(value, 1, 10_000, "FIGCRAFT_RELAY_MAX_PEERS_PER_ROOM must be a whole number from 1 to 10000")? as usize;
+                }
+                "FIGCRAFT_RELAY_MESSAGES_PER_SECOND" => {
+                    config.relay_quotas.messages_per_second =
+                        bounded(value, 1, 10_000, "FIGCRAFT_RELAY_MESSAGES_PER_SECOND must be a whole number from 1 to 10000")?;
+                }
+                "FIGCRAFT_RELAY_MAX_MESSAGE_BYTES" => {
+                    config.relay_quotas.max_message_bytes =
+                        bounded(value, 1 << 10, 64 << 20, "FIGCRAFT_RELAY_MAX_MESSAGE_BYTES must be a whole number of bytes from 1024 to 67108864")?
+                            as usize;
+                }
+                "FIGCRAFT_RELAY_MAX_QUEUED_BYTES" => {
+                    config.relay_quotas.max_queued_bytes = bounded(
+                        value,
+                        1 << 20,
+                        1 << 30,
+                        "FIGCRAFT_RELAY_MAX_QUEUED_BYTES must be a whole number of bytes from 1048576 to 1073741824",
+                    )? as usize;
+                }
                 "FIGCRAFT_ROOM_IDLE_SECONDS" => {
                     config.room_idle_seconds = bounded(value, 0, 3600, "FIGCRAFT_ROOM_IDLE_SECONDS must be a whole number of seconds from 0 to 3600")?
                 }
@@ -230,6 +261,11 @@ impl CloudConfig {
     /// `FIGCRAFT_PUBLIC_URL`, when configured.
     pub(super) fn public_url(&self) -> Option<&str> {
         self.public_url.as_deref()
+    }
+
+    /// The relay's quotas (`FIGCRAFT_RELAY_MAX_*`, `FIGCRAFT_RELAY_MESSAGES_PER_SECOND`).
+    pub(super) fn relay_quotas(&self) -> &RelayQuotas {
+        &self.relay_quotas
     }
 
     /// How long an emptied room stays open before it is saved and closed.
@@ -360,6 +396,39 @@ const DEFAULT_ROOM_IDLE_SECONDS: u64 = 30;
 const DEFAULT_SNAPSHOT_INTERVAL_SECONDS: u64 = 300;
 const DEFAULT_SNAPSHOT_AFTER_EVENTS: u64 = 1000;
 
+/// The relay's quotas: every one is bounded, and the defaults are what the relay used before they
+/// were configurable (S5-017).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct RelayQuotas {
+    /// Documents open at once on this replica; past it a new document is refused (and retried
+    /// elsewhere or later).
+    pub max_rooms: usize,
+    /// Connections at once on this replica, all rooms together.
+    pub max_connections: usize,
+    /// Clients in one room; the next hello is refused as a full session.
+    pub max_peers_per_room: usize,
+    /// Messages per second one connection may send (a burst of four times it is allowed); past it
+    /// the connection is dropped.
+    pub messages_per_second: u64,
+    /// The largest message a client may send.
+    pub max_message_bytes: usize,
+    /// Outbound bytes queued for one connection; a reader further behind than this is dropped.
+    pub max_queued_bytes: usize,
+}
+
+impl Default for RelayQuotas {
+    fn default() -> Self {
+        Self {
+            max_rooms: 1024,
+            max_connections: 1024,
+            max_peers_per_room: 256,
+            messages_per_second: 100,
+            max_message_bytes: 64 << 20,
+            max_queued_bytes: 160 << 20,
+        }
+    }
+}
+
 /// `value` as a whole number within `min..=max`, or `error`.
 fn bounded(value: &str, min: u64, max: u64, error: &'static str) -> Result<u64, &'static str> {
     match value.parse::<u64>() {
@@ -389,6 +458,12 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_PUBLIC_URL",
         "FIGCRAFT_RELAY_ADVERTISE_URL",
         "FIGCRAFT_DRAIN_SECONDS",
+        "FIGCRAFT_RELAY_MAX_ROOMS",
+        "FIGCRAFT_RELAY_MAX_CONNECTIONS",
+        "FIGCRAFT_RELAY_MAX_PEERS_PER_ROOM",
+        "FIGCRAFT_RELAY_MESSAGES_PER_SECOND",
+        "FIGCRAFT_RELAY_MAX_MESSAGE_BYTES",
+        "FIGCRAFT_RELAY_MAX_QUEUED_BYTES",
         "FIGCRAFT_ROOM_IDLE_SECONDS",
         "FIGCRAFT_SNAPSHOT_INTERVAL_SECONDS",
         "FIGCRAFT_SNAPSHOT_AFTER_EVENTS",
@@ -451,6 +526,34 @@ mod tests {
             "ws://re lay/x",
         ] {
             assert!(ok(bad).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[test]
+    fn relay_quotas_have_defaults_and_bounds() {
+        use super::RelayQuotas;
+        assert_eq!(CloudConfig::default().relay_quotas(), &RelayQuotas::default());
+        let parse = |k: &str, v: &str| CloudConfig::parse([(k, v)]);
+        let q = |k: &str, v: &str| parse(k, v).map(|c| c.relay_quotas().clone());
+        assert_eq!(q("FIGCRAFT_RELAY_MAX_ROOMS", "50").map(|q| q.max_rooms), Ok(50));
+        assert_eq!(q("FIGCRAFT_RELAY_MAX_CONNECTIONS", "200").map(|q| q.max_connections), Ok(200));
+        assert_eq!(q("FIGCRAFT_RELAY_MAX_PEERS_PER_ROOM", "8").map(|q| q.max_peers_per_room), Ok(8));
+        assert_eq!(q("FIGCRAFT_RELAY_MESSAGES_PER_SECOND", "30").map(|q| q.messages_per_second), Ok(30));
+        assert_eq!(q("FIGCRAFT_RELAY_MAX_MESSAGE_BYTES", "1048576").map(|q| q.max_message_bytes), Ok(1 << 20));
+        assert_eq!(q("FIGCRAFT_RELAY_MAX_QUEUED_BYTES", "33554432").map(|q| q.max_queued_bytes), Ok(32 << 20));
+        for (key, bad) in [
+            ("FIGCRAFT_RELAY_MAX_ROOMS", "0"),
+            ("FIGCRAFT_RELAY_MAX_ROOMS", "100001"),
+            ("FIGCRAFT_RELAY_MAX_CONNECTIONS", "0"),
+            ("FIGCRAFT_RELAY_MAX_PEERS_PER_ROOM", "10001"),
+            ("FIGCRAFT_RELAY_MESSAGES_PER_SECOND", "0"),
+            ("FIGCRAFT_RELAY_MESSAGES_PER_SECOND", "10001"),
+            ("FIGCRAFT_RELAY_MAX_MESSAGE_BYTES", "1023"),
+            ("FIGCRAFT_RELAY_MAX_MESSAGE_BYTES", "67108865"),
+            ("FIGCRAFT_RELAY_MAX_QUEUED_BYTES", "1048575"),
+            ("FIGCRAFT_RELAY_MAX_QUEUED_BYTES", "lots"),
+        ] {
+            assert!(parse(key, bad).is_err(), "{key}={bad} must be refused");
         }
     }
 
