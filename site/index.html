@@ -446,7 +446,7 @@
             <tr><th scope="row">Browser co-editing on one relay</th><td><span class="maturity m-tested">Works, tested</span></td><td>Two browsers co-edit a cloud document end to end; each batch is committed before it is broadcast.</td></tr>
             <tr><th scope="row">Durable events, snapshots and restore</th><td><span class="maturity m-tested">Works, tested</span></td><td>PostgreSQL and S3 integration suites and failure-injection tests pass. No production restore drills yet.</td></tr>
             <tr><th scope="row">Sign-in, tenancy and permissions</th><td><span class="maturity m-tested">Works, tested</span></td><td>OIDC, SAML via a broker, sessions, service accounts and row-level security pass their gate. No external security review yet.</td></tr>
-            <tr><th scope="row">Several relay replicas, failover, drain</th><td><span class="maturity m-wip">In progress</span></td><td>Room leases, owner routing and crash tests are being built now (S5).</td></tr>
+            <tr><th scope="row">Several relay replicas, failover, drain</th><td><span class="maturity m-tested">Works, tested</span></td><td>Room leases, owner routing, graceful drain, quotas and tests that kill the real process pass against PostgreSQL. The milestone gate (a full load run) and large-image transfer are still open, and none of it has run in production.</td></tr>
             <tr><th scope="row">Desktop and embedded cloud clients, AI</th><td><span class="maturity m-todo">Not started</span></td><td>Planned in S6 and S7.</td></tr>
             <tr><th scope="row">Quotas, billing, observability, security review</th><td><span class="maturity m-todo">Not started</span></td><td>Planned in S8; required before anyone should rely on it.</td></tr>
           </tbody>
@@ -632,7 +632,7 @@
           <summary>Is it ready for production?</summary>
           <div class="answer">
             <p>Not yet. FigCraft Cloud is an early alpha. Browser co-editing on the cloud stack works end to end, and identity, tenancy and authorization are complete with their test gates passing.</p>
-            <p>Running several relay replicas, embedding in other products, AI features and production operations (quotas, billing, observability, restore drills) are on the roadmap and not finished. Try it, but don't put irreplaceable work in it yet.</p>
+            <p>Embedding in other products (host registration and token validation exist; the host API and browser integration are in progress), the desktop and browser cloud clients, AI features and production operations (billing, observability, restore drills) are on the roadmap and not finished. Try it, but don't put irreplaceable work in it yet.</p>
             <p>The roadmap percentage counts tasks, not readiness. The remaining relay, recovery and operations work is the hardest and riskiest part, so read it as "how much is built", not "how close to production". The <a href="#maturity">maturity table</a> shows where each area stands.</p>
           </div>
         </details>
@@ -657,7 +657,7 @@
         <details>
           <summary>What's next?</summary>
           <div class="answer">
-            <p>The distributed relay: room leases in PostgreSQL beside the existing fencing tokens, routing clients to a room's owner, graceful drain for rolling releases, and multi-replica crash tests. After that come browser, desktop and embedded integration, an AI gateway, and production operations. <a href="roadmap.html">See the live roadmap.</a></p>
+            <p>Closing out the distributed relay (large images through the asset channel and the full gate run), then host APIs and webhooks for embedding, the browser workspace and desktop cloud documents, an AI gateway, and production operations. <a href="roadmap.html">See the live roadmap.</a></p>
           </div>
         </details>
       </div>

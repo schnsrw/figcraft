@@ -211,13 +211,15 @@
       <article class="chapter" aria-labelledby="s5-h">
         <div class="chapter-side"><div><p class="chapter-id">S5</p><span class="pill is-active">in progress</span><p>Gate: a fenced multi-replica relay passes crash, revocation, compatibility and load tests.</p></div></div>
         <div class="reveal">
-          <h2 id="s5-h">Distributed relay: the orchestration decision</h2>
-          <p class="lede">We will run room ownership ourselves, with leases in PostgreSQL next to the fencing tokens, rather than adopt Plane or Rivet.</p>
+          <h2 id="s5-h">Distributed relay: leases, routing and crash safety</h2>
+          <p class="lede">Room ownership is ours: leases in PostgreSQL next to the fencing tokens, rather than Plane or Rivet. Most of it is now built and tested; two items and the gate remain.</p>
           <div class="cards">
-            <article class="card"><h3>What it means</h3><p>Any relay accepts a connection and redirects the client to the room's current owner. Draining snapshots rooms and releases their leases. No Redis dependency for ownership.</p></article>
+            <article class="card"><h3>How it works</h3><p>Any relay accepts a connection and passes the client on to the room's current owner, so no client or protocol change is needed. A relay that restarts takes its own stale lease back at once. Draining commits and snapshots rooms, releases their leases and tells clients to reconnect. No Redis dependency for ownership.</p></article>
+            <article class="card"><h3>Built and tested so far</h3><p>Leases with renewal, loss and release; owner routing; SIGTERM drain; warm idle rooms and scheduled snapshots; six bounded quotas; durable client ids; realtime tickets through the owner path; and tests that SIGKILL the real process before and after a commit. Rooms commit concurrently: about 1,000 commits per second per relay at millisecond latency, where one-at-a-time commits reached 570 to 799 at 100 ms or more.</p></article>
+            <article class="card"><h3>Still open</h3><p>Large images through verified asset references, which needs editor support as well as the relay, and the gate: one full run of the multi-replica, crash, revocation, compatibility and load tests with no acknowledged edit lost.</p></article>
             <article class="card"><h3>Why</h3><p>Lowest effort and no new dependency to maintain. Fencing tokens already guarantee a single writer even during a partition, and commit-before-broadcast, snapshot recovery and quarantine already exist.</p></article>
             <article class="card"><h3>Alternatives considered</h3><p>Rivet's scalable self-hosted storage needs FoundationDB under an enterprise licence. Plane (MIT) fits the model, but its long-term maintenance is uncertain.</p></article>
-            <article class="card"><h3>Already in place</h3><p>Fencing tokens, snapshot-plus-replay restore, commit-before-broadcast, quarantine of unrecoverable rooms, compatibility with existing servers and desktop sessions, and per-client admission.</p></article>
+            <article class="card"><h3>Already in place before this work</h3><p>Fencing tokens, snapshot-plus-replay restore, commit-before-broadcast, quarantine of unrecoverable rooms, compatibility with existing servers and desktop sessions, and per-client admission.</p></article>
           </div>
           <ul class="doclinks" style="margin-top:22px">
             <li><a href="https://github.com/schnsrw/figcraft/blob/main/docs/saas/relay-orchestration-decision.md">relay-orchestration-decision.md</a></li>

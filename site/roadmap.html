@@ -48,15 +48,14 @@
     <div class="wrap split">
       <div class="reveal">
         <h2 id="next-h">What's next.</h2>
-        <p class="lede">The current focus is the distributed relay, so more than one relay can serve rooms safely.</p>
-        <p>Storage work comes first: the relay load test found that commits and cold restores ran one at a time on the relay's hub thread, so a large restore could stall other rooms for seconds. That work moves off the hub thread before multi-replica work begins.</p>
+        <p class="lede">The distributed relay is built and tested against a real database; the remaining work is closing it out, then the clients.</p>
+        <p>Built and tested for S5: room leases with renewal, loss and release; any relay passing a client on to the room's owner; graceful drain for rolling releases; warm idle rooms and scheduled snapshots; bounded quotas; durable client ids; and tests that kill the real process before and after a commit. Rooms of different documents now commit at the same time, measured at about a thousand commits per second per relay.</p>
       </div>
       <ul class="checks reveal" style="margin-top:0">
-        <li><span><strong>Room leases in PostgreSQL</strong> beside the existing fencing tokens.</span></li>
-        <li><span><strong>Routing to the room owner</strong>: any relay redirects a client to the current owner.</span></li>
-        <li><span><strong>Graceful drain</strong> that snapshots rooms and signals clients to reconnect during rolling releases.</span></li>
-        <li><span><strong>Viewer and commenter enforcement</strong> at relay message level, plus room, connection and rate quotas.</span></li>
-        <li><span><strong>Two-replica and kill tests</strong>: stale owners fenced, no confirmed edit lost before or after a crash.</span></li>
+        <li><span><strong>Large images through the asset channel</strong>: verified references instead of inline bytes, which needs editor support as well as the relay.</span></li>
+        <li><span><strong>The S5 gate</strong>: one full run of the multi-replica, crash, revocation, compatibility and load tests with no acknowledged edit lost.</span></li>
+        <li><span><strong>Embedding for host products</strong>: registration, keys and token validation exist; the host API, webhooks and browser integration follow.</span></li>
+        <li><span><strong>Browser workspace and desktop cloud documents</strong>: open, edit, reconnect and export one cloud document from both.</span></li>
       </ul>
     </div>
   </section>
