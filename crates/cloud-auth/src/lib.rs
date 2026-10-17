@@ -3,3 +3,4 @@
 pub mod oidc;
 mod oidc_http;
 pub mod session_policy;
+pub mod authz;
