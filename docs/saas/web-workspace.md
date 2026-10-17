@@ -36,6 +36,24 @@ session storage for the round trip and removed from the address bar on arrival.
 3. Multi-tenant deployments ask which organisation when a person belongs to several, remember the
    choice in local storage, and let someone with none create one or open an invitation link.
 
+## Passwords, first run and invitations without an identity provider
+
+The signed-out page asks `GET /api/v1/auth/methods` and shows exactly what the workspace offers: a
+login and password form (`POST /auth/password/login`), and the organisation button only when a
+provider is configured and allowed. A multi-tenant deployment asks for the workspace's short name
+first. Failures read the same ("That login or password isn't right"); a throttled login says how
+long to wait (from `Retry-After`); a workspace with passwords turned off says so.
+
+`/setup` is the first-run page: the setup token the operator printed, a name, a login and a
+password (typed twice) create the owner (`POST /auth/password/bootstrap`) and sign in. The server's
+password-policy sentence is shown as is. An invitation link opened by someone signed out offers
+"create your account" (`POST /auth/password/signup`) or "sign in instead" and then accepts.
+
+Stable `data-testid`s for scripted runs: `signin-login`, `signin-password`, `signin-submit`,
+`signin-oidc`, `signin-workspace`, `setup-token`, `setup-name`, `setup-login`, `setup-password`,
+`setup-confirm`, `setup-submit`, `invite-name`, `invite-password`, `invite-confirm`,
+`invite-submit`; every field also has a visible label.
+
 ## Permissions in the UI
 
 The server decides every action. The UI only avoids offering what would be refused:

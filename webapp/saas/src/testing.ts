@@ -12,6 +12,7 @@ export interface Call {
 export interface Reply {
   status?: number;
   body?: unknown;
+  headers?: Record<string, string>;
 }
 
 export type Handler = Reply | ((call: Call) => Reply | Promise<Reply>);
@@ -49,7 +50,7 @@ export class FakeApi {
       });
     }
     const reply = typeof handler === "function" ? await handler(call) : handler;
-    return json(reply.status ?? 200, reply.body);
+    return json(reply.status ?? 200, reply.body, reply.headers);
   };
 
   client(): ApiClient {
@@ -63,13 +64,17 @@ export class FakeApi {
   }
 }
 
-export function json(status: number, body: unknown): Response {
+export function json(
+  status: number,
+  body: unknown,
+  headers: Record<string, string> = {},
+): Response {
   if (status === 204 || body === undefined) {
-    return new Response(null, { status });
+    return new Response(null, { status, headers });
   }
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...headers },
   });
 }
 
@@ -107,3 +112,13 @@ export const tenantList = {
   ],
   next_cursor: null,
 };
+
+/** `GET /auth/methods` answers for the common deployments. */
+export const methodsOidc = {
+  tenant_id: TENANT_ID,
+  password: false,
+  oidc: true,
+  open_registration: false,
+};
+export const methodsPassword = { ...methodsOidc, password: true, oidc: false };
+export const methodsBoth = { ...methodsOidc, password: true };

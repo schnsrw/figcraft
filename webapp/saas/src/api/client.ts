@@ -52,23 +52,35 @@ export class ApiError extends Error {
   readonly status: number;
   readonly code: ApiErrorCode;
   readonly requestId: string | null;
+  /** The finer `error.reason` some answers carry (for example `password_policy`). */
+  readonly reason: string | null;
+  /** Seconds the server asked the caller to wait (`Retry-After`), when it did. */
+  readonly retryAfter: number | null;
 
   constructor(
     status: number,
     code: ApiErrorCode,
     message: string,
     requestId: string | null = null,
+    reason: string | null = null,
+    retryAfter: number | null = null,
   ) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.code = code;
     this.requestId = requestId;
+    this.reason = reason;
+    this.retryAfter = retryAfter;
   }
 }
 
 /** The envelope `{"error":{"code","message","request_id"}}`, validated field by field. */
-export function parseErrorEnvelope(status: number, body: unknown): ApiError {
+export function parseErrorEnvelope(
+  status: number,
+  body: unknown,
+  retryAfter: number | null = null,
+): ApiError {
   const error =
     typeof body === "object" && body !== null && "error" in body
       ? (body as { error: unknown }).error
@@ -87,9 +99,20 @@ export function parseErrorEnvelope(status: number, body: unknown): ApiError {
       typeof record.request_id === "string" && record.request_id !== ""
         ? record.request_id.slice(0, MAX_REQUEST_ID)
         : null;
-    return new ApiError(status, code, message, requestId);
+    const reason =
+      typeof record.reason === "string" && /^[a-z_]{1,40}$/.test(record.reason)
+        ? record.reason
+        : null;
+    return new ApiError(status, code, message, requestId, reason, retryAfter);
   }
-  return new ApiError(status, "unknown", fallbackMessage(status));
+  return new ApiError(
+    status,
+    "unknown",
+    fallbackMessage(status),
+    null,
+    null,
+    retryAfter,
+  );
 }
 
 function fallbackMessage(status: number): string {
@@ -199,7 +222,17 @@ export class ApiClient {
         parsed = null;
       }
     }
-    if (!response.ok) throw parseErrorEnvelope(response.status, parsed);
+    if (!response.ok) {
+      const wait = Number.parseInt(
+        response.headers.get("retry-after") ?? "",
+        10,
+      );
+      throw parseErrorEnvelope(
+        response.status,
+        parsed,
+        Number.isFinite(wait) && wait >= 0 && wait <= 86_400 ? wait : null,
+      );
+    }
     return parsed as T;
   }
 }

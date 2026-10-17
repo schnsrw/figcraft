@@ -49,12 +49,14 @@ export function SignInButton({
   href,
   probe = probeSignIn,
   navigate = (target: string) => window.location.assign(target),
-  children = "Sign in",
+  label = "Sign in",
+  testId,
 }: {
   href: string;
   probe?: SignInProbe;
   navigate?: (target: string) => void;
-  children?: string;
+  label?: string;
+  testId?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState<string | null>(null);
@@ -79,11 +81,12 @@ export function SignInButton({
       <a
         className="button primary"
         href={href}
+        data-testid={testId}
         onClick={(event) => void start(event)}
         aria-disabled={busy}
         aria-describedby={problem === null ? undefined : describe}
       >
-        {busy ? "Opening sign-in…" : children}
+        {busy ? "Opening sign-in…" : label}
       </a>
       {problem !== null && (
         <p id={describe} role="alert" className="notice error">
@@ -91,34 +94,6 @@ export function SignInButton({
         </p>
       )}
     </div>
-  );
-}
-
-export function SignedOutScreen({
-  productName,
-  signInHref,
-  deepLink,
-}: {
-  productName: string;
-  signInHref: string;
-  /** The visitor followed a link to a specific workspace or file. */
-  deepLink: boolean;
-}) {
-  return (
-    <section className="panel narrow" aria-labelledby="signed-out-heading">
-      <h1 id="signed-out-heading">Sign in to {productName}</h1>
-      <p className="intro">
-        {deepLink
-          ? "You need to sign in to open this link. You will come back to it afterwards."
-          : "Sign in with your organisation account to open your files, projects and team."}
-      </p>
-      <SignInButton href={signInHref} />
-      <p className="muted small">
-        Setting this deployment up for the first time? Sign in with the account
-        that should become the administrator, then enter the setup token the
-        operator printed.
-      </p>
-    </section>
   );
 }
 

@@ -43,10 +43,11 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
   first admin with a password, the first workspace and its owner, with no identity provider
   (S6-051 scoped to a single workspace). The command prints the URL to open and nothing secret in
   logs.
-- [ ] **TS-002** Browser sign-in without an identity provider: password sign-in, first-run owner
+- [x] **TS-002** Browser sign-in without an identity provider: password sign-in, first-run owner
   setup and accept-invitation-with-password screens in the web app, against the existing
   password and invitation routes (S6-034, S6-035). The OIDC button appears only when a provider is
   configured and the workspace allows it.
+  Evidence: `webapp/saas/src/screens/signin.tsx` (sign-in page driven by `GET /auth/methods`: password form, organisation button only when `oidc` is true, workspace prompt for multi-tenant, same-sentence failures, `Retry-After` wait text, 403 text; `/setup` first-owner form with password confirmation and the server's policy sentence; invitation-link sign-up and sign-in-instead), `screens/signin.test.tsx` (20 DB-free tests with a fake API; 116 web tests total, `npm run check` green), stable `data-testid`s listed in `docs/saas/web-workspace.md`. Not done: the screens were not run in a real browser against the stack (TS-003); the page learns that first-run setup is pending only from `bootstrap_required` on `/auth/methods` (requested from the accounts agent; until then it always offers the `/setup` link); the invitation form uses the invited address as the login because the API takes no chosen login yet (TS-012 to TS-014); open-registration sign-up has no screen.
 - [ ] **TS-003** A real-browser smoke run of the whole path, repeatable from a script against the
   Compose stack: sign in, create workspace, team, project and file, open the editor, make an edit.
   Screenshots are kept as evidence. Every defect it finds is fixed under this track.
@@ -3077,3 +3078,5 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-047: workspace lifecycle enforced and proven on every surface (members 409, relay, service accounts, share links, host issuers, webhooks, jobs); /me/workspaces lists a person's workspaces with state. S6 reaches 20/58. |
 | 2026-10-18 | Priority track: added TS-012 email delivery (optional SMTP with a durable outbox) and TS-013 admin-set and admin-reset passwords (temporary, change at next sign-in); email delivery removed from the backlog. |
 | 2026-10-18 | Priority track: added TS-014 (accounts, invitations and resets work with or without email; login name identifies a person, email optional, invitations no longer require a verified email). |
+| 2026-10-18 | Re-prioritised: new top-priority track TS-001 to TS-011 plus TS-GATE (a team self-hosts, signs in without an identity provider, creates teams and projects and collaborates), ahead of all other work; billing, the production security gate, scale operations, operator console and desktop moved to a logged backlog; removed duplicated status, header and S6 rows left by earlier merges. |
+| 2026-10-18 | TS-002: password sign-in, first-run owner setup and invitation sign-up screens driven by the server's sign-in methods; DB-free tests, stable test ids. |

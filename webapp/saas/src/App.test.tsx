@@ -11,6 +11,7 @@ import {
   TENANT_ID,
   WORKSPACE_ID,
   apiError,
+  methodsOidc,
   session,
   tenantList,
 } from "./testing";
@@ -40,31 +41,39 @@ describe("session states", () => {
       "",
       `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`,
     );
-    const api = new FakeApi().on(
-      "GET /auth/session",
-      apiError(401, "unauthenticated", "Authentication is required."),
-    );
+    const api = new FakeApi()
+      .on(
+        "GET /auth/session",
+        apiError(401, "unauthenticated", "Authentication is required."),
+      )
+      .on("GET /auth/methods", { body: methodsOidc });
     render(<App client={api.client()} />);
     expect(
       await screen.findByRole("heading", { name: "Sign in to FigCraft" }),
     ).toBeTruthy();
     expect(screen.getByText(/come back to it afterwards/)).toBeTruthy();
-    const link = screen.getByRole("link", { name: "Sign in" });
+    const link = await screen.findByRole("link", {
+      name: "Sign in with your organisation account",
+    });
     expect(link.getAttribute("href")).toBe(
       `/api/v1/auth/login?return_to=${encodeURIComponent(`/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`)}`,
     );
     // Nothing else is requested for a visitor.
-    expect(api.calls.map((call) => call.path)).toEqual(["/auth/session"]);
+    expect(api.calls.map((call) => call.path)).toEqual([
+      "/auth/session",
+      "/auth/methods",
+    ]);
   });
 
   it("keeps a percent-encoded path inert inside return_to", async () => {
     window.history.replaceState(null, "", "/%2F%2Fevil.example");
-    const api = new FakeApi().on(
-      "GET /auth/session",
-      apiError(401, "unauthenticated", "x"),
-    );
+    const api = new FakeApi()
+      .on("GET /auth/session", apiError(401, "unauthenticated", "x"))
+      .on("GET /auth/methods", { body: methodsOidc });
     render(<App client={api.client()} />);
-    const link = await screen.findByRole("link", { name: "Sign in" });
+    const link = await screen.findByRole("link", {
+      name: "Sign in with your organisation account",
+    });
     expect(link.getAttribute("href")).toBe(
       "/api/v1/auth/login?return_to=%2F%252F%252Fevil.example",
     );

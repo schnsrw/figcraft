@@ -10,6 +10,7 @@ import {
   PRINCIPAL_ID,
   TENANT_ID,
   apiError,
+  methodsOidc,
   session,
   tenantList,
 } from "../testing";
@@ -425,12 +426,16 @@ describe("accepting an invitation", () => {
 
   it("survives the sign-in round trip through session storage", async () => {
     window.history.replaceState(null, "", "/invite#token=tok_ABC-123_xyz");
-    const api = new FakeApi().on(
-      "GET /auth/session",
-      apiError(401, "unauthenticated", "x"),
-    );
+    const api = new FakeApi()
+      .on("GET /auth/session", apiError(401, "unauthenticated", "x"))
+      .on("GET /auth/methods", { body: methodsOidc });
     render(<App client={api.client()} />);
-    const link = await screen.findByRole("link", { name: "Sign in" });
+    await userEvent.click(
+      await screen.findByRole("button", { name: "Sign in instead" }),
+    );
+    const link = await screen.findByRole("link", {
+      name: "Sign in with your organisation account",
+    });
     expect(link.getAttribute("href")).toBe(
       "/api/v1/auth/login?return_to=%2Finvite",
     );

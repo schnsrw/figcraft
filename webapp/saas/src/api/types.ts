@@ -67,3 +67,13 @@ export interface CollabLink {
   editor_url: string;
   expires_in_secs: number;
 }
+
+/** `GET /auth/methods`: what the workspace offers on its sign-in page. */
+export interface SignInMethods {
+  tenant_id: string;
+  password: boolean;
+  oidc: boolean;
+  open_registration: boolean;
+  /** True while a single-tenant deployment still awaits its first owner (when the server says). */
+  bootstrap_required?: boolean;
+}

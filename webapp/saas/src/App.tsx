@@ -7,12 +7,12 @@ import {
   AccountMenu,
   NoTenantScreen,
   NotFoundScreen,
-  SignedOutScreen,
   TenantPicker,
   UnavailableScreen,
   UnsupportedScreen,
 } from "./screens/entry";
 import { BootstrapScreen } from "./screens/bootstrap";
+import { InvitedSignUp, SetupScreen, SignInScreen } from "./screens/signin";
 import { InviteScreen, captureInviteToken } from "./screens/invite";
 import { ReadyRoutes } from "./screens/routes";
 import { SessionProvider, useSession } from "./session";
@@ -134,18 +134,22 @@ function Body({ branding }: { branding: Branding }) {
           Loading…
         </p>
       );
-    case "signed_out":
+    case "signed_out": {
+      const href = signInHref(path);
+      if (route.name === "setup") return <SetupScreen />;
+      if (route.name === "invite") {
+        return (
+          <InvitedSignUp productName={branding.productName} signInHref={href} />
+        );
+      }
       return (
-        <SignedOutScreen
+        <SignInScreen
           productName={branding.productName}
-          signInHref={signInHref(path)}
-          deepLink={
-            route.name === "file" ||
-            route.name === "workspace" ||
-            route.name === "invite"
-          }
+          signInHref={href}
+          deepLink={route.name === "file" || route.name === "workspace"}
         />
       );
+    }
     case "unavailable":
       return <UnavailableScreen error={state.error} />;
     case "unsupported":
@@ -176,6 +180,7 @@ const TITLES: Record<string, string> = {
   file: "File",
   people: "People",
   invite: "Invitation",
+  setup: "Set up",
   not_found: "Page not found",
 };
 

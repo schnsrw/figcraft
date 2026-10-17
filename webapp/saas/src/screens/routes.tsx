@@ -1,4 +1,4 @@
-import { useRouter } from "../router";
+import { Link, useRouter } from "../router";
 import { FileScreen } from "./file";
 import { HomeScreen } from "./home";
 import { InviteScreen } from "./invite";
@@ -30,6 +30,16 @@ export function ReadyRoutes() {
       return <PeopleScreen />;
     case "invite":
       return <InviteScreen />;
+    case "setup":
+      return (
+        <section className="panel narrow">
+          <h1>Already set up</h1>
+          <p className="intro">This workspace already has an administrator.</p>
+          <Link className="button primary" to="/">
+            Go to your files
+          </Link>
+        </section>
+      );
     case "not_found":
       return null;
   }

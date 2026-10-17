@@ -45,7 +45,7 @@ export function readInviteToken(): string | null {
   }
 }
 
-function clearInviteToken(): void {
+export function clearInviteToken(): void {
   try {
     window.sessionStorage.removeItem(KEY);
   } catch {

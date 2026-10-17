@@ -468,3 +468,22 @@ th {
     animation: none !important;
   }
 }
+
+.linkbutton {
+  padding: 0;
+  color: var(--brand-primary);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+  border: 0;
+  background: none;
+}
+
+.separator {
+  margin: 4px 0;
+  text-align: center;
+}
+
+.centered {
+  text-align: center;
+}
