@@ -2,6 +2,8 @@
 //!
 //! Infrastructure adapters use these distinct types instead of passing interchangeable UUIDs.
 
+pub mod policy;
+
 use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
