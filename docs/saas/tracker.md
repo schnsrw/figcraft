@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); **Core slice: browser co-editing works on the cloud stack (4/5; CS-005 runtime branding in progress)** · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 in progress (14/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -21,8 +21,8 @@ the same commit as the completed task.
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
-| **Core slice** Browser co-editing on the cloud stack (pulled forward) | in progress | 4 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
-| S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
+| **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
+| S4 Identity, tenancy and authorization | in progress | 14 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
@@ -1207,41 +1207,317 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   real time and edits appear in the other browser. Known gap: a drag is sent when the command
   completes (on drop), not while dragging, because the protocol syncs committed batches; live
   in-progress transforms need an ephemeral channel beside presence (follow-up).
-- [ ] **CS-005** Make branding (product name, colours, logo, favicon, links) and deployment
+- [x] **CS-005** Make branding (product name, colours, logo, favicon, links) and deployment
   configuration settable from Docker environment variables, with no code change or image rebuild.
+  Evidence: landed in e20b5cd. The web image now ships deploy/saas/branding.json.tmpl as
+  /etc/caddy/branding/branding.json. web.Caddyfile renders it on each request to /branding.json with
+  Caddy `templates` (mime application/json). The response has Content-Type application/json;
+  charset=utf-8, Cache-Control no-cache and X-Content-Type-Options nosniff, with ETag and
+  Last-Modified stripped. Values come from FIGCRAFT_BRAND_PRODUCT_NAME, SHORT_NAME, PRIMARY_COLOR,
+  ACCENT_COLOR, LOGO_URL, FAVICON_URL, SUPPORT_URL, TERMS_URL, PRIVACY_URL and FOOTER_TEXT. Each is
+  emitted through sprig `default` plus `toJson` (Go encoding/json), so quotes, backslashes,
+  newlines, `<`/`>`/`&` and invalid UTF-8 can only produce one valid JSON string. Defaults are
+  FigCraft / FigCraft / #b7df79 / #94b85c, with the rest empty, which matches today's look. An
+  optional read-only ./brand:/srv/brand:ro mount (commented out in compose) is served at /brand/*
+  with nosniff, no-cache and a sandboxing CSP. A missing file returns 404, never the SPA fallback.
+  compose.yaml passes FIGCRAFT_BRAND_* only to the web service, because the cloud config rejects
+  unknown FIGCRAFT_* keys. env.example lists the defaults, with colours quoted. The SaaS shell
+  (webapp/saas/src/branding.ts) fetches /branding.json with a 2 s timeout and a 16 KiB cap and
+  validates every field. Names are cleaned of controls, bidi and zero-width characters, whitespace
+  is folded, and lengths are capped at 64/16/200 code points. Colours must match ^#[0-9a-fA-F]{6}$.
+  URLs must be a same-origin path starting with '/' (not '//'), with no whitespace or backslash, or
+  an https:// URL with a host and no credentials. Invalid fields fall back to their defaults. The
+  shell renders after branding loads, so there is no flash of the default name. It sets
+  document.title, the meta description, the --brand-primary and --brand-accent CSS tokens, the
+  header name and logo, the favicon, and footer links and text. The editor
+  (apps/figcraft-web/src/branding.rs, pure and host-tested with a junk sweep) fetches /branding.json
+  through web-sys and js_sys::Reflect, so no new web-sys features or Cargo.toml change were needed.
+  It applies the document title and the loading and failure text, set via textContent and never
+  innerHTML. Its static index.html now says only "Loading…". The editor's in-canvas accent is not
+  branded because crates/ui-egui exposes no public hook. Docs are in
+  docs/saas/branding-and-configuration.md: a variable table with default and validation for each, a
+  pointer table of the cloud env vars, and trademark and asset notes. No asset files were added.
+  Smoke test on the built image: an env value of `Acme "Design" \ </script>` plus a newline, ü and
+  an emoji round-trips through json.loads to the exact literal string, with no raw </script> in the
+  body. With no env set, the defaults are returned. /brand/missing.svg returns 404; / and /edit/
+  return 200.
 
 ## S4 — Identity, tenancy and authorization
 
 ### Authentication
 
-- [ ] **S4-001** Implement OIDC discovery, key rotation and authorization-code flow with PKCE.
+- [x] **S4-001** Implement OIDC discovery, key rotation and authorization-code flow with PKCE.
   Depends on S2-GATE.
-- [ ] **S4-002** Implement secure browser sessions, rotation and logout.
-- [ ] **S4-003** Implement single-tenant bootstrap administrator with forced bootstrap completion.
-- [ ] **S4-004** Implement service accounts with scoped, expiring and rotatable credentials.
-- [ ] **S4-005** Implement share-token generation, hashing, exchange, expiry and revocation.
-- [ ] **S4-006** Add authentication rate limits and safe failure responses.
+  Evidence: OIDC login is implemented with openidconnect 4.0.1 in crates/cloud-auth/src/oidc.rs. The
+  HTTP client in oidc_http.rs is an openidconnect AsyncHttpClient built on the workspace reqwest
+  with tls_backend_preconfigured over an explicit rustls ring config and webpki roots. It follows no
+  redirects, uses no proxy, has 5s connect / 15s request timeouts and caps response bodies at 1 MiB.
+  Every request passes an endpoint policy: https only, with plain http allowed only to a loopback
+  host when allow_insecure_loopback is set for tests; URLs with credentials or fragments are
+  refused. OidcProvider::discover(OidcConfig) validates the config and fetches discovery and JWKS.
+  The discovered issuer must equal the configured one, and the authorization, token and JWKS
+  endpoints must pass the same policy. begin_login(pool, return_to) makes a fresh 256-bit state,
+  nonce and PKCE verifier from ring SecureRandom and stores only SHA-256(state) in
+  oidc_login_attempts, with nonce, verifier, issuer and return_to, for 10 minutes. It returns
+  BeginLogin { authorization_url, state_cookie }; the URL is response_type=code with an S256
+  challenge and openid plus the configured scopes. return_to is limited to relative paths: printable
+  ASCII, a leading '/' with no '//' or backslash, and it must resolve to the same origin.
+  complete_login(pool, code, state, state_cookie) compares state to the cookie in constant time,
+  then consumes the attempt with one conditional UPDATE … RETURNING, so a state works once, before
+  expiry and only for its issuer. It redeems the code with the PKCE verifier and validates the ID
+  token with a public-client verifier: the alg allowlist is RS256/ES256 only, so none and HS* are
+  rejected; issuer and audience must match with no other audiences; the nonce must match; exp is
+  allowed 60s skew, iat may not be in the future or older than 10 minutes plus skew, and nbf is
+  checked separately because openidconnect doesn't check it. Display name and the bounded email,
+  email_verified, name and preferred_username claims are cleaned. A NoMatchingKey failure triggers
+  one rate-limited re-discovery (key_refresh_min_interval, default 60s) and a retry. The result is
+  LoginOutcome { principal_id, new_principal, return_to }. crates/cloud-storage/src/oidc_logins.rs
+  maps (issuer, subject) to a principal with resolve_identity: a first login inserts a 'user'
+  principal and its identity_links row in one transaction, with ON CONFLICT handling for a
+  concurrent first login; an existing link refreshes verified_metadata (a JSON object of at most
+  4096 bytes); a principal that isn't active gives PrincipalInactive. It also provides
+  insert_login_attempt, consume_login_attempt and a bounded delete_expired_login_attempts. All
+  errors are fixed non-leaking enums (OidcError::code() maps them to ErrorCode), and Debug output
+  redacts secrets. The 10 DB-backed tests listed in tests_run pass against a loopback mock provider
+  and the dev Postgres, covering the happy path, wrong nonce, wrong audience, expired token, nbf in
+  the future, replayed state, state expiry, an unknown kid triggering a rate-limited key refresh,
+  and alg none/HS256 rejected. HTTP routes and the cookie are not wired in this task (A1/integrator
+  work).
+- [x] **S4-002** Implement secure browser sessions, rotation and logout.
+  Evidence: crates/cloud-storage/src/sessions.rs + crates/cloud-auth/src/session_policy.rs. A
+  session token is 32 bytes from ring SecureRandom, written as base64url with no padding (43 chars).
+  It is returned once (Debug redacted), and only its SHA-256 goes into browser_sessions.token_hash.
+  create_session works only for an active principal. resolve_session refuses unknown, malformed,
+  revoked, idle-expired, absolute-expired and inactive-principal tokens with the same
+  SessionError::Refused. It slides the idle expiry, capped at the absolute expiry, writing at most
+  once per touch interval (default 60s) through a guarded UPDATE. rotate_session takes FOR UPDATE on
+  the old row, revokes it with 'rotated', and inserts a new row linked by rotated_from that keeps
+  the original absolute expiry, so rotation never extends a session. Replaying a rotated token is
+  refused, and of two concurrent rotations exactly one wins. Also: logout (idempotent),
+  revoke_all_for_principal(reason, capped at 10k), and a revoke_expired_sessions sweep.
+  SessionPolicy defaults to 8h idle, 7d absolute, 1h rotation interval and 60s touch. new()
+  validates the ranges, rotation_due(age, Login|PrivilegeChange) decides rotation, and set_cookie
+  gives `__Host-figcraft_session=<tok>; Max-Age=..; Path=/; Secure; HttpOnly; SameSite=Lax` with no
+  Domain; it refuses malformed tokens, so no header injection. There is also clear_cookie, plus a
+  strict cookie-header parser: 8 KiB cap, and a duplicate cookie means None. Dev-DB tests cover
+  hash-only storage, expiry via backdating, bounded slide, the rotation chain and replay, the
+  concurrent-rotation race, suspend/reactivate, logout and revoke-all isolation.
+- [x] **S4-003** Implement single-tenant bootstrap administrator with forced bootstrap completion.
+  Evidence: crates/cloud-storage/src/bootstrap.rs. ensure_bootstrap(tx, lifetime ≤ 7d) locks the
+  tenant row and issues a one-time token (only its hash is stored). Calling it again while pending
+  replaces the token, so a superseded token is refused, and once the tenant is done it returns
+  Completed with no token. complete_bootstrap(tx, token, principal) compares hashes in constant time
+  against the locked row and checks expiry. The principal must be an active user: service, pending
+  and unknown principals are refused. It upserts the principal as an active tenant_owner, marks the
+  row completed_by, and writes the audit event tenant.bootstrap.complete. bootstrap_required(pool,
+  tenant) stays true until a bootstrap is completed or an active owner exists (a suspended owner
+  does not count); this gives the API forced bootstrap completion. Tests cover one-time use,
+  superseded, expired, junk and cross-tenant tokens, invalid principals, an existing owner, and an
+  unknown tenant.
+- [x] **S4-004** Implement service accounts with scoped, expiring and rotatable credentials.
+  Evidence: crates/cloud-storage/src/service_accounts.rs. The fixed Scope allowlist is
+  documents:read, documents:write, exports:create and jobs:read. parse_scopes rejects anything off
+  the list, empty input and more than 64 entries, and it dedups; it has a junk sweep with a
+  deterministic 2000-case fuzz. create_service_account makes a service principal plus a
+  service_accounts row and audits it. issue_credential creates an `fcsa_`+43-char secret, returned
+  once and stored hash-only, with expiry ≤ 1 year and at most 5 live per account.
+  authenticate_credential(pool, secret) returns tenant, principal, account, credential and scopes.
+  It checks revocation and expiry, and requires the account, principal and tenant to be active.
+  Stored scopes that are off the allowlist are dropped, and an account left with none is refused. It
+  updates last_used_at at most once per 60s. rotate_credential issues a new secret and shortens the
+  old one to an overlap of 0..7d (0 revokes it at once). revoke_credential and
+  set_service_account_enabled (disable/enable) are audited and tenant-scoped. Tests cover every
+  path, including caps, cross-tenant NotFound, a disabled account, a suspended principal, and the
+  rotation overlap and expiry.
+- [x] **S4-005** Implement share-token generation, hashing, exchange, expiry and revocation.
+  Evidence: share links can now be generated, hashed, exchanged, given an expiry and revoked.
+  Generation, SHA-256-only storage and revocation came from C1. This change adds
+  exchange_share_token(pool, secret) -> ShareGrant{link_id, tenant_id, document_id, role,
+  created_by, link_expires_at, session_expires_at} in crates/cloud-storage/src/share_links.rs.
+  session_expires_at is computed in SQL as the earlier of the link's expiry and
+  now()+MAX_SHARE_SESSION_SECS (1 h). The grant never carries the secret. Exchange shares one query
+  with resolve_share_link, so both refuse the same things with a single Refused: unknown, malformed,
+  revoked or expired links, a document that is not active, and (new) a tenant that is not active.
+  Also added: list_share_links (tenant-scoped, newest first, capped at 500, includes revoked links,
+  never returns secrets or hashes); update_share_link, which changes or clears the label and resets
+  or clears the expiry on live links only, validates its input and returns None across tenants; and
+  ShareLinkRecord::live_at. Tests (prefix c6): the session end is bounded by the link expiry and by
+  1 h; revoked, malformed and archived-document links are refused; the Debug output holds no secret;
+  list and update are tenant-isolated, including bad-input cases. The API that mints share sessions
+  from a ShareGrant is not part of this task. partial
+- [x] **S4-006** Add authentication rate limits and safe failure responses.
+  Evidence: apps/figcraft-cloud/src/api/rate_limit.rs adds a token-bucket limiter keyed by client IP
+  and matched route template. IPv6 is grouped by /64 and IPv4-mapped addresses count as IPv4. The
+  default is a burst of 10 with one token back every 6 s. Memory is bounded at max_keys 10,000: idle
+  (refilled) buckets are evicted first, then the least recently used. It is installed as middleware
+  only on the /api/v1/auth router (and its fallback), so every auth endpoint merged there is limited
+  and resource routes are not. A refused request gets 429 with the rate_limited envelope and
+  Retry-After rounded up to whole seconds (at least 1), and no detail about the limit. The client IP
+  comes from api/client_ip.rs: the socket peer, unless the peer is inside
+  FIGCRAFT_TRUSTED_PROXY_CIDRS (new config key, default none, at most 64 CIDRs, validated). Only
+  then is X-Forwarded-For walked from the right, with header size and hop count capped, stopping at
+  the first untrusted address or at garbage. Tests show: burst then 429 then refill; separate
+  buckets per client and per route; rotating XFF without a trusted proxy does not escape the limit;
+  behind a trusted proxy each forwarded client gets its own bucket; a client cannot choose its
+  bucket by adding entries on the left.
 
 ### Tenant and role model
 
-- [ ] **S4-007** Implement tenant creation, suspension and plan assignment.
-- [ ] **S4-008** Implement tenant membership and owner/admin roles.
-- [ ] **S4-009** Implement teams, invitations, team membership, team-manager role and team ownership
+- [x] **S4-007** Implement tenant creation, suspension and plan assignment.
+  Evidence: crates/cloud-storage/src/tenants.rs adds create_tenant_with_owner. It validates the
+  slug: lowercase alphanumerics with single interior hyphens, at most 63 characters, no leading or
+  trailing hyphen, and no reserved route names such as admin/api/auth/oidc/scim/www. It also
+  validates the name (trimmed, 1-255 characters, no control characters), the region and the plan. In
+  one TenantTransaction it then reuses metadata::create_tenant, adds the tenant_owner membership
+  (the owner must be an active user principal, otherwise OwnerUnavailable and the transaction is
+  rolled back with no tenant row) and records the tenant.create audit event. A taken slug returns
+  Conflict. suspend_tenant (active to suspended, idempotent, optional bounded reason, audit
+  tenant.suspend) and reactivate_tenant (suspended to active, idempotent, audit tenant.reactivate)
+  lock the tenant row FOR UPDATE and refuse deleting/deleted tenants with InvalidState. assign_plan
+  checks the placeholder PLAN_ALLOWLIST (free/starter/team/business/enterprise/self_hosted) and
+  works while active or suspended; assigning the current plan is a no-op, and a change records
+  tenant.plan_assign with from/to. list_tenants_for_principal is a pool-level keyset page by tenant
+  id (PageSize max 100, has_more probe). It returns only active memberships with the member's role,
+  leaves out deleting/deleted tenants and keeps suspended tenants with their state. Dev-DB tests
+  cover every validation error, the owner rollback, the slug conflict, idempotent transitions with
+  exact audit counts, deleting-state refusal and two-page listing that leaves out suspended
+  memberships. Metadata helpers (TenantRow, tenant, state, page, PageSize::query_limit/as_usize)
+  became pub(crate) only; no behaviour change.
+- [x] **S4-008** Implement tenant membership and owner/admin roles.
+  Evidence: memberships.rs provides add_tenant_member (re-adds deleted members), get/list (bounded
+  at 100, keyset), change_tenant_member_role, suspend/reactivate and remove (soft-delete; drops
+  direct memberships, team memberships and permissions). Last-owner protection locks the tenant row
+  FOR UPDATE, then counts other active owners. DB tests prove the last owner cannot be demoted,
+  suspended or removed, can step down once a second owner exists, and that removal cascades. Role
+  boundaries are validated (InvalidRole).
+- [x] **S4-009** Implement teams, invitations, team membership, team-manager role and team ownership
   or grants for workspaces, projects and libraries.
-- [ ] **S4-010** Implement direct workspace/document membership, inherited team grants and
+  Evidence: crates/cloud-storage/src/teams.rs adds create_team, which makes the creator (an active
+  tenant member) the first team_manager, plus get/list (keyset), rename, archive (idempotent) and
+  add/remove/change-role for members. Each membership change locks the team row FOR UPDATE, so the
+  rule that a team keeps at least one active team_manager cannot be raced (LastManager on removing
+  or demoting the last one). Removed members can be re-added. Archived teams refuse new members,
+  ownership and grants, but grant revocation still works. set_owning_team sets or clears
+  owning_team_id on workspaces, projects and libraries; grant_to_team upserts workspace_team_grants
+  and library_team_grants; revoke_team_grant removes them. All of these record audit events: team.cr
+  eate/rename/archive/member_add/member_remove/member_role/ownership_set/ownership_clear/grant_set/g
+  rant_revoke. A team id from another tenant returns NotFound.
+  crates/cloud-storage/src/invitations.rs: create_invitation makes a 32-byte ring SecureRandom
+  token, encoded as 43 URL-safe base64 characters and returned once (Debug redacts it). Only its
+  SHA-256 is stored. The email is normalised, expiry defaults to 7 days (at most 30), and the tenant
+  and team must both be active. It records invitation.create without the email.
+  accept_invitation(pool, token, principal, verified_email) looks the invitation up by hash. In one
+  tenant transaction it locks the pending row FOR UPDATE (under READ COMMITTED the predicate is
+  re-checked after the wait, so exactly one concurrent accept wins), requires an active tenant
+  (TenantInactive otherwise), an active team and an active user principal, and an optional
+  verified-email match. It then adds or reactivates the tenant membership as viewer (an existing
+  active member keeps their role; a suspended one is refused), adds the team membership, marks the
+  invitation accepted and records invitation.accept, all committed together. Unknown, malformed,
+  expired, revoked and already-accepted tokens all return the same Refused error and change nothing.
+  revoke_invitation records invitation.revoke; list_pending_invitations is keyset-paged and never
+  returns the token. Dev-DB tests cover every one of these paths, including 4 concurrent contenders
+  over 3 rounds with exactly one winner (one team member, one audit row), and a suspended tenant
+  refusing acceptance that works again after reactivation.
+- [x] **S4-010** Implement direct workspace/document membership, inherited team grants and
   workspace-admin/editor/commenter/viewer roles.
-- [ ] **S4-011** Implement explicit sensitive permissions for billing, provider keys, support,
+  Evidence: set/remove workspace and document direct membership (active tenant members only; roles
+  validated per boundary), and set/remove team grants on workspaces and documents (the team must
+  exist in the tenant). Inheritance to projects and documents is covered by DB tests. Team roster
+  CRUD is S4-009 and was not done here; the tests write team_members directly.
+- [x] **S4-011** Implement explicit sensitive permissions for billing, provider keys, support,
   export and deletion.
-- [ ] **S4-012** Implement effective-role resolution and deny-by-default authorization checks.
+  Evidence: SensitivePermission in authz (billing, provider_keys, support, export, deletion) and
+  MemberPermission with grant/revoke/list in storage. Decision, documented in the authz module
+  header: no role ever implies a sensitive permission, not even tenant_owner, following
+  security.md's 'separate explicit permission'. billing.manage, tenant.export and tenant.delete need
+  tenant_owner plus the grant. provider_keys.manage, support.grant and tenant.export_audit need
+  tenant_owner or tenant_admin plus the grant. Granting permissions (member.manage_permissions) is
+  owner-only and needs no sensitive grant, so a new owner can bootstrap. Unit tests show the owner
+  is denied without the grant, a different grant does not substitute, and a grant never lifts an
+  insufficient role. DB tests show the owner starts with no permissions, grant/revoke are
+  idempotent, and members who are not active cannot be granted. Partial
+- [x] **S4-012** Implement effective-role resolution and deny-by-default authorization checks.
+  Evidence: crates/cloud-auth/src/authz.rs is a pure, deny-by-default policy with no storage access.
+  It defines an Action enum of 44 API and relay actions across the tenant, team, workspace, project
+  and document scopes:
+  tenant.view/update_policy/view_audit/export_audit/export/delete/transfer_ownership,
+  member.view/manage/manage_owners/manage_permissions, billing.manage, provider_keys.manage,
+  support.grant, service_account.manage, team.create/view/manage,
+  workspace.create/view/update/manage_members/archive/restore/delete,
+  project.create/view/update/archive/restore/delete, document.create/view/join_realtime/presence/com
+  ment/edit/create_version/export/share/rename/archive/restore/delete. Each action has a stable
+  dotted id. role_allows(role, action) is the matrix, and decide(&Subject, &Resource, Action)
+  returns Decision{allow, reason} with fixed Reason values. decide checks, in order: wrong scope,
+  unsupported action (transfer_ownership has no permission value yet, so it is denied for everyone),
+  principal inactive, tenant not active, no active tenant membership, resource state (archived
+  allows only view/export/restore/delete; deleting allows only restore; pending/suspended/deleted
+  allow nothing), role, then the sensitive grant. crates/cloud-storage/src/effective_roles.rs
+  provides resolve_tenant_access, resolve_workspace_access, resolve_project_access,
+  resolve_document_access and resolve_team_role. The effective role is the strongest of four
+  sources: the tenant baseline (owner/admin act as workspace_admin), direct workspace_members,
+  workspace_team_grants through an active membership in an active team (capped by the member's team
+  role), and document_members/document_team_grants. A commenter or viewer tenant role caps every
+  resource role. The resource state is the most restrictive along document->project->workspace.
+  Resolution reports which sources supplied the role, for audit. A principal that is not active, a
+  tenant that is not active, or a tenant membership that is not active yields no role and no
+  permissions. DB tests prove: a team grant gives editor; a direct viewer membership does not
+  downgrade it; removing the team membership removes inherited access; a suspended team grants
+  nothing; a suspended tenant denies even the owner.
 - [ ] **S4-013** Recheck authorization for long-running jobs before committing results.
 
 ### Isolation
 
 - [ ] **S4-014** Enable row-level security on every tenant-owned table.
-- [ ] **S4-015** Add tenant to every object, cache, lease and job key.
-- [ ] **S4-016** Normalize forbidden and not-found behavior according to disclosure policy.
+- [x] **S4-015** Add tenant to every object, cache, lease and job key.
+  Evidence: docs/saas/tenant-key-audit.md lists every object-store key family (all
+  tenants/{tenant}/..., enforced by the objects CHECK and the staging_key CHECK) and every DB key,
+  lock and lease: composite tenant PKs and FKs, the event log, idempotency, the sequencer fencing
+  token on (tenant_id, id), and every FOR UPDATE / SKIP LOCKED filtering on tenant_id. It also
+  covers jobs (random UUID with tenant_id NOT NULL, global claim index on purpose, kind is a job
+  type), secret-hash keys (globally unique by design), advisory locks (none), Redis (not used yet;
+  the doc sets the rule that keys are prefixed t:{tenant}:) and the relay's in-process maps (keyed
+  by document UUID with the tenant recorded and checked). No key family was found that lacked the
+  tenant or a globally unique id, so nothing needed fixing.
+- [x] **S4-016** Normalize forbidden and not-found behavior according to disclosure policy.
+  Evidence: api/error.rs adds ApiError, which always renders
+  {"error":{"code","message","request_id"}} from figcraft_cloud_domain::PublicError with the fixed
+  per-code message; the context middleware fills in the request ID. The module doc states the
+  disclosure policy taken from docs/saas/security.md: 401 before any lookup; missing, other-tenant
+  or invisible resources get 404 not_found; a visible resource without the permission gets 403
+  forbidden; tenant-level admin without a resource id gets 403. Helpers authorize_resource(found,
+  can_view, can_act) and denied(can_view) implement it. ApiJson<T> rejections map to 400, 413 or 415
+  without echoing parser text, and bare framework 400/405/413/415/422 responses under /api/ are
+  normalised into the envelope. Router tests show that an existing-but-invisible resource cannot be
+  told apart from a missing one, and that a viewer-only resource gets 403. Foundation (no tracker
+  id): health.rs now runs axum on 8081 with the same probe routes, bodies and status codes
+  (/healthz, /startupz, /readyz, /api/v1/healthz in api roles, /ws/v1/health upgrade diagnostic in
+  relay roles, legacy 404 and 405 bodies outside /api), and --check-ready still works. The context
+  middleware assigns a RequestId (X-Request-Id), validates and echoes traceparent, and writes a JSON
+  request log with method, matched route template, status and duration (never the raw path, query,
+  cookies or authorization). It also enforces a 16 KiB header cap (431), the declared Content-Length
+  cap, a 1024-request in-flight cap (503) and a 30 s deadline (503); DefaultBodyLimit defaults to 1
+  MiB. api::api_router(AppState) -> Router gives AppState holding PgPool, ObjectStore, ApiConfig,
+  Arc<dyn Authenticator> and the limiter. The Authenticated { principal, tenant: TenantContext,
+  session: SessionInfo } extractor is resolved by the Authenticator trait, with DenyAll as the
+  default and a fake used in tests.
 - [ ] **S4-017** Close active sessions after direct membership, team membership, team grant,
   share-link or tenant revocation.
+  Partial (2026-10-17): share-link, archived-document and suspended-tenant revocation now close live
+  relay sessions; membership, team and grant revocation do not yet. dead_share_links(pool,
+  &[(tenant, link)]) is bounded at 1024 links and returns the links that no longer open anything:
+  revoked, expired, deleted, wrong tenant, document not active, or tenant not active. In
+  crates/cloud-relay/src/collab_backend.rs, CloudBackend records every admitted (file, tenant, link)
+  in a RevocationWatch, capped at 256 links per file (a hello beyond that is refused as
+  UNAVAILABLE). RevocationSweeper::start(config, watch, hub_addr, interval), default
+  REVOCATION_INTERVAL of 5 s and minimum 50 ms, re-checks the watched links on its own DB connection
+  and thread. It sends Admin::Revoke for each dead link over the hub's managing connection, using a
+  random in-process key compared in constant time. Backend::admin checks the link against storage
+  again before it returns Handled.revoked, so the key cannot disconnect anyone whose link still
+  works. The hub then closes those clients with STOPPED, and new hellos are refused by admit. The
+  relay test (c6) shows: a live link survives several sweeps; once the link is revoked, its editor
+  is closed with STOPPED in under 5 s at a 100 ms interval; a new hello with that link gets REFUSED
+  while the other link still joins; archiving the document closes the remaining clients and refuses
+  new hellos. The storage test covers a suspended tenant.
 - [ ] **S4-018** Add support-access grants with reason, expiry and audit.
 
 ### API and testing
@@ -1249,6 +1525,8 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 - [ ] **S4-019** Implement tenant, team, invitation, workspace, project, document and member APIs.
 - [ ] **S4-020** Implement bounded search and opaque pagination cursors.
 - [ ] **S4-021** Add permission-matrix unit tests for every route and relay action.
+  Partial (2026-10-17): the role x action matrix test enumerates every pair against an independently
+  written expected table. The per-route and per-relay mapping comes once the routes exist.
 - [ ] **S4-022** Add cross-tenant API, repository, object, cache, job and realtime tests.
 - [ ] **S4-023** Add revocation race tests for active HTTP, job and WebSocket access.
 - [ ] **S4-024** Define external identity, organization, domain and group-claim-to-team mapping
@@ -1594,3 +1872,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S2/S3 follow-ups: plugin uniqueness by index, attributed retention holds, document quarantine, register-first object writes with an orphan sweep, legacy library/plugin import, typed retryable event errors and stale idempotency-key takeover (four parallel agents; schema 20261017000003). Core slice section added: browser co-editing pulled ahead of full S4–S6. |
 | 2026-10-17 | Core slice CS-001..CS-003: share links stored as hashed secrets; the cloud relay serves FigCraft's collaboration protocol on port 8082 (gateway `/ws/v1/collab`) with commit-before-broadcast durability, snapshot-first recovery and share-link admission; the browser editor is served at `/edit/` and joins from `#join=<link>`; `figcraft-cloud --create-share-link` prints a demo URL. CS-004 (two-browser demo through the stack) is running. |
 | 2026-10-17 | Core slice CS-004: the product owner confirmed two browsers co-editing one cloud document through the Compose stack (real-time cursors, edits synced on commit). Follow-up: stream in-progress drags. Core slice complete. |
+| 2026-10-17 | S4 round A and CS-005: axum API foundation with auth rate limits and the disclosure policy; OIDC login (openidconnect, PKCE, nonce, key rotation); browser sessions, bootstrap administrator and service accounts; deny-by-default effective-role authorization with memberships, team grants and explicit sensitive permissions; tenants, teams and invitations; share-link exchange with live revocation; tenant-key audit; runtime-configurable branding from Docker env. S4 reaches 14/25 (S4-017 and S4-021 partial). |

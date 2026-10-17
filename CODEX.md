@@ -143,7 +143,16 @@ the continuation point, a blocker or a major decision changes.
    `/edit/#join=` URL; see `docs/saas/core-slice.md`). Follow-ups: stream in-progress drags as
    ephemeral presence-like updates (today a drag syncs on drop), periodic snapshots during long
    sessions, a `log` logger in the cloud binary, revoking a link should disconnect live sessions.
-   NEXT: full S4 with axum (API) and the openidconnect crate (OIDC), both chosen by the owner. Testing policy: targeted suites per step and a quick scan before push; run the full
+   S4 is in progress (14/25): the axum API foundation (`apps/figcraft-cloud/src/api`), OIDC
+   (`cloud-auth::oidc`), sessions/bootstrap/service accounts, the `cloud-auth::authz` policy with
+   `effective_roles`, tenants/teams/invitations and share-link exchange are library-complete and
+   tested. NEXT (S4 round B): wire them into routes (S4-019/020: an `Authenticator` over sessions
+   and service accounts, login/callback/logout, tenant/team/invitation/workspace/project/document/
+   member APIs with cursors), RLS (S4-014), job recheck (S4-013), membership-revocation session
+   closing (S4-017), support access (S4-018), route/relay permission tests (S4-021..023), identity
+   mapping policy (S4-024), SAML via the broker (S4-025), then the S4 gate. Branding (CS-005) is
+   runtime env (`docs/saas/branding-and-configuration.md`). Before S5, evaluate Plane
+   (jamsocket/plane) against our own lease design. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.
    Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
    plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight
