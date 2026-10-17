@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (19/25); S6 in progress (1/31) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (20/25); S6 in progress (1/31) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 19 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 20 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | in progress | 1 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2169,12 +2169,19 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ### Admission and routing
 
-- [ ] **S5-001** Implement short-lived, document-bound realtime tickets. Depends on S3-GATE and
+- [x] **S5-001** Implement short-lived, document-bound realtime tickets. Depends on S3-GATE and
   S4-GATE.
-  Partial (2026-10-17): stateless HMAC realtime tickets (60 s, bound to tenant, principal, browser
+  Evidence (2026-10-18): stateless HMAC realtime tickets (60 s, bound to tenant, principal, browser
   session, document and access) are minted by `POST /api/v1/documents/{id}/realtime-ticket` and
-  admitted by the relay, which re-checks the live session and effective role (S4-019 round C). Open:
-  tickets are not yet tied to S5 room ownership routing.
+  admitted by the relay, which re-checks the live session and effective role on admission and in
+  the revocation sweep (S4-019). They now work with room ownership: a ticket presented to a
+  replica that does not own the room is checked there, passed on with the client to the owner
+  and checked again, so the client gets the ticket's own access and its batches are recorded as
+  its own principal's (`tickets_work_through_a_replica_that_does_not_own_the_room`, live
+  PostgreSQL/S3: owner and passed-on editors attributed correctly, a viewer's ticket read-only
+  through the front, bad tickets refused). The S4-019 suite still covers forged, expired,
+  other-document, logged-out-session and keyless-relay tickets and revocation. Tickets are not
+  single-use: they are short-lived and re-checked against the live session at every admission.
 - [x] **S5-002** Add relay admission that resolves authenticated principal, tenant and maximum role.
   Partial (2026-10-17): relay admission resolves the principal, tenant and maximum role from a
   realtime ticket and re-checks it on admission and in the revocation sweep; share-link admission
@@ -2706,3 +2713,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S5-012: SIGTERM/SIGINT drain for rolling releases (not ready, new relay connections turned away with the restarting code, grace period, then commit, snapshot, lease release and a restarting close for connected clients); verified against the real process. S5 reaches 18/25. |
 | 2026-10-18 | S5-011: emptied rooms stay warm for a configurable period before closing (saved, lease released); busy rooms snapshot by batch count or time instead of only on close. Hub housekeeping tick added (patch FP-008). S5 reaches 19/25. |
 | 2026-10-18 | S6-001: registered embedding host systems (issuer, audiences, exact https parent origins, max role, enabled flag) with rotating public EdDSA/ES256 keys, tenant RLS and a pre-tenant issuer lookup. S6 reaches 1/31. |
+| 2026-10-18 | S5-001: audited realtime tickets and covered them through the owner-routing path (a ticket at a non-owning replica is checked, passed on and checked again by the owner; attribution and access hold). S5 reaches 20/25. |

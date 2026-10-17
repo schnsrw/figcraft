@@ -11,7 +11,7 @@ use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, ProjectId, Role, TenantId, Uuid, WorkspaceId};
-use figcraft_cloud_relay::collab_backend::{CloudBackend, CloudBackendConfig, REFUSED, RevocationSweeper};
+use figcraft_cloud_relay::collab_backend::{CloudBackend, CloudBackendConfig, LeaseConfig, REFUSED, RevocationSweeper};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::memberships::{add_tenant_member, remove_tenant_member, set_workspace_member};
 use figcraft_cloud_storage::metadata::{create_document, create_project, create_workspace};
@@ -143,6 +143,19 @@ impl Fixture {
         let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
         let hosting = Hosting::serve(listener, backend, NetLimits { hello_timeout: Duration::from_secs(5), ..NetLimits::default() }).unwrap();
         let sweeper = RevocationSweeper::start(&self.config(keyed), watch, hosting.addr(), Duration::from_millis(100)).unwrap();
+        (hosting, sweeper)
+    }
+
+    /// A relay replica with the ticket key and room leases, reachable at its own address; with
+    /// its revocation sweeper.
+    fn replica(&self) -> (Hosting, RevocationSweeper) {
+        let listener = TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0))).unwrap();
+        let mut config = self.config(true);
+        config.leases = Some(LeaseConfig::new(format!("ws://{}/ws/v1/collab", listener.local_addr().unwrap())));
+        let backend = CloudBackend::connect(&config).unwrap();
+        let watch = backend.revocation_watch();
+        let hosting = Hosting::serve(listener, backend, NetLimits { hello_timeout: Duration::from_secs(5), ..NetLimits::default() }).unwrap();
+        let sweeper = RevocationSweeper::start(&config, watch, hosting.addr(), Duration::from_millis(100)).unwrap();
         (hosting, sweeper)
     }
 
@@ -352,5 +365,52 @@ fn tickets_admit_by_their_access_and_share_links_keep_working() -> TestResult {
     assert_eq!(Raw::join(unkeyed.addr(), &file, &ticket).refusal().as_deref(), Some(REFUSED));
     drop(sweeper);
     unkeyed.stop();
+    Ok(())
+}
+
+/// S5-001 with room ownership: a ticket presented to a replica that does not own the room is
+/// checked there, passed on with the client to the owner and checked again by it, so the client is
+/// admitted with the ticket's own access and its batches are recorded as its own principal's.
+#[test]
+fn tickets_work_through_a_replica_that_does_not_own_the_room() -> TestResult {
+    let Some(fixture) = Fixture::new()? else {
+        return Ok(());
+    };
+    let file = fixture.document.to_string();
+    let (editor, other_editor, viewer) = (fixture.member(Role::Editor), fixture.member(Role::Editor), fixture.member(Role::Viewer));
+    let expires = expiry(now(), MAX_TICKET_SECS);
+    let ((mut owner, _owner_sweeper), (mut front, _front_sweeper)) = (fixture.replica(), fixture.replica());
+
+    // The first editor opens the room at one replica, which owns it from then on.
+    let mut ada = Raw::join(owner.addr(), &file, &fixture.ticket(&editor, fixture.document, true, expires));
+    let (ada_id, seq, access, page) = ada.welcome();
+    assert_eq!(access, Access::Edit);
+    ada.rename(seq, 1, page, "At the owner");
+    let after_ada = ada.confirmation(ada_id, 1).ok_or("the owner's editor was not confirmed")?;
+
+    // A second editor's ticket reaches the other replica: it is passed on and admitted with edit
+    // access, and what it commits is attributed to it, not to the first editor or the replica.
+    let mut ellis = Raw::join(front.addr(), &file, &fixture.ticket(&other_editor, fixture.document, true, expires));
+    let (ellis_id, ellis_seq, ellis_access, ellis_page) = ellis.welcome();
+    assert_eq!((ellis_access, ellis_seq), (Access::Edit, after_ada));
+    ellis.rename(ellis_seq, 1, ellis_page, "Through the other replica");
+    ellis.confirmation(ellis_id, 1).ok_or("the passed-on editor was not confirmed")?;
+    assert_eq!(fixture.attributions(), vec![(1, editor.principal.to_string()), (2, other_editor.principal.to_string())]);
+
+    // A viewer's ticket through the front is read-only; the owner enforces it, not just the front.
+    let mut ben = Raw::join(front.addr(), &file, &fixture.ticket(&viewer, fixture.document, false, expires));
+    assert_eq!(ben.welcome().2, Access::View);
+    // Tickets the front can already see are bad (an edit ticket for a viewer, another document's,
+    // an expired one) are refused there like any bad link.
+    for bad in [
+        fixture.ticket(&viewer, fixture.document, true, expires),
+        fixture.ticket(&editor, fixture.other_document, true, expires),
+        fixture.ticket(&editor, fixture.document, true, now().saturating_sub(1)),
+    ] {
+        assert_eq!(Raw::join(front.addr(), &file, &bad).refusal().as_deref(), Some(REFUSED));
+    }
+    drop((ada, ellis, ben));
+    owner.stop();
+    front.stop();
     Ok(())
 }
