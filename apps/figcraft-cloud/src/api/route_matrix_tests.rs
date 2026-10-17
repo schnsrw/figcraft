@@ -165,6 +165,7 @@ enum AuthRoute {
     Login,
     Callback,
     Logout,
+    BackchannelLogout,
     Bootstrap,
     Exchange,
     Session,
@@ -239,6 +240,7 @@ const ROWS: &[Row] = &[
     row("GET", "/auth/login", "/auth/login", Send::Nothing, Kind::Auth(AuthRoute::Login), ""),
     row("GET", "/auth/callback", "/auth/callback", Send::Nothing, Kind::Auth(AuthRoute::Callback), ""),
     row("POST", "/auth/logout", "/auth/logout", Send::Nothing, Kind::Auth(AuthRoute::Logout), ""),
+    row("POST", "/auth/backchannel-logout", "/auth/backchannel-logout", Send::Nothing, Kind::Auth(AuthRoute::BackchannelLogout), ""),
     row("POST", "/auth/bootstrap/complete", "/auth/bootstrap/complete", Send::Token, Kind::Auth(AuthRoute::Bootstrap), ""),
     row("POST", "/auth/share/exchange", "/auth/share/exchange", Send::Token, Kind::Auth(AuthRoute::Exchange), ""),
     row("GET", "/auth/session", "/auth/session", Send::Nothing, Kind::Auth(AuthRoute::Session), ""),
@@ -324,7 +326,8 @@ fn expected(row: &Row, who: Who) -> Expected {
     if let Kind::Auth(route) = row.kind {
         return match route {
             // No OIDC provider configured: login and callback are unavailable for everyone.
-            AuthRoute::Login | AuthRoute::Callback => Some(503),
+            // Back-channel logout too: it needs the provider's keys (never a caller credential).
+            AuthRoute::Login | AuthRoute::Callback | AuthRoute::BackchannelLogout => Some(503),
             // Idempotent, same-origin (every request here carries our Origin).
             AuthRoute::Logout => Some(204),
             // Bootstrap exists only in single-tenant deployments.

@@ -357,6 +357,40 @@ pub async fn revoke_all_for_principal(pool: &PgPool, principal_id: PrincipalId, 
     Ok(result.rows_affected())
 }
 
+/// Most [`revoke_all_for_principal`] batches one [`revoke_all_for_identity`] call runs.
+pub const MAX_IDENTITY_REVOKE_BATCHES: u32 = 8;
+
+/// Revoke every unrevoked session of the principal linked to `(issuer, subject)` in
+/// `identity_links` (S4-025 back-channel logout). Sessions are not tied to the issuer that
+/// signed their login, so this ends all of that principal's browser sessions. An unknown
+/// identity revokes nothing (`Ok(0)`); out-of-range input is [`SessionError::InvalidInput`].
+/// Runs at most [`MAX_IDENTITY_REVOKE_BATCHES`] batches. Returns how many were revoked.
+pub async fn revoke_all_for_identity(pool: &PgPool, issuer: &str, subject: &str, reason: RevokeReason) -> Result<u64, SessionError> {
+    let in_range = |value: &str, max: usize| !value.is_empty() && value.chars().count() <= max;
+    if !in_range(issuer, 2048) || !in_range(subject, 1024) {
+        return Err(SessionError::InvalidInput);
+    }
+    let principal: Option<(String,)> = sqlx::query_as("SELECT principal_id::text FROM identity_links WHERE issuer = $1 AND subject = $2")
+        .bind(issuer)
+        .bind(subject)
+        .fetch_optional(pool)
+        .await
+        .map_err(|_| SessionError::Database)?;
+    let Some((principal,)) = principal else {
+        return Ok(0);
+    };
+    let principal: PrincipalId = principal.parse().map_err(|_| SessionError::Database)?;
+    let mut total = 0u64;
+    for _ in 0..MAX_IDENTITY_REVOKE_BATCHES {
+        let revoked = revoke_all_for_principal(pool, principal, reason).await?;
+        total = total.saturating_add(revoked);
+        if revoked < u64::try_from(MAX_REVOKE_BATCH).unwrap_or(u64::MAX) {
+            break;
+        }
+    }
+    Ok(total)
+}
+
 /// Mark up to `limit` (capped at [`MAX_REVOKE_BATCH`]) unrevoked but idle- or absolute-expired
 /// sessions revoked with reason `expired` (housekeeping; resolution already refuses them).
 pub async fn revoke_expired_sessions(pool: &PgPool, limit: i64) -> Result<u64, SessionError> {
