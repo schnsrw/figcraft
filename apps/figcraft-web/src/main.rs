@@ -15,20 +15,24 @@
 //!
 //! URL query flag: `?webgl` forces the WebGL2 backend instead of WebGPU.
 //!
-//! URL fragment: `#join=<url-encoded invite link>` joins that live session on startup (how a
-//! FigCraft Cloud share link opens the editor at `/edit/`); the fragment is then cleared so the
-//! link's secret doesn't stay in the address bar, history or bookmarks.
+//! URL fragment: `#join=<invite link or join code>` joins that live session once the page has
+//! loaded, so a bookmark opens a shared file. `join` takes the rest of the fragment: put it last.
+//! The link carries the session's secret; a fragment is never sent to the web host, but the address
+//! bar and the browser history keep it, so the URL is as private as the link itself. (FigCraft
+//! Cloud fork: after joining, the fragment is cleared with `history.replaceState`, so the secret
+//! leaves the address bar and the history entry.)
 //!
-//! Branding: on startup the page fetches `/branding.json` from its own origin (FigCraft Cloud's
-//! web container renders it from `FIGCRAFT_BRAND_*`); a valid product name replaces the document
-//! title and the loading text. Without it the defaults stay.
+//! Branding (FigCraft Cloud fork): on startup the page fetches `/branding.json` from its own origin
+//! (rendered from `FIGCRAFT_BRAND_*`); a valid product name replaces the title and loading text.
 
-// The branding validator and fragment parser are pure (tested on the host); only the browser
-// shell calls them.
+#[cfg(any(target_arch = "wasm32", test))]
+mod query;
+#[cfg(test)]
+mod query_tests;
+
+// The branding validator is pure (tested on the host); only the browser shell calls it.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod branding;
-#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
-mod hash;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

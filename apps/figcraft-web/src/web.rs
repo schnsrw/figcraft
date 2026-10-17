@@ -71,8 +71,15 @@ pub fn start() {
                     // on the socket wakes the page for a frame.
                     let ctx = cc.egui_ctx.clone();
                     session.live.install(Box::new(figcraft_collab_net::NetLink::new(std::sync::Arc::new(move || ctx.request_repaint()))));
-                    let fig = FigApp::new(session, Box::new(WebServices { reduce_motion, ctx: cc.egui_ctx.clone() }));
-                    Ok(Box::new(WebShell { fig, join: take_join_link() }))
+                    let mut fig = FigApp::new(session, Box::new(WebServices { reduce_motion, ctx: cc.egui_ctx.clone() }));
+                    // `#join=<link>`: join that session, as opening an invite link does on the desktop.
+                    let hash = web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default();
+                    if let Some(link) = crate::query::join_link(&hash) {
+                        let link = js_sys::decode_uri_component(link).ok().and_then(|s| s.as_string()).unwrap_or_else(|| link.to_string());
+                        figcraft_ui_egui::live::open_invite(&mut fig, &link);
+                        clear_join_fragment();
+                    }
+                    Ok(Box::new(WebShell { fig }))
                 }),
             )
             .await;
@@ -103,23 +110,17 @@ async fn fetch_text(url: &str) -> Option<String> {
     (body.len() <= branding::MAX_BRANDING_BYTES).then_some(body)
 }
 
-/// The `#join=<invite link>` the page was opened with, if any; a `#join` fragment is cleared from
-/// the address bar (`history.replaceState`, so no history entry keeps the secret) even when it
-/// can't be read.
-fn take_join_link() -> Option<String> {
-    let window = web_sys::window()?;
+/// FigCraft Cloud fork: drop a `#join` fragment from the address bar once it has been read
+/// (`history.replaceState`, so no history entry keeps the link's secret).
+fn clear_join_fragment() {
+    let Some(window) = web_sys::window() else { return };
     let location = window.location();
-    let hash = location.hash().ok().filter(|h| !h.is_empty())?;
-    let link = crate::hash::join_link(&hash);
-    if link.is_some() || hash.starts_with("#join") {
-        let without = format!("{}{}", location.pathname().unwrap_or_default(), location.search().unwrap_or_default());
-        if let Ok(history) = window.history()
-            && let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&without))
-        {
-            log::warn!("couldn't clear the join link from the address bar: {e:?}");
-        }
+    let without = format!("{}{}", location.pathname().unwrap_or_default(), location.search().unwrap_or_default());
+    if let Ok(history) = window.history()
+        && let Err(e) = history.replace_state_with_url(&wasm_bindgen::JsValue::NULL, "", Some(&without))
+    {
+        log::warn!("couldn't clear the join link from the address bar: {e:?}");
     }
-    link
 }
 
 fn query() -> String {
@@ -128,21 +129,11 @@ fn query() -> String {
 
 struct WebShell {
     fig: FigApp,
-    /// A `#join=` link to join on the first frame.
-    join: Option<String>,
 }
 
 impl eframe::App for WebShell {
     // `FigApp::ui` runs its own per-frame logic first (fonts, theme), like the desktop app.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        if let Some(link) = self.join.take() {
-            // The menu's path (`collab.join {link}`): a link that can't be used shows the join
-            // error as a toast and opens an empty Join dialog (the link, with its secret, isn't
-            // put back on screen).
-            if self.fig.run("collab.join", serde_json::json!({ "link": link })).is_none() {
-                figcraft_ui_egui::live::open_join(&mut self.fig, "");
-            }
-        }
         self.fig.ui(ui);
     }
 }
