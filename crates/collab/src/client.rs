@@ -3,10 +3,12 @@
 //! while the connection is down.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use figcraft_doc::{Document, NodeId};
 
-use crate::change::{Change, Prop};
+use crate::assets::{self, MissingImage};
+use crate::change::{Change, Entry, Prop};
 use crate::history::{BACK, BatchKind, FWD, Notice, Step, Touches};
 use crate::message::{Accepted, Access, CatchUp, ClientMsg, Hello, PROTOCOL, Peer, Presence, Processed, Resume, ServerMsg};
 use crate::replica::{Mode, Replica};
@@ -61,6 +63,13 @@ pub struct Client {
     notices: Vec<Notice>,
     /// What the server lets this client do (a viewer's edits are refused).
     access: Access,
+    /// Image bytes this client holds for images the server has only by reference (uploaded by
+    /// this client or fetched): they are put back into every replica rebuilt from the server's
+    /// placeholders.
+    blobs: BTreeMap<String, Arc<Vec<u8>>>,
+    /// Images that were uploaded to the server's asset store (hash, byte length): an edit that
+    /// adds one sends a reference instead of the bytes.
+    uploaded: BTreeMap<String, u64>,
 }
 
 /// The step with id `id` in either stack.
@@ -110,7 +119,96 @@ impl Client {
             history_limit: HISTORY_LIMIT,
             notices: Vec::new(),
             access,
+            blobs: BTreeMap::new(),
+            uploaded: BTreeMap::new(),
         })
+    }
+
+    /// The images of `doc` (an edited copy of [`document`](Self::document)) that a server taking
+    /// images by reference needs uploaded before `doc` is sent: new to the document, at least
+    /// `threshold` bytes, content-addressed (a SHA-256 key) and not uploaded yet. Upload them,
+    /// then [`mark_uploaded`](Self::mark_uploaded), then [`edit`](Self::edit).
+    pub fn images_to_upload(&self, doc: &Document, threshold: u64) -> Vec<(String, Arc<Vec<u8>>)> {
+        let have = &self.view.document().images;
+        doc.images
+            .iter()
+            .filter(|(k, img)| {
+                !have.contains_key(*k)
+                    && !self.uploaded.contains_key(*k)
+                    && assets::is_hash(k)
+                    && u64::try_from(img.bytes.len()).is_ok_and(|n| n >= threshold.max(1))
+            })
+            .map(|(k, img)| (k.clone(), img.bytes.clone()))
+            .collect()
+    }
+
+    /// Image `hash` of `len` bytes is in the server's asset store: an edit that adds it sends a
+    /// reference.
+    pub fn mark_uploaded(&mut self, hash: &str, len: u64) {
+        if assets::is_hash(hash) && len > 0 {
+            self.uploaded.insert(hash.to_string(), len);
+        }
+    }
+
+    /// The server no longer takes references (a new connection to one that does not): images are
+    /// sent inline again.
+    pub fn forget_uploads(&mut self) {
+        self.uploaded.clear();
+    }
+
+    /// The images the server has only by reference and whose bytes this client lacks, in hash
+    /// order.
+    pub fn missing_images(&self) -> Vec<MissingImage> {
+        self.view
+            .document()
+            .images
+            .iter()
+            .filter(|(_, img)| assets::is_placeholder(img))
+            .map(|(k, img)| MissingImage { hash: k.clone(), width: img.width, height: img.height })
+            .collect()
+    }
+
+    /// The bytes of image `hash` arrived (fetched from the asset store). The caller has checked
+    /// that they hash to `hash`. Returns whether the document refers to the image.
+    pub fn set_image_bytes(&mut self, hash: &str, bytes: Arc<Vec<u8>>) -> bool {
+        if bytes.is_empty() || !self.view.document().images.contains_key(hash) && !self.confirmed.document().images.contains_key(hash) {
+            return false;
+        }
+        self.blobs.insert(hash.to_string(), bytes);
+        self.hydrate();
+        true
+    }
+
+    /// Put the bytes this client holds into the placeholders of its replicas.
+    fn hydrate(&mut self) {
+        if self.blobs.is_empty() {
+            return;
+        }
+        for replica in [&mut self.confirmed, &mut self.view] {
+            let doc = replica.document_mut();
+            let keys: Vec<String> =
+                doc.images.iter().filter(|(k, img)| assets::is_placeholder(img) && self.blobs.contains_key(*k)).map(|(k, _)| k.clone()).collect();
+            for k in keys {
+                if let (Some(bytes), Some(img)) = (self.blobs.get(&k), doc.images.get_mut(&k)) {
+                    img.bytes = bytes.clone();
+                }
+            }
+        }
+    }
+
+    /// Turn the inline images an edit adds into references when they were uploaded (their bytes
+    /// are kept for the replicas rebuilt from the server's placeholders).
+    fn externalize(&mut self, changes: &mut [Change], doc: &Document) -> Result<(), Error> {
+        for c in changes.iter_mut() {
+            let Change::Put { entry: Entry::Image(key), value } = c else { continue };
+            let (Some(len), Some(img)) = (self.uploaded.get(key.as_str()).copied(), doc.images.get(key.as_str())) else { continue };
+            if assets::is_placeholder(img) {
+                continue;
+            }
+            *value = crate::docprops::ref_value(img.width, img.height, len)?;
+            self.blobs.insert(key.clone(), img.bytes.clone());
+        }
+        Ok(())
     }
 
     /// This client's id (its node ids are `id << 32 | counter`).
@@ -200,9 +298,12 @@ impl Client {
     /// [`edit`](Self::edit) with the undo step's label (`None`: not undoable, e.g. a change no
     /// command made; the redo steps stay).
     pub fn edit_with(&mut self, doc: &Document, undo_label: Option<&str>) -> Result<Option<ClientMsg>, Error> {
-        let d = diff(&self.view, doc)?;
+        let mut d = diff(&self.view, doc)?;
         if d.changes.is_empty() {
             return Ok(None);
+        }
+        if !self.uploaded.is_empty() {
+            self.externalize(&mut d.changes, doc)?;
         }
         let step = match undo_label {
             Some(label) => {
@@ -520,6 +621,7 @@ impl Client {
         if mine.rebased {
             self.repair(&before, &applied.touched, recompute)?;
         }
+        self.hydrate();
         Ok(())
     }
 
@@ -622,9 +724,12 @@ impl Client {
         let lost = self.pending.iter().filter(|p| p.kind != BatchKind::FollowUp).count();
         let notices = std::mem::take(&mut self.notices);
         let limit = self.history_limit;
+        let blobs = std::mem::take(&mut self.blobs);
         *self = Client::join(welcome)?;
         self.notices = notices;
         self.history_limit = limit;
+        self.blobs = blobs;
+        self.hydrate();
         if lost > 0 {
             self.notices.push(Notice::Lost { batches: lost });
         }
@@ -649,6 +754,7 @@ impl Client {
         }
         self.view = v;
         self.keep_ids();
+        self.hydrate();
     }
 
     /// `base`'s document with derived data recomputed over `touched` (`before`: the state before

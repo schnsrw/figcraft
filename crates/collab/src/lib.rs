@@ -21,6 +21,7 @@
 //!   connections and an undo checker (tests).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod assets;
 pub mod change;
 pub mod client;
 pub mod code;
@@ -36,6 +37,7 @@ pub mod sim;
 
 use std::collections::BTreeSet;
 
+pub use assets::{AssetDirectory, AssetPolicy, MissingImage};
 pub use change::Target;
 pub use change::{Change, DocProp, Entry, Json, Prop};
 pub use client::{Client, HISTORY_LIMIT};
@@ -123,6 +125,8 @@ impl Recompute for NoRecompute {
     fn recompute(&self, _: &mut Document, _: &Document, _: &BTreeSet<NodeId>) {}
 }
 
+#[cfg(test)]
+mod asset_tests;
 #[cfg(test)]
 mod client_tests;
 #[cfg(test)]

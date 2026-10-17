@@ -158,23 +158,73 @@ impl<T: Keyed> List<T> {
     }
 }
 
-/// An image as it travels in a change.
+/// An image as it travels in a change: inline (`bytes`, base64) or by reference (`asset`, see
+/// `crate::assets`). Exactly one of the two is present.
 #[derive(Serialize, Deserialize)]
 struct ImageValue {
     width: u32,
     height: u32,
     /// The encoded file (PNG, JPEG…), base64.
-    bytes: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bytes: Option<String>,
+    /// The file is held by the server's asset store, under the entry's content hash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    asset: Option<AssetValue>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AssetValue {
+    /// The file's size in bytes (0: not known).
+    len: u64,
 }
 
 fn image_json(img: &ImageData) -> Result<Json, Error> {
-    Json::of(&ImageValue { width: img.width, height: img.height, bytes: base64::engine::general_purpose::STANDARD.encode(img.bytes.as_slice()) })
+    if crate::assets::is_placeholder(img) {
+        return ref_value(img.width, img.height, 0);
+    }
+    Json::of(&ImageValue {
+        width: img.width,
+        height: img.height,
+        bytes: Some(base64::engine::general_purpose::STANDARD.encode(img.bytes.as_slice())),
+        asset: None,
+    })
+}
+
+/// The value of an image reference.
+pub(crate) fn ref_value(width: u32, height: u32, len: u64) -> Result<Json, Error> {
+    Json::of(&ImageValue { width, height, bytes: None, asset: Some(AssetValue { len }) })
+}
+
+/// The reference an image value is (`None`: it is inline, or not an image value).
+pub(crate) fn image_ref_of(value: &Json) -> Option<crate::assets::ImageRef> {
+    let v: ImageValue = value.read("image").ok()?;
+    match (v.bytes, v.asset) {
+        (None, Some(a)) => Some(crate::assets::ImageRef { width: v.width, height: v.height, len: a.len }),
+        _ => None,
+    }
 }
 
 fn image_of(value: &Json) -> Result<ImageData, Error> {
     let v: ImageValue = value.read("image")?;
-    let bytes = base64::engine::general_purpose::STANDARD.decode(v.bytes.as_bytes()).map_err(|e| Error::Invalid(format!("image: {e}")))?;
-    Ok(ImageData { bytes: Arc::new(bytes), width: v.width, height: v.height })
+    match (v.bytes, v.asset) {
+        (Some(bytes), None) => {
+            let bytes = base64::engine::general_purpose::STANDARD.decode(bytes.as_bytes()).map_err(|e| Error::Invalid(format!("image: {e}")))?;
+            Ok(ImageData { bytes: Arc::new(bytes), width: v.width, height: v.height })
+        }
+        (None, Some(_)) => Ok(crate::assets::placeholder(v.width, v.height)),
+        _ => Err(Error::Invalid("image: needs either bytes or an asset reference".into())),
+    }
+}
+
+/// Put an image: an inline one replaces what is there; a reference never replaces bytes this
+/// replica already holds (the bytes are the content the hash names).
+fn put_image(doc: &mut Document, key: &str, value: &Json) -> Result<(), Error> {
+    let img = image_of(value)?;
+    if crate::assets::is_placeholder(&img) && doc.images.get(key).is_some_and(|have| !crate::assets::is_placeholder(have)) {
+        return Ok(());
+    }
+    doc.images.insert(key.to_string(), img);
+    Ok(())
 }
 
 macro_rules! doc_scalars {
@@ -248,7 +298,12 @@ pub(crate) fn diff(a: &Document, b: &Document, out: &mut Vec<Change>) -> Result<
     diff_map(
         &a.images,
         &b.images,
-        |x, y| x.width == y.width && x.height == y.height && (Arc::ptr_eq(&x.bytes, &y.bytes) || x.bytes == y.bytes),
+        // Content-addressed: a placeholder (no bytes yet) is the same image as the one with them.
+        |x, y| {
+            x.width == y.width
+                && x.height == y.height
+                && (x.bytes.is_empty() || y.bytes.is_empty() || Arc::ptr_eq(&x.bytes, &y.bytes) || x.bytes == y.bytes)
+        },
         |k| Entry::Image(k.clone()),
         image_json,
         out,
@@ -284,10 +339,7 @@ pub(crate) fn apply(doc: &mut Document, change: &Change) -> Result<bool, Error> 
                 let snap: DevSnapshot = value.read("dev snapshot")?;
                 doc.dev_snapshots.insert(*k, Arc::new(snap));
             }
-            Entry::Image(k) => {
-                let img = image_of(value)?;
-                doc.images.insert(k.clone(), img);
-            }
+            Entry::Image(k) => put_image(doc, k, value)?,
         },
         Change::Remove { entry } => match entry {
             Entry::Style(k) => STYLES.remove(doc, k),

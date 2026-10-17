@@ -2,12 +2,16 @@
 //! batches. A pure state machine: the transport feeds it messages and delivers what it returns.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use figcraft_doc::{Document, NodeId};
 use serde::{Deserialize, Serialize};
 
+use crate::assets::{self, AssetDirectory, AssetPolicy};
 use crate::change::{Change, Entry, Prop, Target};
-use crate::message::{Accepted, Access, CatchUp, ClientMsg, Hello, PROTOCOL, Peer, Presence, Processed, ServerMsg, Signal, reads_signals};
+use crate::message::{
+    Accepted, Access, CatchUp, ClientMsg, Hello, PROTOCOL, Peer, Presence, Processed, ServerMsg, Signal, reads_image_refs, reads_signals,
+};
 use crate::replica::{Mode, Replica, create_change};
 use crate::{Error, Limits, docprops, same_secret};
 
@@ -74,6 +78,22 @@ pub struct Server {
     signals: BTreeSet<u32>,
     /// Who spotlights now (a newcomer is told).
     spotlight: Option<u32>,
+    /// Images by reference (FP-013): the asset store this server checks references against, and
+    /// what it tells clients (`None`: the server holds no assets and takes images inline only).
+    assets: Option<Assets>,
+    /// The connected clients that read image references (they announced it and were told the
+    /// asset policy). Every other client is sent batches and snapshots without them.
+    ref_readers: BTreeSet<u32>,
+    /// The largest batch (encoded bytes) accepted from a client; larger ones are refused with a
+    /// reason instead of being accepted and then failing to be stored.
+    max_batch_bytes: Option<usize>,
+}
+
+/// What a server that holds assets checks references against and tells clients.
+#[derive(Clone, Debug)]
+struct Assets {
+    directory: Arc<dyn AssetDirectory>,
+    policy: AssetPolicy,
 }
 
 /// The most client ids a session remembers for reconnecting (the oldest disconnected ones go
@@ -123,7 +143,25 @@ impl Server {
             journal: None,
             signals: BTreeSet::new(),
             spotlight: None,
+            assets: None,
+            ref_readers: BTreeSet::new(),
+            max_batch_bytes: None,
         }
+    }
+
+    /// Take images by reference: `directory` says which hashes this document may refer to, and
+    /// clients that announce [`IMAGE_REFS`](crate::message::IMAGE_REFS) are told `policy` and may
+    /// send references. Without this a server takes images inline only (and never sends a
+    /// reference).
+    pub fn set_assets(&mut self, directory: Arc<dyn AssetDirectory>, policy: AssetPolicy) {
+        self.assets = Some(Assets { directory, policy });
+    }
+
+    /// Refuse (with a reason) batches whose encoded form would be over `max` bytes (`None`:
+    /// no such limit). A store that cannot keep larger batches sets it, so they are refused
+    /// instead of accepted and lost.
+    pub fn set_max_batch_bytes(&mut self, max: Option<usize>) {
+        self.max_batch_bytes = max;
     }
 
     /// The session's state, to save (see [`restore`](Self::restore)).
@@ -198,7 +236,9 @@ impl Server {
                 if acc.seq != self.seq + 1 {
                     return Err(Error::Protocol(format!("batch {} after {}", acc.seq, self.seq)));
                 }
-                self.accept(acc.author, self.seq, &acc.changes)?;
+                // Accepted once, already checked then (an asset is never forgotten while a
+                // document refers to it, and the author may be gone).
+                self.accept_checked(acc.author, self.seq, &acc.changes, false)?;
                 self.issued.entry(acc.author).or_default().note(acc.batch_id, false);
                 self.next_client = self.next_client.max(acc.author.saturating_add(1));
                 self.remember(acc);
@@ -278,10 +318,24 @@ impl Server {
         }
         // The log holds every batch after `floor`.
         let floor = self.log.front().map_or(self.seq, |a| a.seq.saturating_sub(1));
-        let catch_up = match resume {
+        let refs = self.assets.is_some() && reads_image_refs(&hello.client_version);
+        let mut catch_up = match resume {
             Some(r) if r.seq <= self.seq && r.seq >= floor => CatchUp::Delta(self.log.iter().filter(|a| a.seq > r.seq).cloned().collect()),
             _ => CatchUp::Snapshot(self.state.snapshot().map_err(|e| refuse(&e.to_string()))?),
         };
+        // A client that cannot read image references is sent what it can read: the file without
+        // the images it holds only by reference.
+        if !refs {
+            catch_up = match catch_up {
+                CatchUp::Snapshot(changes) => CatchUp::Snapshot(assets::without_refs(&changes)),
+                CatchUp::Delta(batches) => CatchUp::Delta(
+                    batches
+                        .into_iter()
+                        .map(|a| if assets::has_refs(&a.changes) { Accepted { changes: assets::without_refs(&a.changes), ..a } } else { a })
+                        .collect(),
+                ),
+            };
+        }
         let id = match resume {
             Some(r) => r.client_id,
             None => {
@@ -306,6 +360,15 @@ impl Server {
             self.viewers.remove(&id);
         }
         let mut outs = vec![Outgoing::To(id, welcome), Outgoing::Others(id, ServerMsg::PeerJoined(peer))];
+        match self.assets.as_ref().filter(|_| refs) {
+            Some(a) => {
+                self.ref_readers.insert(id);
+                outs.push(Outgoing::To(id, ServerMsg::Signal { client_id: id, signal: Signal::assets(&a.policy) }));
+            }
+            None => {
+                self.ref_readers.remove(&id);
+            }
+        }
         if signals {
             self.signals.insert(id);
             outs.push(Outgoing::To(id, ServerMsg::Signal { client_id: id, signal: Signal::ready() }));
@@ -324,6 +387,7 @@ impl Server {
         self.acked.remove(&id);
         self.viewers.remove(&id);
         self.signals.remove(&id);
+        self.ref_readers.remove(&id);
         if self.spotlight == Some(id) {
             self.spotlight = None;
         }
@@ -353,7 +417,7 @@ impl Server {
                         let acc = Accepted { seq: self.seq, author: from, batch_id, changes };
                         self.remember(acc.clone());
                         self.note(Journal::Accepted(acc.clone()));
-                        vec![Outgoing::All(ServerMsg::Changes(acc))]
+                        self.broadcast(acc)
                     }
                     Err(e) => {
                         self.note(Journal::Refused { client: from, batch_id });
@@ -369,7 +433,7 @@ impl Server {
             // Checked and cleaned, then passed on to those who read signals; never stored but the
             // current spotlight.
             ClientMsg::Signal(sig) => {
-                let Some(sig) = sig.clean().filter(|s| s.kind != Signal::READY) else { return Vec::new() };
+                let Some(sig) = sig.clean().filter(|s| s.kind != Signal::READY && s.kind != Signal::ASSETS) else { return Vec::new() };
                 // A drag preview says layers are being moved: only someone who can edit says so.
                 if sig.kind == Signal::DRAG && self.viewers.contains(&from) {
                     return Vec::new();
@@ -427,11 +491,80 @@ impl Server {
 
     /// Validate and apply a batch; on success it has the next sequence number.
     fn accept(&mut self, from: u32, base_seq: u64, changes: &[Change]) -> Result<(), Error> {
+        self.accept_checked(from, base_seq, changes, true)
+    }
+
+    /// The batch to everyone who is here. Image references go only to the clients that read them;
+    /// the others are sent the batch without them.
+    fn broadcast(&self, acc: Accepted) -> Vec<Outgoing> {
+        if !assets::has_refs(&acc.changes) || self.peers.keys().all(|id| self.ref_readers.contains(id)) {
+            return vec![Outgoing::All(ServerMsg::Changes(acc))];
+        }
+        let plain = Accepted { changes: assets::without_refs(&acc.changes), ..acc.clone() };
+        self.peers
+            .keys()
+            .map(|id| Outgoing::To(*id, ServerMsg::Changes(if self.ref_readers.contains(id) { acc.clone() } else { plain.clone() })))
+            .collect()
+    }
+
+    /// Whether the batch `changes` from client `from` may name the images it refers to. Only
+    /// batches arriving from a connection are checked (`live`): a log being replayed was.
+    fn check_refs(&self, from: u32, changes: &[Change]) -> Result<(), Error> {
+        for c in changes {
+            let Change::Put { entry: Entry::Image(key), .. } = c else { continue };
+            let Some(r) = assets::image_ref(c) else { continue };
+            let Some(a) = self.assets.as_ref() else {
+                return Err(Error::Invalid("this server takes images inline only".into()));
+            };
+            if !self.ref_readers.contains(&from) {
+                return Err(Error::Invalid("image references need a client that announced them".into()));
+            }
+            let short = key.get(..8).unwrap_or("?");
+            if !assets::is_hash(key) {
+                return Err(Error::Invalid(format!("image {short}: a reference needs a SHA-256 key")));
+            }
+            if r.len == 0 || r.len > a.policy.max_bytes {
+                return Err(Error::Invalid(format!("image {short}: {} bytes isn't within 1..={}", r.len, a.policy.max_bytes)));
+            }
+            if r.width == 0 || r.height == 0 || r.width > assets::MAX_SIDE || r.height > assets::MAX_SIDE {
+                return Err(Error::Invalid(format!("image {short}: {}x{} pixels isn't a size it takes", r.width, r.height)));
+            }
+            if !a.directory.verified(key, r.len) {
+                return Err(Error::Invalid(format!("image {short} wasn't uploaded to this file (upload it first)")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether the encoded batch would be over [`set_max_batch_bytes`](Self::set_max_batch_bytes).
+    fn check_batch_size(&self, from: u32, changes: &[Change]) -> Result<(), Error> {
+        let Some(max) = self.max_batch_bytes else { return Ok(()) };
+        // The estimate is cheap; only a batch near the limit is encoded to be sure.
+        if weight(changes) < max / 2 {
+            return Ok(());
+        }
+        let probe = Accepted { seq: self.seq.saturating_add(1), author: from, batch_id: u64::MAX, changes: changes.to_vec() };
+        let size = crate::message::encode(&probe)?.len();
+        if size > max {
+            return Err(Error::Invalid(format!(
+                "this change is {} MB, more than the {} MB a single change can be here (large images need an app that sends them by reference)",
+                size.div_ceil(1 << 20),
+                max >> 20
+            )));
+        }
+        Ok(())
+    }
+
+    fn accept_checked(&mut self, from: u32, base_seq: u64, changes: &[Change], live: bool) -> Result<(), Error> {
         if changes.len() > self.limits.max_changes {
             return Err(Error::Invalid(format!("{} changes in one batch (at most {})", changes.len(), self.limits.max_changes)));
         }
         if base_seq > self.seq {
             return Err(Error::Protocol(format!("based on sequence {base_seq}, but the server is at {}", self.seq)));
+        }
+        if live {
+            self.check_refs(from, changes)?;
+            self.check_batch_size(from, changes)?;
         }
         for c in changes {
             if let Change::Create { id, .. } = c

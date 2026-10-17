@@ -2446,6 +2446,11 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   can never be stored (16 MiB event cap), so the room is closed and the sender retries for ever;
   late joiners download every image in one welcome; stored state holds each image twice.
   `crates/cloud-storage/tests/large_image_limits.rs` (no database), `large-images.md`.
+  (2/6) protocol and document model, behind the `imagerefs` hello word and an `assets` signal
+  (FP-013, SAAS-ADR-017, `docs/collab-protocol.md` "Images by reference"): the `asset` form of the
+  `Image` entry, placeholders, reference checks against an `AssetDirectory`, per-peer filtering for
+  older clients, oversized inline batches refused with a reason, client upload-then-reference and
+  hydrate API. `crates/collab/src/asset_tests.rs` (15 tests, no database).
 - [x] **S5-019** Preserve compatibility with current filesystem-server and desktop-hosted sessions.
   Evidence: Compatibility with self-hosted sessions is proven by three new test files; all pass. (1)
   apps/figcraft-server/tests/cloud_compat.rs starts figcraft-server in-process on loopback with a

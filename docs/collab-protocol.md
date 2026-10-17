@@ -142,9 +142,10 @@ As built:
   colour profile, image presets, annotation categories and library data (whole values); styles,
   comment threads, variable collections and variables (one entry per id plus the order of ids;
   the whole list when ids aren't unique); dev-mode snapshots (per layer); images (per content
-  hash, the encoded bytes as base64). The page order is the pages' positions.
+  hash: the encoded bytes as base64, or, for a server that holds assets, a reference; see "Images
+  by reference"). The page order is the pages' positions.
 - **Next**: this file's published library (it embeds a snapshot document; it moves with an asset
-  channel, together with images, which then stop travelling inside batches); the version history
+  channel); the version history
   (kept beside the document, not in it) on the standalone server; finer entries for modes,
   per-mode variable values and comment replies (see Identifiers).
 - **Changes** (`Change`): `Create {id, kind, parent, position, props}` (only the properties that
@@ -259,6 +260,43 @@ node deletes its subtree; ids are never allocated twice), plus the document-leve
 and `Remove` (see above). A snapshot is the list of changes that builds the document from nothing;
 `Welcome` carries one, or the missed batches when a client reconnects (see Offline and
 reconnect). A whole batch is accepted or rejected.
+
+## Images by reference
+
+*Built (FP-013; SAAS-ADR-017 in `docs/saas/large-images.md`).* An image inside a batch costs 4/3 of
+its size (base64 in a JSON value), and the batch must fit one message (64 MiB) and, on a server
+that keeps a durable log, one stored event; a file's snapshot and a late joiner's welcome carry
+every image. So a server that holds an asset store takes large images by reference:
+
+- **Capability.** A client puts the word `imagerefs` ([`IMAGE_REFS`]) in its hello's
+  `client_version` (this build announces it with `signals` and `hosting`). A server that holds
+  assets ([`Server::set_assets`]) answers a client that did with a `Signal` of kind `assets` whose
+  text is `<threshold>,<max_bytes>` ([`AssetPolicy`]; images of at least `threshold` bytes should
+  travel as references, none over `max_bytes` are taken). A client never sends a reference before
+  it has received that signal, and never sends the signal (the server drops it). A server that
+  holds no assets (the filesystem server, a desktop host, an older relay) never sends it, and the
+  client keeps sending images inline within the old limits. A client that did not announce the
+  word is never sent a reference: the server leaves them out of the batches, catch-up and snapshot
+  it sends that client.
+- **The value.** Same entry as an inline image, `Put { entry: Image(<sha256 hex>), value }` with
+  `{"width":W,"height":H,"asset":{"len":N}}` instead of `{"width","height","bytes"}`. Exactly one
+  of `bytes` and `asset` is present. Only a lower-case hex SHA-256 key can be a reference.
+- **The upload** is not a collaboration message. The client sends the bytes to the server's asset
+  store out of band (FigCraft Cloud: `PUT /api/v1/documents/{id}/images/{sha256}`), and only after
+  that succeeds sends the batch. The server accepts a reference only when its asset directory
+  ([`AssetDirectory::verified`]) knows the hash with exactly that length (a reference to nothing,
+  to another size or to another tenant's bytes is refused with a reason, `Reject`, like any other
+  invalid batch), when the author announced the capability, and within the size bounds. A server
+  replaying its stored log does not check again.
+- **Placeholders.** A replica that applies a reference holds an image with no bytes (a
+  *placeholder*). It never replaces bytes the replica already holds, and a placeholder equals the
+  image with bytes in a diff, so hydrating a placeholder is not an edit. A client keeps the bytes
+  it uploaded or fetched ([`Client::set_image_bytes`]) and puts them back whenever its view is
+  rebuilt from the server's placeholders; [`Client::missing_images`] lists what it still lacks.
+  The caller must check fetched bytes hash to the key.
+- **Oversized inline batches.** A server can set [`Server::set_max_batch_bytes`] (the cloud relay
+  uses 15 MiB, under its 16 MiB event cap): a larger batch is refused with a reason instead of
+  being accepted and then lost when the store cannot keep it.
 
 ## Ordering, optimism and convergence
 

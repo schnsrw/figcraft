@@ -64,3 +64,59 @@ The cap is per message and per event, so the only fix that keeps the relay's inv
 bounded event per batch, bounded welcome, bounded snapshot) is to stop putting image bytes in
 batches at all: batches carry a verified reference, bytes travel once over HTTP to object storage,
 and clients fetch them lazily by hash. See the ADR sections below as they land.
+
+## SAAS-ADR-017: images above a threshold travel as verified asset references
+
+Status: accepted by the task owner's brief (2026-10-18). Implementation lands in TS-009 steps 2 to 6;
+this section is updated with what each step actually does.
+
+### Decision
+
+1. **A reference, not bytes.** An image of at least `threshold` bytes (default 256 KiB, the server
+   says what it uses) is put in the document as `Put { entry: Image(<sha256>), value:
+   {"width":W,"height":H,"asset":{"len":N}} }`. The key is the content hash the document already
+   uses; `len` is the file's size. A batch with a reference is a few hundred bytes whatever the
+   image, so the event cap, the message cap, the welcome and the snapshot no longer depend on
+   image sizes. Only keys that are a lower-case hex SHA-256 can be references; other keys (the
+   colour picker's legacy scheme) and images under the threshold stay inline.
+2. **Bytes go over HTTP to object storage, content-addressed per tenant**, authorised by the same
+   credential as the room (a session, a realtime ticket or a share link), through new document
+   routes that reuse the existing asset machinery (`assets::store_asset_bytes`, `attach_asset`).
+   Per-image cap configurable (default 100 MiB); a per-tenant quota hook. Each upload is one
+   request (no resumable protocol: the existing machinery has only single presigned PUTs; chunking
+   is recorded as follow-up work).
+3. **The relay verifies before it accepts.** A batch that references a hash is accepted only if
+   the tenant holds a verified asset with that hash and that size
+   (`AssetDirectory::verified`), so one tenant cannot reference another's bytes and a reference
+   cannot outrun its upload. Replay of stored events does not re-check (it was checked once, and
+   a document's reference keeps the asset alive).
+4. **Negotiated capability, same pattern as the drag signal.** A client announces `imagerefs` in its
+   hello `client_version`. A server that holds assets answers that client with an `assets` signal
+   carrying its policy (`<threshold>,<max_bytes>`). Only then does the client send references.
+   * Old client, new relay: never told, never sent a reference (batches, delta catch-ups and
+     snapshots are filtered), keeps sending inline images; the relay still accepts them. New:
+     inline batches the event log cannot store (over 15 MiB encoded) are now refused with a reason
+     instead of being accepted and lost, so the retry loop of failure mode 1 ends for old clients too.
+   * New client, old server (the filesystem server, a desktop host, an older relay): no signal, so
+     the new client falls back to inline images within the old limits.
+5. **Lazy fetch with a placeholder.** A client that applies a reference holds a placeholder (an
+   image with no bytes). It fetches by hash through an authorised GET, verifies the bytes hash to
+   the key, caches by hash, and shows a placeholder and retries with backoff while the bytes are
+   missing. Range or streaming reads are not needed.
+6. **Garbage collection.** Uploading attaches the asset to the document through the existing
+   `object_references` rows (`owner_kind = document`), so an asset is never collected while its
+   document exists. An image the document stops using keeps its reference (the merge already keeps
+   unused images; file size only).
+7. **Snapshots and events carry references**, so the welcome, the snapshot and replay stay small;
+   the stored document holds placeholders, not bytes.
+
+### Consequences and limits
+
+* A reference's `len` is checked when it is accepted. State sent from a server's snapshot carries
+  `len: 0` (a placeholder holds no size); the bytes' hash is the real check on fetch.
+* A file exported from a cloud document includes only images the exporting client holds (all it
+  has fetched). A client that exports before the fetch finished has placeholders in the export.
+* An undo that re-adds an image removed earlier restores it from the client's own bytes inline
+  (the previous behaviour); over 15 MiB the relay refuses it with a reason. Documents rarely
+  remove images (the merge and the editor keep them).
+* Not covered: images embedded in the published library, which still move inline.

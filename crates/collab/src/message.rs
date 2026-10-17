@@ -23,9 +23,20 @@ pub const SIGNALS: &str = "signals";
 /// [`ServerMsg::Reported`]: a server sends them only to clients that say so.
 pub const HOSTING: &str = "hosting";
 
+/// The word a client puts in its [`Hello::client_version`] when it reads images by reference
+/// (`crate::assets`, FP-013): a server that holds assets tells such a client its
+/// [`AssetPolicy`](crate::assets::AssetPolicy) (a [`Signal::ASSETS`]) and sends it references; to
+/// any other client it never does.
+pub const IMAGE_REFS: &str = "imagerefs";
+
 /// The `client_version` this build announces: its version, then what it reads beyond the protocol.
 pub fn client_version() -> String {
-    format!("{} {SIGNALS} {HOSTING}", env!("CARGO_PKG_VERSION"))
+    format!("{} {SIGNALS} {HOSTING} {IMAGE_REFS}", env!("CARGO_PKG_VERSION"))
+}
+
+/// A [`Hello::client_version`] that announces [`IMAGE_REFS`].
+pub fn reads_image_refs(client_version: &str) -> bool {
+    client_version.split_whitespace().any(|w| w == IMAGE_REFS)
 }
 
 /// A [`Hello::client_version`] that announces [`SIGNALS`].
@@ -159,6 +170,10 @@ impl Signal {
     pub const MAX_DRAG_BOXES: usize = 12;
     /// From the server, about the client itself, right after its welcome: signals may be sent.
     pub const READY: &str = "ready";
+    /// From the server, to a client that announced [`IMAGE_REFS`]: the server holds assets, and
+    /// this is its [`AssetPolicy`](crate::assets::AssetPolicy) (`"<threshold>,<max_bytes>"`).
+    /// Never sent by a client.
+    pub const ASSETS: &str = "assets";
     /// Longest chat message (characters).
     pub const MAX_CHAT: usize = 100;
     /// Longest signal on the wire before it is cleaned (bytes of kind and text together).
@@ -222,6 +237,22 @@ impl Signal {
         Signal { kind: Signal::READY.into(), text: String::new() }
     }
 
+    /// The server's asset policy, for a client that announced [`IMAGE_REFS`].
+    pub fn assets(policy: &crate::assets::AssetPolicy) -> Signal {
+        Signal { kind: Signal::ASSETS.into(), text: format!("{},{}", policy.threshold, policy.max_bytes) }
+    }
+
+    /// The policy of an assets signal: `None` when it isn't one or is malformed (not two numbers,
+    /// or a threshold over the maximum).
+    pub fn asset_policy(&self) -> Option<crate::assets::AssetPolicy> {
+        if self.kind != Signal::ASSETS {
+            return None;
+        }
+        let (threshold, max_bytes) = self.text.split_once(',')?;
+        let (threshold, max_bytes) = (threshold.parse::<u64>().ok()?, max_bytes.parse::<u64>().ok()?);
+        (max_bytes > 0 && threshold <= max_bytes).then_some(crate::assets::AssetPolicy { threshold, max_bytes })
+    }
+
     /// A spotlight that is on.
     pub fn on(&self) -> bool {
         self.text == "on"
@@ -242,6 +273,7 @@ impl Signal {
             Signal::SPOTLIGHT if self.text.is_empty() || self.on() => Some(self),
             Signal::DRAG if self.drag_boxes().is_some() => Some(self),
             Signal::READY if self.text.is_empty() => Some(self),
+            Signal::ASSETS if self.asset_policy().is_some() => Some(self),
             _ => None,
         }
     }

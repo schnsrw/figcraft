@@ -55,6 +55,7 @@ These decisions are the default until a replacement is recorded in this director
 | SAAS-ADR-014 | Permit TypeScript only in a fork-owned React SaaS shell and browser bridge | React is useful for account, workspace and administration UX; Rust remains authoritative for editing, collaboration and persistence |
 | SAAS-ADR-015 | Defer NATS or another durable message bus | PostgreSQL jobs and an outbox are sufficient until measured throughput or fan-out proves otherwise |
 | SAAS-ADR-016 | Give each cloud document one identity across browser and desktop | Opening a cloud file must not create unrelated local copies or split its history |
+| SAAS-ADR-017 | Send large document images as verified asset references, bytes over HTTP to object storage | Inline base64 images are limited to about 11 MiB by the 16 MiB event cap and loop the sender above it; see [large-images.md](large-images.md) |
 
 ## Target repository layout
 
