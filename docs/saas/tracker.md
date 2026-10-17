@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 in progress (20/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 in progress (20/25); S5 in progress (5/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | in progress | 20 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 5 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -1822,6 +1822,15 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   rotation-first order exposes a real use-after-revoke (see issues; that test is #[ignore] until it
   is fixed), and because the HTTP, job and WebSocket layers are not covered: the API routes and
   S4-013 job rechecks are not on main.
+  Partial (2026-10-17): crates/cloud-storage/tests/job_revocation_races.rs races export completion
+  against losing document.export five ways in both forced orders;
+  crates/cloud-relay/tests/revocation_races_ws.rs proves tenant/document member removal, logout and
+  share-link revocation close a live relay connection within one sweep interval plus a round trip,
+  with an in-flight batch forced through a gate on the document row, and no confirmed batch after
+  the revoke; apps/figcraft-cloud/src/api/revocation_race_tests.rs proves HTTP requests that start
+  after a logout, revoke-all or tenant removal are refused. Open: a request already authenticated
+  and paused across the revoke commit can still finish its mutation (test #[ignore]d as a known
+  race; a per-request recheck inside the mutating transaction closes it).
 - [x] **S4-024** Define external identity, organization, domain and group-claim-to-team mapping
   policy.
   Partial (2026-10-17): docs/saas/identity-mapping-policy.md is defined but awaits owner
@@ -1853,6 +1862,34 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   parser. The doc lists the remaining steps exactly: confirm D-003 and pin the image digest; write
   crates/cloud-auth/tests/saml_broker.rs and a setup script; run it once and record the result; add
   an OIDC back-channel logout endpoint; wire the group claims.
+  Partial (2026-10-17): Ran end to end on 2026-10-17 against quay.io/keycloak/keycloak:26.4.2
+  (sha256:3617b09bb4b7510a8d8d9b9fc5707399e2d70688dbcc2f8fb013a144829be1b9, start-dev, Docker
+  29.8.0). It used one container with two realms, configured only through the admin REST API:
+  corp-idp is the SAML IdP (signed assertions, persistent NameID) and figcraft-broker is the OIDC
+  issuer (confidential client figcraft-cloud with PKCE S256, SAML IdP corp-saml with signature
+  validation and trust email, the first broker login flow that creates the user, and an
+  identity-provider redirector). The gated test crates/cloud-auth/tests/keycloak_saml.rs runs the
+  real OidcProvider (discover, begin_login, complete_login) with a bounded, cookie-keeping reqwest
+  browser (tls_backend_preconfigured with ring, no automatic redirects, 512 KiB and 20-step caps,
+  never leaves the broker origin). It submits the corp-idp login form and auto-submits the SAML
+  POST-binding form. It proves: (1) login creates a principal whose identity_links.subject is the
+  broker user id, linked to a persistent G-… NameID, with email alice@corp.example and
+  email_verified=true; (2) SSO returns the same principal with no duplicate; (3) logout:
+  sessions::logout ends the FigCraft session, ending the broker session reruns SAML silently, and
+  ending the IdP session too brings back the password form; (4) broker key rotation: a new
+  priority-1000 RS256 key whose kid is not in the cached JWKS is accepted by the same OidcProvider
+  instance, through the unknown-kid refresh; (5) SAML signing-key rotation: the broker refuses the
+  assertion (invalid_signature) until signingCertificate is updated, then login works again; (6)
+  revocation: a user disabled at corp-idp gets 'Account is disabled' and no callback, a user
+  disabled at the broker gets user_disabled and no callback, and a suspended FigCraft principal gets
+  PrincipalInactive. docs/saas/saml-federation.md records the exact versions, commands, REST
+  payloads and results. Still open: (a) FigCraft has no OIDC back-channel logout endpoint, so ending
+  the IdP or broker session does not end an existing FigCraft session (it only forces the IdP login
+  next time); (b) groups: memberOf is imported into a broker user attribute, but no groups claim is
+  emitted and complete_login does not keep it; (c) the test does not check that an ID token signed
+  with the old broker key is refused after that key is disabled, because complete_login does not
+  expose the raw token; (d) the image digest is not yet pinned in deploy/saas/env.example or
+  dependency-images.md, and the setup script is not in the repo.
 
 ### S4 gate
 
@@ -1878,18 +1915,34 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 - [ ] **S5-002** Add relay admission that resolves authenticated principal, tenant and maximum role.
 - [ ] **S5-003** Implement Redis room registry with bounded, namespaced keys.
 - [ ] **S5-004** Implement renewable room leases and ownership identity.
-- [ ] **S5-005** Implement monotonically increasing PostgreSQL fencing tokens.
+- [x] **S5-005** Implement monotonically increasing PostgreSQL fencing tokens.
+  Evidence: Implemented in S2-015: `figcraft-cloud-storage::events::claim_sequencer` advances a
+  per-document PostgreSQL fencing token that the S2-014 trigger keeps monotonic, and `append_events`
+  refuses any token that is not current (`StaleFence`) under the document row lock; the
+  S2-019/S2-020 race and failure probes cover takeovers and stale owners.
 - [ ] **S5-006** Implement gateway or client routing to current room owner.
 
 ### Room lifecycle
 
-- [ ] **S5-007** Restore collaboration server from verified snapshot and subsequent events.
+- [x] **S5-007** Restore collaboration server from verified snapshot and subsequent events.
+  Evidence: Implemented in S3-008: `DurableRoom::recover` and the cloud relay's `CloudBackend::open`
+  restore the newest verified snapshot (re-verified on read, falling back past corrupt ones) with
+  `Server::restore` and replay only the events after it; the snapshot_restore and collab_backend
+  probes prove snapshot-plus-replay equals pure replay.
 - [ ] **S5-008** Preserve client-id and reconnect state across room-owner failure.
-- [ ] **S5-009** Implement commit-before-broadcast event processing.
+- [x] **S5-009** Implement commit-before-broadcast event processing.
+  Evidence: Implemented in S2-018 and CS-002: `CloudBackend::flush` appends the hub's accepted
+  batches under the fencing token and commits before the hub sends any confirmation or broadcast; a
+  failed commit closes the file unconfirmed (collab_backend, room_failure_injection and s2_gate
+  probes).
 - [ ] **S5-010** Reject writes immediately after lease or fencing loss.
 - [ ] **S5-011** Implement idle room close and snapshot scheduling.
 - [ ] **S5-012** Implement graceful drain and client reconnect signal for rolling releases.
-- [ ] **S5-013** Implement quarantine when no verified snapshot/event chain can restore a room.
+- [x] **S5-013** Implement quarantine when no verified snapshot/event chain can restore a room.
+  Evidence: Implemented in the S3 follow-ups: `figcraft-cloud-storage::quarantine` marks documents
+  whose history cannot be restored (log gap, corrupt log, unverifiable snapshot chain, failed
+  replay) and `DurableRoom::open`/`recover` refuse quarantined documents before claiming; clearing
+  is audited (tests/quarantine.rs).
 
 ### Roles, presence and large data
 
@@ -1898,7 +1951,37 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 - [ ] **S5-016** Keep cursor, selection, chat and spotlight ephemeral and separately rate-limited.
 - [ ] **S5-017** Add bounded room, connection, message, rate and outbound-byte quotas.
 - [ ] **S5-018** Move large image transfer to verified asset references and negotiated capability.
-- [ ] **S5-019** Preserve compatibility with current filesystem-server and desktop-hosted sessions.
+- [x] **S5-019** Preserve compatibility with current filesystem-server and desktop-hosted sessions.
+  Evidence: Compatibility with self-hosted sessions is proven by three new test files; all pass. (1)
+  apps/figcraft-server/tests/cloud_compat.rs starts figcraft-server in-process on loopback with a
+  temp data dir and publishes a file with the server key. Desktop-app clients (engine Session +
+  NetLink/Guest) then join the same session from its figcraft://join?host= link, its ws:// URL and a
+  figcraft://join?server=ws:// link. All three get edit access and edits from each converge. The
+  server then restarts on the same port: everyone reconnects, an edit made offline goes through, and
+  clients resume with their old client ids, losing no confirmed edit. (2)
+  crates/collab-net/tests/cloud_compat.rs checks a desktop-hosted session (collab_net::host::Host).
+  The app's own client joins from both the host= link and the ws:// URL, and its edits reach the
+  host's inbox. A browser-style client joins and gets a confirmed edit to the host; it sends an
+  Origin and a browser User-Agent, uses the invite endpoint as its path, and speaks the protocol
+  through figcraft_collab::Client. An older client whose client_version has no 'signals'/'hosting'
+  words is still welcomed and is never sent Signal, Hosting or Reported. Hello.protocol=PROTOCOL+1
+  is refused with a message naming both versions. A frame with another WIRE_VERSION is never decoded
+  or welcomed. (3) crates/cloud-relay/tests/cloud_compat.rs (dev PostgreSQL+S3, fixture prefix f2)
+  runs the same app client code against the cloud relay. It joins Hosting::serve(CloudBackend) from
+  a cloud invite ws://<addr>/ws/v1/collab?file=<uuid>&token=<share secret>, and from that invite
+  re-shared as figcraft://join?server=. Edits converge and the committed sequence in PostgreSQL is
+  at least 2. After a relay restart on the same address both clients reconnect, catch up and push an
+  offline edit, which raises the committed sequence. A viewer link joins with view access and is
+  read-only. (4) All three link shapes round-trip through Invite::parse, link() and url(): host=,
+  server=wss://…/path/, and cloud ws(s)://…/ws/v1/collab?file&token. A cloud link always re-shares
+  as server=, never host=, keeps its /ws/v1/collab/ path, displays as a URL, is never read as a join
+  code, and keeps its secret out of the endpoint. Errors about broken cloud links never echo the
+  file id or secret. docs/saas/session-compatibility.md documents the compatibility matrix (client
+  builds against desktop host, figcraft-server and cloud relay, with PROTOCOL=2 and WIRE_VERSION=1)
+  and the rule for future protocol changes. That rule: additive changes behind client_version
+  capability words; breaking changes bump PROTOCOL in the shared hub, servers first; WIRE_VERSION
+  changes only with the encoding; link shapes are append-only; the cloud_compat tests are extended
+  in the same commit.
 
 ### Failure and performance verification
 
@@ -2204,3 +2287,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | Core slice CS-004: the product owner confirmed two browsers co-editing one cloud document through the Compose stack (real-time cursors, edits synced on commit). Follow-up: stream in-progress drags. Core slice complete. |
 | 2026-10-17 | S4 round A and CS-005: axum API foundation with auth rate limits and the disclosure policy; OIDC login (openidconnect, PKCE, nonce, key rotation); browser sessions, bootstrap administrator and service accounts; deny-by-default effective-role authorization with memberships, team grants and explicit sensitive permissions; tenants, teams and invitations; share-link exchange with live revocation; tenant-key audit; runtime-configurable branding from Docker env. S4 reaches 14/25 (S4-017 and S4-021 partial). |
 | 2026-10-17 | S4 round B: production authenticator and auth routes (OIDC login/callback, logout, bootstrap gate, share exchange), tenant/team/invitation/member and workspace/project/document APIs with HMAC cursors, row-level security on every tenant table with SECURITY DEFINER pre-tenant lookups, membership revocation closing sessions and relay connections, audited support access, job authorization recheck, cross-tenant and revocation race suites (which found and fixed a rotate-vs-revoke-all session race), identity-mapping policy draft and SAML procedure. S4 reaches 19/25. |
+| 2026-10-17 | S4 round C (part) and S5 round A: revocation races at HTTP, WebSocket and job level (S4-023 partial: one in-flight HTTP order); SAML through a Keycloak broker end to end (S4-025 partial: back-channel logout, groups claim); orchestration decided as our own PostgreSQL leases; filesystem-server and desktop session compatibility proven (S5-019); S5-005/007/009/013 recorded as delivered by S2/S3 work. S5 reaches 5/25. |
