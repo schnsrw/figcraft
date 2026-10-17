@@ -40,6 +40,8 @@ pub(super) struct CloudConfig {
     pub(super) secrets: BTreeMap<&'static str, Secret>,
     environment: Environment,
     public_url: Option<String>,
+    /// `FIGCRAFT_RELAY_ADVERTISE_URL`: where other relays and the gateway reach this replica.
+    relay_advertise_url: Option<String>,
     oidc_issuer: Option<String>,
     /// `OIDC_CLIENT_ID` and `OIDC_REDIRECT_URL` (S4 auth wiring): login is enabled only when
     /// these and `OIDC_ISSUER` are all set.
@@ -64,6 +66,7 @@ impl Default for CloudConfig {
             secrets: BTreeMap::new(),
             environment: Environment::Development,
             public_url: None,
+            relay_advertise_url: None,
             oidc_issuer: None,
             oidc_client_id: None,
             oidc_redirect_url: None,
@@ -157,6 +160,12 @@ impl CloudConfig {
                     };
                 }
                 "FIGCRAFT_PUBLIC_URL" => config.public_url = Some(value.to_string()),
+                "FIGCRAFT_RELAY_ADVERTISE_URL" => {
+                    if !is_relay_advertise_url(value) {
+                        return Err("FIGCRAFT_RELAY_ADVERTISE_URL must be a ws:// or wss:// URL without credentials, query or fragment");
+                    }
+                    config.relay_advertise_url = Some(value.to_string());
+                }
                 "FIGCRAFT_TRUSTED_PROXY_CIDRS" => config.trusted_proxies = crate::api::client_ip::parse_cidrs(value)?,
                 "OIDC_ISSUER" => config.oidc_issuer = Some(value.to_string()),
                 "OIDC_CLIENT_ID" => config.oidc_client_id = Some(value.to_string()),
@@ -195,6 +204,11 @@ impl CloudConfig {
     /// `FIGCRAFT_PUBLIC_URL`, when configured.
     pub(super) fn public_url(&self) -> Option<&str> {
         self.public_url.as_deref()
+    }
+
+    /// `FIGCRAFT_RELAY_ADVERTISE_URL`, when configured: it turns on room leases for this relay.
+    pub(super) fn relay_advertise_url(&self) -> Option<&str> {
+        self.relay_advertise_url.as_deref()
     }
 
     /// `FIGCRAFT_SINGLE_TENANT_ID`, when configured.
@@ -291,6 +305,13 @@ fn secret_setting(key: &str) -> Option<(&'static str, bool)> {
     }
 }
 
+/// A room lease's endpoint: a `ws://` or `wss://` URL with a host, no credentials, query or fragment.
+fn is_relay_advertise_url(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("wss://").or_else(|| value.strip_prefix("ws://")) else { return false };
+    let host = rest.split('/').next().unwrap_or("");
+    !host.is_empty() && !host.contains('@') && !value.contains(['?', '#', ' '])
+}
+
 fn is_cloud_setting(key: &str) -> bool {
     const PREFIXES: &[&str] = &["FIGCRAFT_", "DATABASE_", "REDIS_", "S3_", "OIDC_", "SESSION_", "EMBED_", "OTEL_"];
 
@@ -303,6 +324,7 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_ENV",
         "FIGCRAFT_DEPLOYMENT",
         "FIGCRAFT_PUBLIC_URL",
+        "FIGCRAFT_RELAY_ADVERTISE_URL",
         "FIGCRAFT_SINGLE_TENANT_ID",
         "FIGCRAFT_TRUSTED_PROXY_CIDRS",
         "DATABASE_URL",
@@ -343,6 +365,26 @@ mod tests {
     #[test]
     fn defaults_are_local_single_tenant_and_all_roles() {
         assert_eq!(CloudConfig::parse([]), Ok(CloudConfig::default()));
+    }
+
+    #[test]
+    fn relay_advertise_url_is_off_by_default_and_must_be_a_plain_websocket_url() {
+        assert_eq!(CloudConfig::default().relay_advertise_url(), None);
+        let ok = |url| CloudConfig::parse([("FIGCRAFT_RELAY_ADVERTISE_URL", url)]).map(|c| c.relay_advertise_url().map(str::to_string));
+        assert_eq!(ok("ws://relay-1.internal:8082/ws/v1/collab"), Ok(Some("ws://relay-1.internal:8082/ws/v1/collab".to_string())));
+        assert_eq!(ok("wss://relay.example.com/ws/v1/collab"), Ok(Some("wss://relay.example.com/ws/v1/collab".to_string())));
+        for bad in [
+            "http://relay:8082",
+            "ws://",
+            "ws:///path",
+            "ws://user:pass@relay:8082/x",
+            "ws://relay:8082/x?token=1",
+            "ws://relay:8082/x#frag",
+            "relay:8082",
+            "ws://re lay/x",
+        ] {
+            assert!(ok(bad).is_err(), "{bad} must be refused");
+        }
     }
 
     #[test]

@@ -47,17 +47,19 @@ use std::net::SocketAddr;
 use std::sync::mpsc::{RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::document_snapshots::store_snapshot;
 use figcraft_cloud_storage::events::{MAX_APPEND_BATCHES, append_events};
 use figcraft_cloud_storage::objects::{ObjectStore, ObjectStoreSettings};
+use figcraft_cloud_storage::quarantine::{QuarantineError, quarantine_reason};
 use figcraft_cloud_storage::realtime_tickets::{TicketKey, looks_like_ticket, verify as verify_ticket};
 use figcraft_cloud_storage::revocation::{
     MAX_CHECKED_MEMBERS, MemberAdmission, RevocationError, admit_member, dead_member_admissions, parse_member_token,
 };
+use figcraft_cloud_storage::room_leases::{AcquireRoom, acquire_room_claim, release_room, renew_room};
 use figcraft_cloud_storage::sessions::SessionLimits;
 use figcraft_cloud_storage::share_links::{MAX_CHECKED_LINKS, ShareRole, dead_share_links, resolve_share_link};
 use figcraft_collab::message::{Access, Admin, AdminReply};
@@ -74,6 +76,13 @@ use crate::DurableRoom;
 pub const REFUSED: &str = "this link isn't valid (it may have been revoked or have expired)";
 /// What a hello is told when the document can't be served right now.
 pub const UNAVAILABLE: &str = "this document can't be opened right now: try again in a moment";
+/// What a hello is told when another relay replica owns the document's room right now.
+pub const OWNED_ELSEWHERE: &str = "this document is open on another server: try again in a moment";
+/// Default lifetime of a room lease. A relay that dies leaves its rooms unavailable for at most
+/// this long; the fencing token stops its late writes either way.
+pub const DEFAULT_LEASE_LIFETIME: Duration = Duration::from_secs(15);
+/// Default interval between lease renewals (a third of the lifetime).
+pub const DEFAULT_LEASE_RENEWAL: Duration = Duration::from_secs(5);
 /// The producer recorded with the snapshots this backend stores.
 pub const PRODUCER: &str = concat!("figcraft-cloud-relay ", env!("CARGO_PKG_VERSION"));
 /// The name of [`base_document`] (fixed: the document's own name is metadata, not content).
@@ -114,6 +123,31 @@ pub struct CloudBackendConfig {
     /// The key realtime tickets are verified with (derived from `SESSION_SIGNING_KEY`, the same
     /// one the API mints with). `None`: ticket hellos are refused like an unknown link.
     pub ticket_key: Option<TicketKey>,
+    /// Room leases (S5-003/004): `None` serves every room without one, as a single relay does.
+    pub leases: Option<LeaseConfig>,
+}
+
+/// Room leases for a relay replica.
+#[derive(Clone, Debug)]
+pub struct LeaseConfig {
+    /// A WebSocket URL (`ws://` or `wss://`, no credentials) where other relays and the gateway
+    /// reach this replica; stored in the lease so a client can be sent to the room's owner.
+    pub endpoint: String,
+    /// How long a lease lasts without a renewal (5 to 120 s).
+    pub lifetime: Duration,
+    /// How often held leases are renewed; well under `lifetime`.
+    pub renew_every: Duration,
+}
+
+impl LeaseConfig {
+    #[must_use]
+    pub fn new(endpoint: impl Into<String>) -> Self {
+        Self { endpoint: endpoint.into(), lifetime: DEFAULT_LEASE_LIFETIME, renew_every: DEFAULT_LEASE_RENEWAL }
+    }
+
+    fn lifetime_seconds(&self) -> i32 {
+        i32::try_from(self.lifetime.as_secs()).unwrap_or(i32::MAX)
+    }
 }
 
 impl CloudBackendConfig {
@@ -127,6 +161,7 @@ impl CloudBackendConfig {
             max_connections: 8,
             max_open: 1024,
             ticket_key: None,
+            leases: None,
         }
     }
 }
@@ -327,6 +362,43 @@ struct OpenDoc {
     pending: Vec<(PrincipalId, Accepted)>,
     /// The sequence of the latest snapshot stored (or restored).
     snapshot_seq: Option<u64>,
+    /// Whether this relay holds the room's lease (under `fencing_token`).
+    leased: bool,
+}
+
+/// What the lease renewer keeps for a held lease.
+struct HeldLease {
+    tenant: TenantId,
+    document: CloudDocumentId,
+    fencing_token: i64,
+    /// When the lease was last confirmed live; past the lifetime it is treated as lost.
+    confirmed: Instant,
+}
+
+/// The leases this relay holds, shared with the renewer task.
+#[derive(Default)]
+struct Leases {
+    held: Mutex<HashMap<String, HeldLease>>,
+    /// Files whose lease was lost; the next flush closes them.
+    lost: Mutex<Vec<String>>,
+}
+
+impl Leases {
+    fn held(&self) -> MutexGuard<'_, HashMap<String, HeldLease>> {
+        self.held.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn lost(&self) -> MutexGuard<'_, Vec<String>> {
+        self.lost.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The lease a restore takes before restoring.
+#[derive(Clone)]
+struct LeaseParams {
+    owner: Uuid,
+    endpoint: String,
+    lifetime_seconds: i32,
 }
 
 /// A [`Backend`] serving cloud documents (see the module docs).
@@ -343,12 +415,16 @@ pub struct CloudBackend {
     failed: Vec<String>,
     watch: RevocationWatch,
     ticket_key: Option<TicketKey>,
-    /// How restores running on the runtime tell the hub they finished (set by the hub).
-    wake: Option<Wake>,
+    /// How restores and the lease renewer running on the runtime tell the hub (set by the hub).
+    wake: Arc<Mutex<Option<Wake>>>,
     /// Restores finished on the runtime, not yet taken by the hub.
     finished: Finished,
     /// Files being restored on the runtime (they count against `max_open`).
     opening: HashSet<String>,
+    /// This process's identity in room leases (new each start).
+    owner: Uuid,
+    lease: Option<LeaseConfig>,
+    leases: Arc<Leases>,
 }
 
 type Finished = Arc<Mutex<Vec<(String, Result<(Server, OpenDoc), String>)>>>;
@@ -373,6 +449,12 @@ impl CloudBackend {
                 .connect_lazy(&config.database_url)
                 .map_err(|_| CloudBackendError::Database)?
         };
+        let wake: Arc<Mutex<Option<Wake>>> = Arc::default();
+        let leases: Arc<Leases> = Arc::default();
+        let owner = Uuid::new_v4();
+        if let Some(lease) = config.leases.clone() {
+            runtime.spawn(renew_leases(pool.clone(), config.timeout, lease, owner, leases.clone(), wake.clone()));
+        }
         Ok(Self {
             runtime,
             pool,
@@ -385,9 +467,12 @@ impl CloudBackend {
             failed: Vec::new(),
             watch: RevocationWatch::new(),
             ticket_key: config.ticket_key.clone(),
-            wake: None,
+            wake,
             finished: Finished::default(),
             opening: HashSet::new(),
+            owner,
+            lease: config.leases.clone(),
+            leases,
         })
     }
 
@@ -407,6 +492,35 @@ impl CloudBackend {
     /// Documents open or being restored now.
     fn open_or_opening(&self) -> usize {
         self.open.len() + self.opening.len()
+    }
+
+    /// The lease a restore takes first (`None`: leases are off).
+    fn lease_params(&self) -> Option<LeaseParams> {
+        self.lease.as_ref().map(|lease| LeaseParams {
+            owner: self.owner,
+            endpoint: lease.endpoint.clone(),
+            lifetime_seconds: lease.lifetime_seconds(),
+        })
+    }
+
+    /// Start renewing the lease of a document that just opened.
+    fn hold(&self, file: &str, doc: &OpenDoc) {
+        if doc.leased {
+            self.leases.held().insert(
+                file.to_string(),
+                HeldLease { tenant: doc.tenant, document: doc.document, fencing_token: doc.fencing_token, confirmed: Instant::now() },
+            );
+        }
+    }
+
+    /// Stop renewing and release the lease of a document this relay is closing.
+    fn release(&self, file: &str, doc: &OpenDoc) {
+        if !doc.leased {
+            return;
+        }
+        self.leases.held().remove(file);
+        let (pool, timeout, owner) = (&self.pool, self.timeout, self.owner);
+        self.runtime.block_on(release_lease(pool, timeout, file, doc.tenant, doc.document, owner, doc.fencing_token));
     }
 
     /// Run `future` on the backend's runtime, giving up after the timeout (`None`).
@@ -475,7 +589,120 @@ impl CloudBackend {
     /// Recover `document` as its new sequencer, on the calling (hub) thread.
     fn recover(&self, file: &str, admitted: Admitted, document: CloudDocumentId) -> Result<(Server, OpenDoc), String> {
         let (pool, store, limits, timeout) = (self.pool.clone(), self.store.clone(), self.limits, self.timeout);
-        self.runtime.block_on(recover_document(pool, store, limits, timeout, file.to_string(), admitted, document))
+        let lease = self.lease_params();
+        self.runtime.block_on(recover_document(pool, store, limits, timeout, file.to_string(), admitted, document, lease))
+    }
+}
+
+/// Lease `document` for this relay and claim its fence, in one committed transaction. A room owned
+/// by another replica (live lease) is refused as [`OWNED_ELSEWHERE`]; a quarantined, missing or
+/// archived document as [`UNAVAILABLE`] before it is fenced.
+async fn acquire_lease(
+    pool: &PgPool,
+    timeout: Duration,
+    file: &str,
+    tenant: TenantId,
+    document: CloudDocumentId,
+    params: &LeaseParams,
+) -> Result<figcraft_cloud_storage::events::SequencerClaim, String> {
+    let attempt = async {
+        let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| "begin")?;
+        match quarantine_reason(&mut transaction, document).await {
+            Ok(None) | Err(QuarantineError::NotFound) => {}
+            Ok(Some(_)) => return Err("quarantined"),
+            Err(_) => return Err("quarantine check"),
+        }
+        let (acquired, claim) =
+            acquire_room_claim(&mut transaction, document, params.owner, &params.endpoint, params.lifetime_seconds).await.map_err(|_| "acquire")?;
+        match (acquired, claim) {
+            (AcquireRoom::Acquired(_), Some(claim)) => {
+                transaction.commit().await.map_err(|_| "commit")?;
+                Ok(Some(claim))
+            }
+            _ => Ok(None),
+        }
+    };
+    match tokio::time::timeout(timeout, attempt).await {
+        Ok(Ok(Some(claim))) => Ok(claim),
+        Ok(Ok(None)) => {
+            log::info!("document {file}: its room is owned by another relay replica");
+            Err(OWNED_ELSEWHERE.into())
+        }
+        Ok(Err(stage)) => {
+            log::error!("document {file}: its room lease couldn't be taken ({stage})");
+            Err(UNAVAILABLE.into())
+        }
+        Err(_) => {
+            log::error!("document {file}: taking its room lease timed out");
+            Err(UNAVAILABLE.into())
+        }
+    }
+}
+
+/// Release this relay's exact lease (a failure only means it expires on its own).
+async fn release_lease(pool: &PgPool, timeout: Duration, file: &str, tenant: TenantId, document: CloudDocumentId, owner: Uuid, fencing_token: i64) {
+    let attempt = async {
+        let mut transaction = begin_tenant_transaction(pool, tenant).await.map_err(|_| ())?;
+        release_room(&mut transaction, document, owner, fencing_token).await.map_err(|_| ())?;
+        transaction.commit().await.map_err(|_| ())
+    };
+    if !matches!(tokio::time::timeout(timeout, attempt).await, Ok(Ok(()))) {
+        log::warn!("document {file}: its room lease couldn't be released (it expires on its own)");
+    }
+}
+
+/// Renew every held lease each `config.renew_every`. A lease the database says is no longer this
+/// relay's (taken over, expired, or the fence moved), or one that couldn't be confirmed for its
+/// whole lifetime, is lost: the file is queued for the hub to close at its next flush.
+async fn renew_leases(pool: PgPool, timeout: Duration, config: LeaseConfig, owner: Uuid, leases: Arc<Leases>, wake: Arc<Mutex<Option<Wake>>>) {
+    let mut tick = tokio::time::interval(config.renew_every.max(Duration::from_millis(100)));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let snapshot: Vec<(String, TenantId, CloudDocumentId, i64, Instant)> =
+            leases.held().iter().map(|(f, h)| (f.clone(), h.tenant, h.document, h.fencing_token, h.confirmed)).collect();
+        let mut lost = Vec::new();
+        for (file, tenant, document, token, confirmed) in snapshot {
+            // Stamped before the request: the database's expiry counts from when it ran, so the
+            // relay's own deadline is never later than the lease's.
+            let asked = Instant::now();
+            let attempt = async {
+                let mut transaction = begin_tenant_transaction(&pool, tenant).await.map_err(|_| ())?;
+                let renewed = renew_room(&mut transaction, document, owner, token, config.lifetime_seconds()).await.map_err(|_| ())?;
+                transaction.commit().await.map_err(|_| ())?;
+                Ok::<bool, ()>(renewed)
+            };
+            match tokio::time::timeout(timeout, attempt).await {
+                Ok(Ok(true)) => {
+                    if let Some(held) = leases.held().get_mut(&file) {
+                        held.confirmed = asked;
+                    }
+                }
+                Ok(Ok(false)) => {
+                    log::warn!("document {file}: its room lease is no longer this relay's; closing the room");
+                    lost.push(file);
+                }
+                // The database couldn't be asked: keep serving until the lease would have expired.
+                Ok(Err(())) | Err(_) if confirmed.elapsed() >= config.lifetime => {
+                    log::warn!("document {file}: its room lease couldn't be renewed for {:?}; closing the room", config.lifetime);
+                    lost.push(file);
+                }
+                Ok(Err(())) | Err(_) => log::warn!("document {file}: a room lease renewal failed; will retry"),
+            }
+        }
+        if !lost.is_empty() {
+            {
+                let mut held = leases.held();
+                for file in &lost {
+                    held.remove(file);
+                }
+            }
+            leases.lost().extend(lost);
+            let wake = wake.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            if let Some(wake) = wake {
+                wake.wake();
+            }
+        }
     }
 }
 
@@ -495,6 +722,7 @@ async fn put_snapshot(
 /// Restore `document` (latest verified snapshot plus later events) and claim it as its new
 /// sequencer. Runs on the runtime, on the hub's thread or away from it
 /// ([`Backend::begin_open`]); every storage step is bounded by `timeout`.
+#[allow(clippy::too_many_arguments)]
 async fn recover_document(
     pool: PgPool,
     store: ObjectStore,
@@ -503,17 +731,32 @@ async fn recover_document(
     file: String,
     admitted: Admitted,
     document: CloudDocumentId,
+    lease: Option<LeaseParams>,
 ) -> Result<(Server, OpenDoc), String> {
-    let recovered =
-        tokio::time::timeout(timeout, DurableRoom::recover(pool.clone(), &store, admitted.tenant, document, base_document(), "", limits)).await;
+    // With leases the room is leased (and its fence claimed) first, in one transaction: a room
+    // another replica owns is never restored here, and the restore runs under that fence.
+    let claim = match &lease {
+        Some(params) => Some(acquire_lease(&pool, timeout, &file, admitted.tenant, document, params).await?),
+        None => None,
+    };
+    let recovered = tokio::time::timeout(timeout, async {
+        match claim {
+            Some(claim) => DurableRoom::recover_claimed(pool.clone(), &store, admitted.tenant, document, claim, base_document(), "", limits).await,
+            None => DurableRoom::recover(pool.clone(), &store, admitted.tenant, document, base_document(), "", limits).await,
+        }
+    })
+    .await;
     let room = match recovered {
         Ok(Ok(room)) => room,
-        Ok(Err(error)) => {
-            log::error!("document {file} couldn't be recovered: {error}");
-            return Err(UNAVAILABLE.into());
-        }
-        Err(_) => {
-            log::error!("document {file}: recovery timed out");
+        outcome => {
+            match outcome {
+                Ok(Err(error)) => log::error!("document {file} couldn't be recovered: {error}"),
+                _ => log::error!("document {file}: recovery timed out"),
+            }
+            // Don't hold the room for the lease's lifetime when it can't be served.
+            if let (Some(params), Some(claim)) = (&lease, claim) {
+                release_lease(&pool, timeout, &file, admitted.tenant, document, params.owner, claim.fencing_token).await;
+            }
             return Err(UNAVAILABLE.into());
         }
     };
@@ -525,7 +768,15 @@ async fn recover_document(
     let fencing_token = room.fencing_token();
     let server = room.into_server();
     let snapshot_seq = restored.and_then(|(_, seq)| u64::try_from(seq).ok());
-    let mut doc = OpenDoc { tenant: admitted.tenant, document, fencing_token, actors: HashMap::new(), pending: Vec::new(), snapshot_seq };
+    let mut doc = OpenDoc {
+        tenant: admitted.tenant,
+        document,
+        fencing_token,
+        actors: HashMap::new(),
+        pending: Vec::new(),
+        snapshot_seq,
+        leased: lease.is_some(),
+    };
     if snapshot_seq.is_none() && server.seq() == 0 {
         // A new document: its first state becomes durable before anyone edits it.
         match server.state() {
@@ -648,13 +899,15 @@ impl Backend for CloudBackend {
         }
         let (server, doc) = self.recover(file, admitted, document)?;
         log::info!("document {file} opened at seq {} (fencing token {})", server.seq(), doc.fencing_token);
+        self.hold(file, &doc);
         self.open.insert(file.to_string(), doc);
         Ok(server)
     }
 
     /// Restores run on the runtime, so one slow room never holds the hub's other rooms.
     fn begin_open(&mut self, file: &str) -> Result<bool, String> {
-        let Some(wake) = self.wake.clone() else { return Ok(false) };
+        let wake = self.wake.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let Some(wake) = wake else { return Ok(false) };
         let (Ok(document), Some(admitted)) = (file.parse::<CloudDocumentId>(), self.admitted.get(file).copied()) else {
             return Err(REFUSED.into());
         };
@@ -666,9 +919,9 @@ impl Backend for CloudBackend {
             return Ok(true);
         }
         let (pool, store, limits, timeout) = (self.pool.clone(), self.store.clone(), self.limits, self.timeout);
-        let (finished, file) = (self.finished.clone(), file.to_string());
+        let (finished, file, lease) = (self.finished.clone(), file.to_string(), self.lease_params());
         self.runtime.spawn(async move {
-            let result = recover_document(pool, store, limits, timeout, file.clone(), admitted, document).await;
+            let result = recover_document(pool, store, limits, timeout, file.clone(), admitted, document, lease).await;
             if let Ok(mut done) = finished.lock() {
                 done.push((file, result));
             }
@@ -684,6 +937,7 @@ impl Backend for CloudBackend {
                 self.opening.remove(&file);
                 let result = result.map(|(server, doc)| {
                     log::info!("document {file} opened at seq {} (fencing token {})", server.seq(), doc.fencing_token);
+                    self.hold(&file, &doc);
                     self.open.insert(file.clone(), doc);
                     server
                 });
@@ -693,7 +947,7 @@ impl Backend for CloudBackend {
     }
 
     fn attach(&mut self, wake: Wake) {
-        self.wake = Some(wake);
+        *self.wake.lock().unwrap_or_else(PoisonError::into_inner) = Some(wake);
     }
 
     fn joined(&mut self, file: &str, id: u32) {
@@ -731,7 +985,9 @@ impl Backend for CloudBackend {
             }
             // An accepted batch without a trusted admission identity cannot be confirmed.
             None => {
-                self.open.remove(file);
+                if let Some(doc) = self.open.remove(file) {
+                    self.release(file, &doc);
+                }
                 if !self.failed.iter().any(|failed| failed == file) {
                     self.failed.push(file.to_string());
                 }
@@ -741,12 +997,26 @@ impl Backend for CloudBackend {
 
     fn flush(&mut self) -> Vec<String> {
         let mut failed = std::mem::take(&mut self.failed);
+        // A room whose lease was lost: what it accepted this burst is never committed or
+        // confirmed, and everyone in it reconnects (to the new owner).
+        let lost = std::mem::take(&mut *self.leases.lost());
+        for file in lost {
+            if let Some(mut doc) = self.open.remove(&file) {
+                doc.pending.clear();
+                // Not released: it is no longer this relay's lease to release.
+                doc.leased = false;
+            }
+            if !failed.contains(&file) {
+                failed.push(file);
+            }
+        }
         let files: Vec<String> = self.open.iter().filter(|(_, doc)| !doc.pending.is_empty()).map(|(file, _)| file.clone()).collect();
         for file in files {
             let Some(mut doc) = self.open.remove(&file) else { continue };
             if self.commit(&file, &mut doc) {
                 self.open.insert(file, doc);
             } else {
+                self.release(&file, &doc);
                 failed.push(file);
             }
         }
@@ -761,6 +1031,7 @@ impl Backend for CloudBackend {
             if self.commit(file, &mut doc) {
                 self.snapshot(file, &mut doc, server);
             }
+            self.release(file, &doc);
         }
         self.failed.retain(|f| f != file);
         self.admitted.remove(file);
@@ -771,10 +1042,11 @@ impl Backend for CloudBackend {
     fn stop(&mut self, open: Vec<(&str, &mut Server)>) {
         for (file, server) in open {
             self.changed(file, server);
-            if let Some(mut doc) = self.open.remove(file)
-                && self.commit(file, &mut doc)
-            {
-                self.snapshot(file, &mut doc, server);
+            if let Some(mut doc) = self.open.remove(file) {
+                if self.commit(file, &mut doc) {
+                    self.snapshot(file, &mut doc, server);
+                }
+                self.release(file, &doc);
             }
         }
         self.failed.clear();

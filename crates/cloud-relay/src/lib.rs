@@ -188,6 +188,24 @@ impl DurableRoom {
         Self::open_from(pool, Some(store), tenant_id, document_id, base, token, limits).await
     }
 
+    /// [`recover`](Self::recover) under a sequencer claim already made and committed by the caller
+    /// (a room lease acquired the fence in its own transaction, `room_leases::acquire_room_claim`),
+    /// so the fence is not advanced a second time. The caller must have refused a quarantined
+    /// document before claiming it ([`quarantine_reason`](figcraft_cloud_storage::quarantine)).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn recover_claimed(
+        pool: PgPool,
+        store: &ObjectStore,
+        tenant_id: TenantId,
+        document_id: CloudDocumentId,
+        claim: SequencerClaim,
+        base: Document,
+        token: &str,
+        limits: Limits,
+    ) -> Result<Self, RoomError> {
+        Self::open_claimed(pool, Some(store), tenant_id, document_id, claim, base, token, limits).await
+    }
+
     async fn open_from(
         pool: PgPool,
         store: Option<&ObjectStore>,
@@ -205,7 +223,20 @@ impl DurableRoom {
         }
         let claim = claim_sequencer(&mut transaction, document_id).await.map_err(RoomError::Open)?;
         transaction.commit().await.map_err(|_| RoomError::Commit)?;
+        Self::open_claimed(pool, store, tenant_id, document_id, claim, base, token, limits).await
+    }
 
+    #[allow(clippy::too_many_arguments)]
+    async fn open_claimed(
+        pool: PgPool,
+        store: Option<&ObjectStore>,
+        tenant_id: TenantId,
+        document_id: CloudDocumentId,
+        claim: SequencerClaim,
+        base: Document,
+        token: &str,
+        limits: Limits,
+    ) -> Result<Self, RoomError> {
         let (restored, snapshots_skipped) = match store {
             Some(store) => restore_server(&pool, store, tenant_id, document_id, claim.current_seq, token, limits).await?,
             None => (None, false),

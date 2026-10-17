@@ -9,7 +9,7 @@ use figcraft_cloud_domain::{CloudDocumentId, TenantId, Uuid};
 use url::Url;
 
 use crate::TenantTransaction;
-use crate::events::{EventRepositoryError, claim_sequencer};
+use crate::events::{EventRepositoryError, SequencerClaim, claim_sequencer};
 
 /// Lease lifetime accepted by the repository. The relay renews well before this expires.
 pub const MIN_LEASE_SECONDS: i32 = 5;
@@ -104,6 +104,19 @@ pub async fn acquire_room(
     endpoint: &str,
     lifetime_seconds: i32,
 ) -> Result<AcquireRoom, RoomLeaseError> {
+    acquire_room_claim(transaction, document_id, owner_id, endpoint, lifetime_seconds).await.map(|(acquired, _)| acquired)
+}
+
+/// [`acquire_room`], also returning the sequencer claim made with the lease (`None` when the room
+/// is `Held`): the caller restores the room under this claim instead of claiming again, which would
+/// advance the fence past the lease's.
+pub async fn acquire_room_claim(
+    transaction: &mut TenantTransaction<'_>,
+    document_id: CloudDocumentId,
+    owner_id: Uuid,
+    endpoint: &str,
+    lifetime_seconds: i32,
+) -> Result<(AcquireRoom, Option<SequencerClaim>), RoomLeaseError> {
     if owner_id.is_nil() || !valid_endpoint(endpoint) || !(MIN_LEASE_SECONDS..=MAX_LEASE_SECONDS).contains(&lifetime_seconds) {
         return Err(RoomLeaseError::InvalidInput);
     }
@@ -121,7 +134,7 @@ pub async fn acquire_room(
         Some((_, token)) => token,
     };
     if let Some(lease) = current_room(transaction, document_id).await? {
-        return Ok(AcquireRoom::Held(lease));
+        return Ok((AcquireRoom::Held(lease), None));
     }
     if current_token == i64::MAX {
         return Err(RoomLeaseError::FenceExhausted);
@@ -149,7 +162,7 @@ pub async fn acquire_room(
     .fetch_one(transaction.connection())
     .await
     .map_err(|_| RoomLeaseError::Database)?;
-    Ok(AcquireRoom::Acquired(lease_from_row(tenant_id, document_id, row)?))
+    Ok((AcquireRoom::Acquired(lease_from_row(tenant_id, document_id, row)?), Some(claim)))
 }
 
 /// Extend only a still-live lease held by this exact owner and fence. A lost owner cannot

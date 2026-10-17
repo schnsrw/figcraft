@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (11/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (16/25) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 11 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 16 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2188,18 +2188,25 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   room. It passed against disposable PostgreSQL 18 and SeaweedFS 4.48. The existing admission and
   relay action matrix covers ticket principal, tenant and maximum document role; share-link
   sessions remain intentionally anonymous and their event actor is the link creator.
-- [ ] **S5-003** Implement PostgreSQL room registry with bounded, tenant-scoped rows (owner decision
+- [x] **S5-003** Implement PostgreSQL room registry with bounded, tenant-scoped rows (owner decision
   supersedes the earlier Redis-key design).
-  Partial (2026-10-17): migration `20261017000007_room_leases.sql` adds one forced-RLS row per
-  tenant/document, with a bounded endpoint, owner UUID, fencing token and expiry. The
-  `room_leases` repository looks up only an unexpired lease whose token still matches the
-  document. The PostgreSQL probe covers tenant isolation. The live relay does not consult it yet.
-- [ ] **S5-004** Implement renewable room leases and ownership identity.
-  Partial (2026-10-17): `acquire_room` serializes contenders on the document row and claims its
-  fencing token in the same transaction. `renew_room` and `release_room` compare the owner and
-  token, and renewal refuses an expired or superseded lease. PostgreSQL uses its own clock for
-  expiry. A three-case PostgreSQL probe covers simultaneous acquisition, expiry/takeover and a
-  superseded fence. The relay still needs a renewal loop and close-on-loss path.
+  Evidence (2026-10-18): migration `20261017000007_room_leases.sql` adds one forced-RLS row per
+  tenant/document with a bounded endpoint, owner UUID, fencing token and expiry; the repository
+  covers tenant isolation. The relay now uses it: with `FIGCRAFT_RELAY_ADVERTISE_URL` set,
+  `CloudBackend` takes the room's lease (and its fence, in one transaction, after the quarantine
+  check) before restoring, and a room another replica owns is refused as `OWNED_ELSEWHERE`
+  (`crates/cloud-relay/tests/room_leases_relay.rs`, live PostgreSQL/S3). Without the setting a
+  single relay serves rooms without leases, as before.
+- [x] **S5-004** Implement renewable room leases and ownership identity.
+  Evidence (2026-10-18): each relay process has a random owner id and advertises its endpoint;
+  a runtime task renews every held lease every 5 s (lifetime 15 s, `LeaseConfig`), stamping each
+  renewal at the time it was sent so the relay's deadline is never later than the database's.
+  A lease the database no longer shows as this relay's, or one unconfirmed for its lifetime, is
+  lost: the hub is woken, the room's uncommitted batches are dropped and everyone in it is
+  disconnected. A closing room releases only its own exact lease after its final commit and
+  snapshot, so another replica can take it at once (`one_replica_owns_a_room_and_the_other_refuses_it_until_it_is_released`).
+  Limit: a relay that dies without releasing leaves its rooms unavailable until the lease expires
+  (at most 15 s); the fence stops its late writes either way.
 - [x] **S5-005** Implement monotonically increasing PostgreSQL fencing tokens.
   Evidence: Implemented in S2-015: `figcraft-cloud-storage::events::claim_sequencer` advances a
   per-document PostgreSQL fencing token that the S2-014 trigger keeps monotonic, and `append_events`
@@ -2220,7 +2227,14 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
   batches under the fencing token and commits before the hub sends any confirmation or broadcast; a
   failed commit closes the file unconfirmed (collab_backend, room_failure_injection and s2_gate
   probes).
-- [ ] **S5-010** Reject writes immediately after lease or fencing loss.
+- [x] **S5-010** Reject writes immediately after lease or fencing loss.
+  Evidence (2026-10-18): a fence that moved makes the commit fail and closes the document
+  unconfirmed (`a_fenced_commit_closes_the_document_without_confirming`, S2-015). A lease taken
+  over while a client is connected is noticed at the next renewal (200 ms in the test, 5 s by
+  default): the edit sent after the takeover is never confirmed, nothing more is committed, the
+  connection closes within the bound, and the old relay's cleanup leaves the new owner's lease row
+  alone (`a_room_whose_lease_was_taken_away_closes_and_confirms_nothing_more`). Between the loss
+  and its detection the fence is what rejects writes.
 - [ ] **S5-011** Implement idle room close and snapshot scheduling.
 - [ ] **S5-012** Implement graceful drain and client reconnect signal for rolling releases.
 - [x] **S5-013** Implement quarantine when no verified snapshot/event chain can restore a room.
@@ -2290,8 +2304,17 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ### Failure and performance verification
 
-- [ ] **S5-020** Test two relay replicas owning different rooms.
-- [ ] **S5-021** Test simultaneous lease acquisition and stale-owner fencing.
+- [x] **S5-020** Test two relay replicas owning different rooms.
+  Evidence (2026-10-18): `two_replicas_own_different_rooms_at_the_same_time` runs two relay
+  replicas on one database; each serves its own document through five confirmed commits per
+  round, each leases its own room under its own endpoint, each refuses the other's room, and both
+  documents end at committed sequence 5.
+- [x] **S5-021** Test simultaneous lease acquisition and stale-owner fencing.
+  Evidence (2026-10-18): `simultaneous_hellos_to_two_replicas_leave_exactly_one_owner` sends
+  eight hellos at once (four to each replica, three rounds): exactly one replica holds the
+  lease, all of its clients are served and every client of the other is refused. The storage-level
+  three-case probe (simultaneous acquisition, expiry takeover, superseded fence) and the relay
+  tests for a lease taken over and a fenced commit cover the stale owner.
 - [ ] **S5-022** Kill relay before commit and prove no edit was confirmed.
 - [ ] **S5-023** Kill relay after commit and prove the edit returns after reconnect.
 - [x] **S5-024** Load-test reconnect storms, slow readers and maximum supported document size.
@@ -2624,3 +2647,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S5-016 audit: confirmed separate presence and signal throttles in the shared live hub and that only accepted edits reach the cloud journal. S5 reaches 10/25. |
 | 2026-10-17 | S5-014 audit: the live PostgreSQL/S3 relay action matrix passed for editor, viewer and commenter tickets and links, including forged edit access and client-ID resume. S5 reaches 11/25. |
 | 2026-10-17 | S5 prerequisite: room restore moved off the relay hub thread (additive `Backend::begin_open`/`opened`/`attach` hooks, patch FP-008). Measured: another room's worst commit during a 20k-frame cold open fell from 4,246 ms to 6.1 ms. No S5 task changes state; S5 stays 11/25. |
+| 2026-10-18 | S5-003, 004, 010, 020, 021: the relay takes, renews, loses and releases PostgreSQL room leases (opt-in with `FIGCRAFT_RELAY_ADVERTISE_URL`); two live replicas on one database each own their rooms and refuse the other's, a simultaneous hello race leaves one owner, and a taken-over room closes without confirming more. Owner routing (S5-006) and drain (S5-012) remain. S5 reaches 16/25. |

@@ -157,11 +157,14 @@ the continuation point, a blocker or a major decision changes.
    FP-008; isolation run in `docs/saas/relay-performance.md`: other rooms' worst commit during a
    20k-frame cold open 4,246 ms -> 6.1 ms). Commits are still serial per flush (about 100/s per
    replica), which is a capacity limit, not a stall.
-   S5-003/004 have a PostgreSQL registry and lease repository at schema `20261017000007`,
-   including atomic fencing acquisition and compare-and-renew/release; the relay is NOT yet wired
-   to it. Next: wire lease acquisition into `CloudBackend::begin_open` (acquire before restore,
-   renew on a timer, drop the room on loss: S5-010), then owner routing (S5-006) and drain
-   (S5-012). S5-003/004 remain open until integration.
+   S5-003/004/010/020/021 are done (2026-10-18): with `FIGCRAFT_RELAY_ADVERTISE_URL` set the relay
+   leases each room (acquire + fence in one transaction before the restore, renew every 5 s,
+   close on loss, release on close); a replica refuses a room another owns (`OWNED_ELSEWHERE`).
+   Live tests: `crates/cloud-relay/tests/room_leases_relay.rs` (needs FIGCRAFT_TEST_DATABASE_URL_FILE
+   and FIGCRAFT_TEST_S3_DIR; older suites also need the `deploy/saas/*-preflight.sql` fixtures).
+   Next: S5-006 owner routing (the refusal should become a redirect to the lease's endpoint through
+   the gateway), S5-008 client reconnect state, S5-011 idle close/snapshot schedule, S5-012 drain,
+   S5-017 quotas, S5-018 large assets, S5-022/023 kill tests, then the gate.
    S5-015 is complete: the live PostgreSQL/S3 member-revocation and WebSocket race probes passed
    for tenant, team and document removal, session logout, editor downgrade and revoked links.
    S5-016 is complete: presence and signals remain ephemeral, with independent 33 ms and

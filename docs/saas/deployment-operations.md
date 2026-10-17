@@ -73,6 +73,10 @@ FIGCRAFT_DEPLOYMENT=single|multi|embedded
 FIGCRAFT_ROLE=all|api|relay|worker
 FIGCRAFT_PUBLIC_URL=https://design.example.com
 FIGCRAFT_SINGLE_TENANT_ID=00000000-0000-0000-0000-000000000001
+# Several relay replicas only: where the gateway and other replicas reach THIS replica (ws:// or
+# wss://, unique per replica). Turns on room leases: one replica serves each room, others refuse it.
+# Leave unset for a single relay.
+FIGCRAFT_RELAY_ADVERTISE_URL=ws://relay-1.internal:8082/ws/v1/collab
 
 DATABASE_URL_FILE=/run/secrets/database_url
 REDIS_URL_FILE=/run/secrets/redis_url
@@ -94,6 +98,14 @@ EMBED_ISSUER_CONFIG_FILE=/etc/figcraft/embed-issuers.toml
 RUST_LOG=info
 OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
 ```
+
+Room leases (several relay replicas): with `FIGCRAFT_RELAY_ADVERTISE_URL` set, a replica takes a
+PostgreSQL lease on a document's room before restoring it and renews it every 5 s (lifetime 15 s).
+A hello for a room another replica owns is refused with "this document is open on another server:
+try again in a moment" until the gateway routes to the owner (S5-006). A replica that crashes leaves
+its rooms unavailable for at most the lifetime (15 s); its late writes are rejected by the fencing
+token regardless. A room closes and releases its lease when its last client leaves. Without the
+setting a single relay serves rooms without leases.
 
 Single-tenant mode still stores the configured tenant identifier on every row. It may provide an
 initial bootstrap administrator, but bootstrap credentials expire or are removed after setup.
