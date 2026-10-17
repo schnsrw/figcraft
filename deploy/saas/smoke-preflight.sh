@@ -182,6 +182,18 @@ FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_D
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/object-repository-cleanup.sql" > "$test_dir/object-repository-cleanup.log"
 "${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/quarantine-preflight.sql" > "$test_dir/quarantine-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE="$test_dir/host_admin_database_url" \
+  cargo test --locked -p figcraft-cloud-relay --test quarantine -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/quarantine-cleanup.sql" > "$test_dir/quarantine-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/orphan-sweep-preflight.sql" > "$test_dir/orphan-sweep-preflight.log"
+FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
+  cargo test --locked -p figcraft-cloud-storage --lib orphan_sweep -- --nocapture --test-threads=1
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
+  < "$script_dir/orphan-sweep-cleanup.sql" > "$test_dir/orphan-sweep-cleanup.log"
+"${compose[@]}" exec -T postgres psql -U figcraft -d figcraft -q -v ON_ERROR_STOP=1 \
   < "$script_dir/legacy-import-preflight.sql" > "$test_dir/legacy-import-preflight.log"
 FIGCRAFT_TEST_ADMIN_DATABASE_URL_FILE="$test_dir/host_admin_database_url" FIGCRAFT_TEST_DATABASE_URL_FILE="$test_dir/host_database_url" FIGCRAFT_TEST_S3_DIR="$test_dir/s3" \
   cargo test --locked -p figcraft-cloud-storage --test legacy_import -- --nocapture --test-threads=1

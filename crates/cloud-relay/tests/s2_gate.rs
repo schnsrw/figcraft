@@ -338,7 +338,7 @@ async fn create_edit_restart_and_restore_a_document() -> TestResult {
     blocker.rollback().await?;
     terminated?;
     let received = received.map_err(|_| "the room's receive never finished")?;
-    assert!(matches!(received, Err(RoomError::Append(EventRepositoryError::Database))), "a terminated append is an error: {received:?}");
+    assert!(matches!(received, Err(RoomError::Append(EventRepositoryError::Unavailable))), "a terminated append is an unavailable error: {received:?}");
     assert!(victim.is_poisoned());
     assert_eq!(committed(&pool).await?, (accepted, accepted), "the terminated batch is not committed");
     assert_eq!(durable_log(&pool).await?, net.confirmed, "neither failed batch is in the log");

@@ -164,7 +164,7 @@ async fn a_room_whose_connection_dies_mid_receive_poisons_and_reopens_from_commi
     };
     let (received, killed) = tokio::time::timeout(BOUND, async { tokio::join!(room.receive(client, actor, message), killer) }).await?;
     killed?;
-    assert_eq!(received, Err(RoomError::Append(EventRepositoryError::Database)), "the dead connection surfaces as a failed append");
+    assert_eq!(received, Err(RoomError::Append(EventRepositoryError::Unavailable)), "the dead connection surfaces as an unavailable append");
     assert!(room.is_poisoned());
     assert_eq!(room.server().seq(), u64::try_from(durable + 1)?, "the room's memory is ahead of durable state");
     assert_eq!(committed(&control).await?, (durable, durable), "the lost batch is not durable");

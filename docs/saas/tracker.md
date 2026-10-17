@@ -450,6 +450,10 @@ the same commit as the completed task.
   deploy/saas/failure-injection-{preflight,cleanup}.sql, rerun-safe (tests read their starting
   seq/token from the database). Ran 2 reruns plus 1 fresh run, all green; fmt and clippy -D warnings
   clean.
+  Follow-up (2026-10-17): event errors distinguish `Unavailable` (connection loss, pool timeout),
+  `Timeout` (57014/55P03) and `SerializationFailure` (40001/40P01) from `Database`, with retry
+  safety documented; a pending idempotency key past its lease with a matching request is `TakenOver`
+  for re-execution and an expired key counts as absent, with the race probes unchanged.
 - [x] **S2-021** Build a read-only scanner for the existing filesystem server data directory and a
   migration report format.
   Evidence: `figcraft-cloud-storage::legacy_scan::scan_data_directory` inventories a stopped
@@ -661,6 +665,9 @@ the same commit as the completed task.
   `Referenced`; a deletion committed first makes the waiting reference or hold `InvalidState`; a
   rolled-back deletion lets the waiting reference land. Finally, 8 free-running reference/deletion
   pairs each end with exactly one winner and never a reference on a `deleting` object. No migration.
+  Follow-up (2026-10-17): holds record who placed them and why in `retention_holds` (same
+  transaction as the reference); re-placing keeps the original placer, reusing a hold id elsewhere
+  is `Conflict`, and `list_retention_holds` pages placer and reason.
 
 ### Stored object types
 
@@ -705,6 +712,12 @@ the same commit as the completed task.
   tenant gets no candidates, gets `None` from `get_object`, gets `NotFound` from `store_snapshot`,
   and gets `Open(NotFound)` from `recover`. Unit tests include a 2000-round junk-byte sweep through
   the decode checks.
+  Follow-up (2026-10-17): `quarantine` marks a document whose history cannot be restored (`log_gap`,
+  `log_corrupt`, `snapshot_chain_unverifiable`, `replay_failed`, `operator`);
+  `DurableRoom::open`/`recover` refuse quarantined documents before claiming and quarantine on a
+  failed restore, and clearing is audited. Snapshot and library writes now register and commit the
+  pending object row before uploading, so a rolled-back caller leaves a row GC can settle instead of
+  untracked bytes.
 - [x] **S3-009** Store content-addressed image and binary assets.
   Evidence: `figcraft-cloud-storage::assets` is the document-facing asset API over
   S3-002/004/005/006/007. `find_asset(tx, sha256)` returns the tenant's oldest verified, non-deleted
@@ -814,6 +827,9 @@ the same commit as the completed task.
   being a separate plugin; a disabled plugin; 18 junk bundle, name and version refusals that run no
   SQL; the JSONB expansion bound; a rejected object blocking the key; a pending object being filled;
   and an unreachable store (`Store(Unreachable)`).
+  Follow-up (2026-10-17): plugin lookup-or-create uses `INSERT ... ON CONFLICT` on the partial
+  unique index `plugins_live_publisher_name_idx` instead of an advisory lock; a
+  concurrent-first-install probe ends with one live row.
 - [x] **S3-012** Store export results and thumbnails.
   Evidence: `figcraft-cloud-storage::exports::request_export(tx, document, principal, format,
   &options, requested_seq)` requires an active member of an active tenant (`NotAuthorized`) and an
@@ -965,6 +981,9 @@ the same commit as the completed task.
   a partial plain delete both finished by a rerun, an unreachable store leaving every touched object
   `deleting`, an idempotent idle rerun, and an expired staging upload with two versions swept and
   its reservation expired.
+  Follow-up (2026-10-17): an orphan-key sweep deletes bucket keys with no `objects` row past the
+  minimum age (all versions, dry run supported, live reservations' staging keys untouched), and
+  stuck pending rows are settled through read-back verification into collectable rejected rows.
 - [x] **S3-016** Add database-to-bucket reconciliation report.
   Evidence: `figcraft-cloud-storage::reconciliation::reconcile_tenant(tx, store,
   &ReconciliationLimits)` returns a versioned (`format_version` 1) serde `ReconciliationReport` for
@@ -1073,6 +1092,9 @@ the same commit as the completed task.
   and that a changed log gives LegacyChanged and a removed snapshot gives LegacyUnreadable. The
   section is in docs/saas/filesystem-migration-report.md under "Import and cutover verification".
   Fixture files: deploy/saas/legacy-import-{preflight,cleanup}.sql.
+  Follow-up (2026-10-17): versioned legacy libraries and plugin bundles are imported idempotently
+  and verified by `verify_import`; share links stay deferred until share tokens are exchanged (the
+  core slice adds the table).
 - [x] **S3-019** Verify migrated snapshots, logs, links, libraries and plugins before cutover.
   Evidence: `legacy_import::verify_import(tx, store, plan, root, limits)` is read-only. It reads
   verification states without changing them, takes a tenant transaction that the caller rolls back,
@@ -1146,6 +1168,22 @@ the same commit as the completed task.
   restores a database backup and earlier bucket versions and reopens the document to the backed-up
   sequence. Limits are recorded in `CODEX.md` (SeaweedFS lifecycle enforcement unverified, so the
   sweep is authoritative; libraries, links and plugins are not yet imported and block cutover).
+
+## Core slice — browser co-editing on the cloud stack (pulled forward)
+
+The product owner reprioritized on 2026-10-17: before the full S4, S5 and S6 hardening, two
+browsers must co-edit one cloud document through the Compose stack, with every confirmed edit
+durable in PostgreSQL and object storage and surviving a cloud restart. These tasks pull the
+minimum of S4-005 (share links), S5 (a single relay serving rooms) and S6 (browser delivery)
+forward; the full milestones keep their tasks and replace this slice's shortcuts.
+
+- [x] **CS-001** Store document share links as hashed secrets with role, expiry and revocation.
+  Evidence: `20261017000004_share_links.sql`.
+- [ ] **CS-002** Serve the collaboration protocol from the cloud relay role on PostgreSQL/S3
+  durability (commit before broadcast, snapshot-first recovery) with share-link admission.
+- [ ] **CS-003** Serve the browser editor from the stack and join a cloud document from a link.
+- [ ] **CS-004** Demonstrate two browsers co-editing through the gateway, with the document
+  surviving a cloud container restart.
 
 ## S4 — Identity, tenancy and authorization
 
@@ -1528,3 +1566,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S3-004..S3-007, S3-013, S3-014, S3-017: upload reservations and validated promotion, authorized presigned downloads, references and retention holds, content validation budgets, idempotent bucket/versioning/lifecycle initialization, and a dry-run migration planner (six parallel worktree agents, then integrated: tagged staging PUTs, completer check, validation before promotion, one FigCraft media-type set). S3 reaches 10/20. |
 | 2026-10-17 | S3-008..S3-012, S3-015, S3-016: snapshot store and snapshot-first room recovery, document assets, team-library versions, plugin bundles, exports and thumbnails on one shared schema migration (20261017000002), garbage collection with versioned deletes, and a read-only reconciliation report (seven parallel worktree agents; verified with targeted suites). S3 reaches 17/20. |
 | 2026-10-17 | S3-018/S3-019/S3-020/S3-GATE: repeatable checkpointed legacy import with read-only cutover verification, a database-and-bucket-version backup/restore probe, and a Compose no-local-persistence check. S3 complete (20/20) and its gate passes. |
+| 2026-10-17 | S2/S3 follow-ups: plugin uniqueness by index, attributed retention holds, document quarantine, register-first object writes with an orphan sweep, legacy library/plugin import, typed retryable event errors and stale idempotency-key takeover (four parallel agents; schema 20261017000003). Core slice section added: browser co-editing pulled ahead of full S4–S6. |

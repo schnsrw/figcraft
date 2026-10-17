@@ -136,8 +136,11 @@ the continuation point, a blocker or a major decision changes.
    10/20; S3-008..S3-012, S3-015 and S3-016 add snapshot storage with
    `DurableRoom::recover` (snapshot first, then events), assets, libraries, plugins, exports and
    thumbnails, garbage collection and reconciliation; S3-018..S3-020 add the checkpointed legacy import, read-only cutover
-   verification and a backup/restore probe; S3 is complete (20/20) and its gate passes. Continue with
-   S4 (identity, tenancy and authorization), starting with its first dependency-ready task. Testing policy: targeted suites per step and a quick scan before push; run the full
+   verification and a backup/restore probe; S3 is complete (20/20) and its gate passes. The S2/S3 follow-ups above are closed (quarantine, attributed holds,
+   register-first writes plus orphan sweep, legacy library/plugin import, typed retryable errors,
+   stale idempotency takeover), except share-link import. NEXT (owner priority, 2026-10-17): the
+   "Core slice" in the tracker, browser co-editing on the cloud stack (CS-002..CS-004), then full
+   S4 -> S5 -> S6. Testing policy: targeted suites per step and a quick scan before push; run the full
    smoke/`cargo xtask ci` only when GitHub CI goes red.
    Known S3 follow-ups: plugin keys need a text-version decision before S3-018 imports
    plugins; holds record no placer (needs a column); GC must also respect pending jobs and in-flight
