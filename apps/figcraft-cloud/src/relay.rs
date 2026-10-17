@@ -10,7 +10,7 @@ use std::net::{SocketAddr, TcpListener};
 use std::time::Duration;
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, ProjectId, TenantId, WorkspaceId};
-use figcraft_cloud_relay::collab_backend::{CloudBackend, CloudBackendConfig};
+use figcraft_cloud_relay::collab_backend::{CloudBackend, CloudBackendConfig, REVOCATION_INTERVAL, RevocationSweeper};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::metadata::{create_document, get_document};
 use figcraft_cloud_storage::share_links::{ShareRole, create_share_link};
@@ -46,13 +46,25 @@ pub(crate) fn net_limits() -> NetLimits {
     }
 }
 
-/// Start the relay on [`RELAY_ADDR`] with storage from `config`.
-pub(crate) fn start(config: &CloudConfig) -> Result<Hosting, &'static str> {
+/// A running relay: the hub and the sweeper that disconnects revoked share links (S4-017). Both
+/// stop when this is dropped, so the caller keeps it for the life of the process.
+pub(crate) struct Relay {
+    pub(crate) hosting: Hosting,
+    _revocations: RevocationSweeper,
+}
+
+/// Start the relay on [`RELAY_ADDR`] with storage from `config`, and its revocation sweeper.
+pub(crate) fn start(config: &CloudConfig) -> Result<Relay, &'static str> {
     let database_url = config.database_url().ok_or("the relay requires DATABASE_URL")?;
     let objects = config.object_store_settings().ok_or("the relay requires the S3 settings")?;
-    let backend = CloudBackend::connect(&CloudBackendConfig::new(database_url, objects)).map_err(|_| "the relay's storage couldn't be set up")?;
+    let backend_config = CloudBackendConfig::new(database_url, objects);
+    let backend = CloudBackend::connect(&backend_config).map_err(|_| "the relay's storage couldn't be set up")?;
+    let watch = backend.revocation_watch();
     let listener = TcpListener::bind(SocketAddr::from(RELAY_ADDR)).map_err(|_| "the relay's port couldn't be opened")?;
-    Hosting::serve(listener, backend, net_limits()).map_err(|_| "the relay couldn't start")
+    let hosting = Hosting::serve(listener, backend, net_limits()).map_err(|_| "the relay couldn't start")?;
+    let revocations = RevocationSweeper::start(&backend_config, watch, hosting.addr(), REVOCATION_INTERVAL)
+        .map_err(|_| "the relay's revocation sweeper couldn't start")?;
+    Ok(Relay { hosting, _revocations: revocations })
 }
 
 /// Percent-encode everything but RFC 3986 unreserved characters (a URL inside a fragment).

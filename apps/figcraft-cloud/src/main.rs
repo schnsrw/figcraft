@@ -319,9 +319,9 @@ fn main() -> ExitCode {
             // Every role serves the collaboration relay for now (the core slice runs one process).
             let _relay = if ready {
                 match relay::start(&config) {
-                    Ok(hosting) => {
-                        eprintln!("figcraft-cloud: collaboration relay listening on {}", hosting.addr());
-                        Some(hosting)
+                    Ok(relay) => {
+                        eprintln!("figcraft-cloud: collaboration relay listening on {}", relay.hosting.addr());
+                        Some(relay)
                     }
                     Err(error) => {
                         eprintln!("figcraft-cloud: collaboration relay not started: {error}");
