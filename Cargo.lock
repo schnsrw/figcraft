@@ -1536,9 +1536,12 @@ version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "figcraft-cloud-domain",
+ "figcraft-cloud-relay",
  "figcraft-cloud-storage",
+ "figcraft-collab-net",
  "serde_json",
  "sha1",
+ "sqlx",
  "tokio",
 ]
 
@@ -1571,10 +1574,13 @@ dependencies = [
  "figcraft-cloud-domain",
  "figcraft-cloud-storage",
  "figcraft-collab",
+ "figcraft-collab-net",
  "figcraft-doc",
+ "log",
  "serde_json",
  "sqlx",
  "tokio",
+ "tungstenite",
 ]
 
 [[package]]

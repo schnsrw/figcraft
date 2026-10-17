@@ -13,6 +13,8 @@
 //! [`DurableRoom::recover`] restores the room from the document's latest verified snapshot (S3-008,
 //! `figcraft_cloud_storage::document_snapshots`) and replays only the events after it.
 
+pub mod collab_backend;
+
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
 use figcraft_cloud_storage::begin_tenant_transaction;
 use figcraft_cloud_storage::document_snapshots::{SnapshotStoreError, restore_latest_snapshot_with};
