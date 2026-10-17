@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); **Core slice in progress (3/4): browser co-editing on the cloud stack, current priority** · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -21,6 +21,7 @@ the same commit as the completed task.
 | S1 Cloud foundation | complete | 22 / 22 | Healthy role-selectable image and Compose stack |
 | S2 PostgreSQL metadata and events | complete | 21 / 21 | Durable transactional event path |
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
+| **Core slice** Browser co-editing on the cloud stack (pulled forward, current priority) | in progress | 3 / 4 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | not started | 0 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | not started | 0 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
@@ -1582,3 +1583,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S3-008..S3-012, S3-015, S3-016: snapshot store and snapshot-first room recovery, document assets, team-library versions, plugin bundles, exports and thumbnails on one shared schema migration (20261017000002), garbage collection with versioned deletes, and a read-only reconciliation report (seven parallel worktree agents; verified with targeted suites). S3 reaches 17/20. |
 | 2026-10-17 | S3-018/S3-019/S3-020/S3-GATE: repeatable checkpointed legacy import with read-only cutover verification, a database-and-bucket-version backup/restore probe, and a Compose no-local-persistence check. S3 complete (20/20) and its gate passes. |
 | 2026-10-17 | S2/S3 follow-ups: plugin uniqueness by index, attributed retention holds, document quarantine, register-first object writes with an orphan sweep, legacy library/plugin import, typed retryable event errors and stale idempotency-key takeover (four parallel agents; schema 20261017000003). Core slice section added: browser co-editing pulled ahead of full S4–S6. |
+| 2026-10-17 | Core slice CS-001..CS-003: share links stored as hashed secrets; the cloud relay serves FigCraft's collaboration protocol on port 8082 (gateway `/ws/v1/collab`) with commit-before-broadcast durability, snapshot-first recovery and share-link admission; the browser editor is served at `/edit/` and joins from `#join=<link>`; `figcraft-cloud --create-share-link` prints a demo URL. CS-004 (two-browser demo through the stack) is running. |
