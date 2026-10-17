@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (10/25) · **Last updated:** 2026-10-17
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (11/25) · **Last updated:** 2026-10-17
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -23,7 +23,7 @@ the same commit as the completed task.
 | S3 Object storage and migration | complete | 20 / 20 | Verified object storage and repeatable migration |
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
-| S5 Distributed collaboration relay | in progress | 10 / 25 | Fenced multi-replica relay passes failure tests |
+| S5 Distributed collaboration relay | in progress | 11 / 25 | Fenced multi-replica relay passes failure tests |
 | S6 Browser, desktop and embedded integration | not started | 0 / 31 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
@@ -2231,7 +2231,14 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ### Roles, presence and large data
 
-- [ ] **S5-014** Enforce viewer, commenter and editor capabilities at relay message handling.
+- [x] **S5-014** Enforce viewer, commenter and editor capabilities at relay message handling.
+  Evidence: `CloudBackend` rechecks the member's effective document role when admitting a
+  ticket, maps editors to `Access::Edit` and viewers/commenters to `Access::View`, and the shared
+  server rejects edit batches from view clients while allowing presence, signals and catch-up.
+  The live PostgreSQL/S3 `relay_action_matrix` passed on 2026-10-17 for editor, viewer and
+  commenter tickets and share links, including forged edit tickets and a viewer trying to
+  resume an editor's client ID. Comment creation is an API capability, outside the relay wire
+  actions in this stage.
 - [x] **S5-015** Disconnect sessions whose grant is revoked.
   Evidence: the cloud relay starts `RevocationSweeper` alongside its hub. The sweeper rechecks
   watched share links and member admissions against PostgreSQL and asks the hub to disconnect
@@ -2615,3 +2622,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-17 | S5-003/004 partial: added tenant-scoped PostgreSQL lease rows, atomic acquisition with a fencing claim, lookup, renewal and compare-and-release. Live relay integration and routing remain open; S5 stays 8/25. |
 | 2026-10-17 | S5-015 audit: confirmed the already wired relay revocation sweeper with live PostgreSQL/S3 member and WebSocket race probes; checked off grant revocation. S5 reaches 9/25. |
 | 2026-10-17 | S5-016 audit: confirmed separate presence and signal throttles in the shared live hub and that only accepted edits reach the cloud journal. S5 reaches 10/25. |
+| 2026-10-17 | S5-014 audit: the live PostgreSQL/S3 relay action matrix passed for editor, viewer and commenter tickets and links, including forged edit access and client-ID resume. S5 reaches 11/25. |
