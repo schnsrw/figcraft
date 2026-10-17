@@ -1179,9 +1179,24 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 - [x] **CS-001** Store document share links as hashed secrets with role, expiry and revocation.
   Evidence: `20261017000004_share_links.sql`.
-- [ ] **CS-002** Serve the collaboration protocol from the cloud relay role on PostgreSQL/S3
+- [x] **CS-002** Serve the collaboration protocol from the cloud relay role on PostgreSQL/S3
   durability (commit before broadcast, snapshot-first recovery) with share-link admission.
-- [ ] **CS-003** Serve the browser editor from the stack and join a cloud document from a link.
+  Evidence: `figcraft-cloud-relay::collab_backend::CloudBackend` implements `collab_net::Backend`
+  behind the same hub `figcraft-server` runs: `admit` resolves a hashed share link
+  (`figcraft-cloud-storage::share_links`) and maps editor/viewer to edit/view access, `open` runs
+  snapshot-first `DurableRoom::recover` over a deterministic base (storing a seq-0 snapshot on
+  first open), `flush` appends accepted batches under the fencing token and commits before the hub
+  sends anything, and failed commits close the file unconfirmed. Every cloud role serves it on port
+  8082 and the gateway routes `/ws/v1/collab`. `figcraft-cloud --create-share-link` bootstraps a
+  single-tenant development document and prints the editor URL. Loopback hub probes against
+  PostgreSQL and SeaweedFS prove edits are durable before confirmation, a viewer sees them, a new
+  hub recovers committed state, and an outside takeover closes the connection without confirming.
+- [x] **CS-003** Serve the browser editor from the stack and join a cloud document from a link.
+  Evidence: `deploy/saas/web.Dockerfile` builds `apps/figcraft-web` for wasm32 with pinned trunk
+  and wasm-bindgen and serves it at `/edit/`; the editor reads `#join=<invite link>` at startup,
+  joins through the normal join path and clears the fragment so the secret leaves the address bar.
+  Unit tests cover the hash parser with a 20,000-input junk sweep; the image build and `/edit/`
+  content types were checked. `docs/saas/core-slice.md` describes the demo.
 - [ ] **CS-004** Demonstrate two browsers co-editing through the gateway, with the document
   surviving a cloud container restart.
 
