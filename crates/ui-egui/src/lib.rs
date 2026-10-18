@@ -201,6 +201,8 @@ mod text_enter_tests;
 #[cfg(test)]
 mod titlebar_tests;
 #[cfg(test)]
+mod export_download_tests;
+#[cfg(test)]
 mod variables_export_ui_tests;
 #[cfg(test)]
 mod variables_rename_tests;

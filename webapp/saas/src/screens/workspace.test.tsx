@@ -494,7 +494,12 @@ describe("file page", () => {
     await userEvent.click(
       screen.getByRole("button", { name: "Open in editor" }),
     );
-    await waitFor(() => expect(opened).toHaveBeenCalledWith(editorUrl));
+    // The file's name travels before the invite link so the editor opens it under that name.
+    await waitFor(() =>
+      expect(opened).toHaveBeenCalledWith(
+        editorUrl.replace("#join=", "#name=Homepage&join="),
+      ),
+    );
   });
 
   it("refuses to navigate to an editor address that is not this site's and shows it instead", async () => {
@@ -586,6 +591,21 @@ describe("file page", () => {
 });
 
 describe("safeEditorUrl", () => {
+  it("puts the file name before the invite link", () => {
+    const origin = "https://figcraft.example";
+    expect(
+      safeEditorUrl(`${origin}/edit/#join=a%26b`, origin, "Home screen"),
+    ).toBe(`${origin}/edit/#name=Home%20screen&join=a%26b`);
+    expect(safeEditorUrl(`${origin}/edit/#join=abc`, origin, "  ")).toBe(
+      `${origin}/edit/#join=abc`,
+    );
+    const long =
+      safeEditorUrl(`${origin}/edit/#join=abc`, origin, "x".repeat(200)) ?? "";
+    expect(long).toContain(`#name=${"x".repeat(80)}&join=`);
+    expect(
+      safeEditorUrl("https://evil.example/edit/#join=abc", origin, "x"),
+    ).toBeNull();
+  });
   const origin = "https://figcraft.example";
   it("accepts only this origin's /edit/ page with a #join fragment", () => {
     expect(safeEditorUrl(`${origin}/edit/#join=abc`, origin)).toBe(

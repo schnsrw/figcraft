@@ -137,6 +137,27 @@ describe("password sign-in", () => {
     );
   });
 
+  it("says so when the page was opened at an address the server is not set up for (403 wrong_origin)", async () => {
+    const { api } = passwordApi();
+    api.on("POST /auth/password/login", {
+      status: 403,
+      body: {
+        error: {
+          code: "forbidden",
+          reason: "wrong_origin",
+          message: "This address is not the one the server is set up for.",
+          request_id: "r-test",
+        },
+      },
+    });
+    render(<App client={api.client()} />);
+    await fillLogin("ada", "x");
+    await userEvent.click(screen.getByTestId("signin-submit"));
+    const text = (await screen.findByTestId("signin-error")).textContent ?? "";
+    expect(text).toContain("isn't the one FigCraft is set up for");
+    expect(text).not.toContain("turned off");
+  });
+
   it("offers both methods when both are on, and only the organisation button when passwords are off", async () => {
     const both = passwordApi(methodsBoth);
     const { unmount } = render(<App client={both.api.client()} />);

@@ -79,7 +79,11 @@ export function FileScreen({
     setManualUrl(null);
     try {
       const link = await documents.collabLink(client, found.id);
-      const target = safeEditorUrl(link.editor_url);
+      const target = safeEditorUrl(
+        link.editor_url,
+        window.location.origin,
+        found.name,
+      );
       if (target === null) {
         // The server advertised an address that is not this site's editor; never navigate to it
         // blindly. Show it so the person can decide.

@@ -50,6 +50,10 @@ export function waitText(seconds: number | null): string {
   return `about ${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
+/** The server refused the page's address (it was opened at a name the server is not set up for). */
+const WRONG_ADDRESS =
+  "This address isn't the one FigCraft is set up for, so sign-in was refused. Open it at the address your administrator gave you (for a trial on one computer: http://127.0.0.1:8080).";
+
 /** What a refused password sign-in tells the person. Never says which part was wrong. */
 export function loginProblem(error: ApiError): string {
   switch (error.status) {
@@ -58,6 +62,7 @@ export function loginProblem(error: ApiError): string {
     case 429:
       return `Too many attempts. Try again in ${waitText(error.retryAfter)}.`;
     case 403:
+      if (error.reason === "wrong_origin") return WRONG_ADDRESS;
       return "Password sign-in is turned off for this workspace. Use the organisation sign-in instead, or ask an administrator.";
     case 400:
       return "Enter your login and your password.";
@@ -81,6 +86,7 @@ export function passwordProblem(error: ApiError): string {
     case 404:
       return "That link or token isn't valid any more. It may have expired or already been used.";
     case 403:
+      if (error.reason === "wrong_origin") return WRONG_ADDRESS;
       return "Password accounts are turned off for this workspace.";
     case 429:
       return `Too many attempts. Try again in ${waitText(error.retryAfter)}.`;

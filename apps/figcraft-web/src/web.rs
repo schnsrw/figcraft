@@ -74,12 +74,17 @@ pub fn start() {
                     let mut fig = FigApp::new(session, Box::new(WebServices { reduce_motion, ctx: cc.egui_ctx.clone() }));
                     // `#join=<link>`: join that session, as opening an invite link does on the desktop.
                     let hash = web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default();
+                    let mut pending_name = None;
                     if let Some(link) = crate::query::join_link(&hash) {
                         let link = js_sys::decode_uri_component(link).ok().and_then(|s| s.as_string()).unwrap_or_else(|| link.to_string());
+                        pending_name = crate::query::join_name(&hash)
+                            .and_then(|name| js_sys::decode_uri_component(name).ok().and_then(|s| s.as_string()))
+                            .map(|name| name.trim().chars().take(MAX_FILE_NAME_CHARS).collect::<String>())
+                            .filter(|name| !name.is_empty());
                         figcraft_ui_egui::live::open_invite(&mut fig, &link);
                         clear_join_fragment();
                     }
-                    Ok(Box::new(WebShell { fig }))
+                    Ok(Box::new(WebShell { fig, pending_name }))
                 }),
             )
             .await;
@@ -129,11 +134,42 @@ fn query() -> String {
 
 struct WebShell {
     fig: FigApp,
+    /// The name the workspace gave the cloud file this page joined (`#name=…&join=…`), applied once
+    /// if the joined file still has the placeholder name.
+    pending_name: Option<String>,
+}
+
+/// The placeholder every new cloud file starts with (`figcraft_cloud_relay::collab_backend::BASE_NAME`).
+const PLACEHOLDER_NAME: &str = "Untitled";
+/// Longest file name taken from the page address, in characters.
+const MAX_FILE_NAME_CHARS: usize = 80;
+
+impl WebShell {
+    /// A new cloud file's document is the same placeholder for everyone, whatever the workspace
+    /// calls the file. Once the session is live and its document has arrived, the first person in
+    /// gives it the workspace's name as an ordinary rename: it syncs, is saved with the file and
+    /// everyone sees it. A file that already has a name of its own is left alone.
+    fn apply_cloud_name(&mut self) {
+        if self.pending_name.is_none() {
+            return;
+        }
+        let live = self.fig.session.live();
+        if live.status != figcraft_engine::live::Status::Live || live.info.is_none() || live.doc_uid.is_none() {
+            return;
+        }
+        let placeholder = self.fig.session.doc().is_ok_and(|doc| doc.name == PLACEHOLDER_NAME);
+        if let Some(name) = self.pending_name.take()
+            && placeholder
+        {
+            self.fig.run("file.rename", serde_json::json!({ "name": name }));
+        }
+    }
 }
 
 impl eframe::App for WebShell {
     // `FigApp::ui` runs its own per-frame logic first (fonts, theme), like the desktop app.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.apply_cloud_name();
         self.fig.ui(ui);
     }
 }

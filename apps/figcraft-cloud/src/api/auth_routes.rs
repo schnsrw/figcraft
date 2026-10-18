@@ -91,7 +91,13 @@ pub(super) fn respond(status: StatusCode, cookies: &[String], location: Option<&
 }
 
 pub(super) fn require_same_origin(identity: &IdentityConfig, headers: &HeaderMap) -> Result<(), ApiError> {
-    if identity.same_origin(headers) { Ok(()) } else { Err(ApiError::forbidden()) }
+    if identity.same_origin(headers) {
+        Ok(())
+    } else {
+        // Say what is wrong without revealing the expected address: the page was opened at an
+        // address other than the one this server is configured for (`FIGCRAFT_PUBLIC_URL`).
+        Err(ApiError::forbidden().with_note("wrong_origin", "This address is not the one the server is set up for."))
+    }
 }
 
 pub(super) fn session_cookie(identity: &IdentityConfig, created: &CreatedSession) -> Result<String, ApiError> {

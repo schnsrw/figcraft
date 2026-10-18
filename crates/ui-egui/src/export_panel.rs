@@ -334,6 +334,18 @@ pub(crate) fn save_one(app: &mut FigApp, ids: &[NodeId], setting: &ExportSetting
     let ext = setting.format.ext();
     let mut params = setting_params(setting);
     params["ids"] = json!(ids);
+    // Where the platform has no save dialogs (the browser) the export comes back as bytes and is
+    // handed to the page as a download, like the variables export.
+    if app.services.downloads() {
+        use base64::Engine as _;
+        let Some(result) = app.run("file.export", params) else { return };
+        let bytes = result["data"].as_str().and_then(|data| base64::engine::general_purpose::STANDARD.decode(data).ok());
+        match bytes {
+            Some(bytes) if app.services.download(file, &bytes) => app.toast(trf("Exported {name}", &[("name", &file)])),
+            _ => app.toast(tr("Couldn't download the export")),
+        }
+        return;
+    }
     app.pick_save(tr("Export"), file, &[ext], move |app, p| {
         params["path"] = json!(p.to_string_lossy());
         if app.run("file.export", params).is_some() {
