@@ -1,5 +1,6 @@
 //! [`NetLink`]: the engine's [`LiveLink`] over the network.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,6 +17,7 @@ use crate::guest::{Guest, GuestConfig, Publish, upload_file};
 use crate::host::{Host, HostConfig};
 use crate::inbox::{Inbox, Waker};
 use crate::invite::{Endpoint, Invite};
+use crate::link_assets::{Pauses, Workers};
 use crate::manage;
 use crate::net::NetLimits;
 use crate::sessions::Sessions;
@@ -52,13 +54,46 @@ pub struct NetLink {
     libraries: Inbox,
     /// Background library requests are out.
     fetching: Arc<AtomicBool>,
+    /// What each joined session was joined with: where its images are, and the token that
+    /// authorises fetching and adding them.
+    invites: BTreeMap<SessionId, Invite>,
+    /// Image transfers (TS-009): started on first use.
+    workers: Option<Workers>,
+    pauses: Pauses,
 }
 
 impl NetLink {
     /// `wake` is called (from network threads) whenever something arrives for the UI.
     pub fn new(wake: Waker) -> Self {
         let libraries = Inbox::new(wake.clone());
-        Self { limits: NetLimits::default(), sessions: Sessions::new(wake), guest: |c| c, libraries, fetching: Arc::default() }
+        Self {
+            limits: NetLimits::default(),
+            sessions: Sessions::new(wake),
+            guest: |c| c,
+            libraries,
+            fetching: Arc::default(),
+            invites: BTreeMap::new(),
+            workers: None,
+            pauses: Pauses::default(),
+        }
+    }
+
+    /// With other pauses between the attempts of image uploads and downloads (tests shorten them).
+    #[must_use]
+    pub fn with_image_pauses(mut self, upload: Vec<std::time::Duration>, fetch: Vec<std::time::Duration>) -> Self {
+        self.pauses = Pauses { upload, fetch };
+        self
+    }
+
+    /// The session's invite and mailbox, and the workers (started now), for an image transfer.
+    fn transfer(&mut self, session: SessionId) -> Result<(Invite, Inbox, &Workers), String> {
+        let invite = self.invites.get(&session).cloned().ok_or("this session has no place for images")?;
+        let inbox = self.sessions.inbox_of(session).ok_or("this session is over")?;
+        if self.workers.is_none() {
+            self.workers = Workers::start();
+        }
+        let workers = self.workers.as_ref().ok_or("can't start a thread for the image transfer")?;
+        Ok((invite, inbox, workers))
     }
 
     /// With other transport limits.
@@ -167,6 +202,7 @@ impl LiveLink for NetLink {
     fn join_resuming(&mut self, session: SessionId, link: &str, name: &str, resume: Option<Resume>) -> Result<(), String> {
         let (invite, code) = Invite::parse_join(link)?;
         let cfg = GuestConfig { resume, ..self.guest_config(invite, code, name) };
+        self.invites.insert(session, cfg.invite.clone());
         let inbox = self.sessions.inbox();
         let guest = Guest::start(cfg, inbox.clone()).map_err(|e| format!("can't start the connection: {e}"))?;
         self.started(session, Active::Guest(guest), inbox);
@@ -256,9 +292,25 @@ impl LiveLink for NetLink {
     }
 
     fn leave(&mut self, session: SessionId) {
+        self.invites.remove(&session);
         if let Some(active) = self.sessions.remove(session) {
             active.end();
         }
+    }
+
+    fn asset_put(&mut self, session: SessionId, hash: &str, bytes: Arc<Vec<u8>>) -> Result<(), String> {
+        let (limits, pauses) = (self.limits, self.pauses.upload.clone());
+        let (invite, inbox, workers) = self.transfer(session)?;
+        if crate::assets::image_url(&invite, hash).is_none() {
+            return Err("this server has no place for images".into());
+        }
+        workers.put(inbox, invite, hash.to_string(), bytes, pauses, limits)
+    }
+
+    fn asset_get(&mut self, session: SessionId, hash: &str) -> Result<(), String> {
+        let (limits, pauses) = (self.limits, self.pauses.fetch.clone());
+        let (invite, inbox, workers) = self.transfer(session)?;
+        workers.get(inbox, invite, hash.to_string(), pauses, limits)
     }
 
     fn presence(&mut self, session: SessionId, p: &Presence) {

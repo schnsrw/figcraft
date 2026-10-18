@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 
-use figcraft_doc::{Document, NodeId};
+use figcraft_doc::{Document, ImageData, NodeId};
 
 use crate::assets::{self, MissingImage};
 use crate::change::{Change, Entry, Prop};
@@ -35,6 +35,10 @@ struct Pending {
     /// meanwhile is a preview), so it never rests on an edit the server refused or on stale
     /// values.
     sent: bool,
+    /// Refers to an image that is still being uploaded ([`Client::expect_upload`]): it, and every
+    /// batch after it, waits until [`Client::mark_uploaded`] (the server would refuse a reference
+    /// to bytes it does not hold yet).
+    blocked: bool,
 }
 
 /// One participant's sync state.
@@ -70,6 +74,13 @@ pub struct Client {
     /// Images that were uploaded to the server's asset store (hash, byte length): an edit that
     /// adds one sends a reference instead of the bytes.
     uploaded: BTreeMap<String, u64>,
+    /// Images being uploaded (hash, byte length): batches that refer to them wait.
+    awaiting: BTreeMap<String, u64>,
+}
+
+/// Whether `c` puts, by reference, an image that is being uploaded.
+fn refers_to(c: &Change, awaiting: &BTreeMap<String, u64>) -> bool {
+    matches!(c, Change::Put { entry: Entry::Image(k), .. } if awaiting.contains_key(k) && assets::image_ref(c).is_some())
 }
 
 /// The step with id `id` in either stack.
@@ -121,6 +132,7 @@ impl Client {
             access,
             blobs: BTreeMap::new(),
             uploaded: BTreeMap::new(),
+            awaiting: BTreeMap::new(),
         })
     }
 
@@ -135,6 +147,7 @@ impl Client {
             .filter(|(k, img)| {
                 !have.contains_key(*k)
                     && !self.uploaded.contains_key(*k)
+                    && !self.awaiting.contains_key(*k)
                     && assets::is_hash(k)
                     && u64::try_from(img.bytes.len()).is_ok_and(|n| n >= threshold.max(1))
             })
@@ -142,11 +155,66 @@ impl Client {
             .collect()
     }
 
+    /// Image `hash` of `len` bytes is being uploaded to the server's asset store. The edit that
+    /// adds it ([`edit`](Self::edit)) is made at once, as a reference, and goes out when
+    /// [`mark_uploaded`](Self::mark_uploaded) says the bytes are there (or
+    /// [`abandon_upload`](Self::abandon_upload) says they will not be, and it goes out inline).
+    /// Batches made after it queue behind it.
+    pub fn expect_upload(&mut self, hash: &str, len: u64) {
+        if assets::is_hash(hash) && len > 0 && !self.uploaded.contains_key(hash) {
+            self.awaiting.insert(hash.to_string(), len);
+        }
+    }
+
     /// Image `hash` of `len` bytes is in the server's asset store: an edit that adds it sends a
-    /// reference.
-    pub fn mark_uploaded(&mut self, hash: &str, len: u64) {
+    /// reference, and the batches that waited for it go out (returned).
+    pub fn mark_uploaded(&mut self, hash: &str, len: u64) -> Vec<ClientMsg> {
         if assets::is_hash(hash) && len > 0 {
             self.uploaded.insert(hash.to_string(), len);
+        }
+        self.awaiting.remove(hash);
+        self.unblock();
+        self.flush(&NoRecompute)
+    }
+
+    /// Image `hash` could not be uploaded: the batches that wait for it send the bytes inline
+    /// instead (the server refuses what it cannot keep, with a reason), and go out (returned).
+    pub fn abandon_upload(&mut self, hash: &str) -> Vec<ClientMsg> {
+        self.awaiting.remove(hash);
+        let bytes = self.blobs.get(hash).cloned();
+        for p in self.pending.iter_mut().filter(|p| !p.sent) {
+            let mut keep = Vec::with_capacity(p.changes.len());
+            for c in std::mem::take(&mut p.changes) {
+                let reference = assets::image_ref(&c).filter(|_| matches!(&c, Change::Put { entry: Entry::Image(k), .. } if k == hash));
+                let Some(r) = reference else {
+                    keep.push(c);
+                    continue;
+                };
+                // Back to the bytes the replicas hold; without them there is nothing to send.
+                if let Some(bytes) = &bytes {
+                    let inline = ImageData { bytes: bytes.clone(), width: r.width, height: r.height };
+                    if let Ok(value) = crate::docprops::inline_value(&inline) {
+                        keep.push(Change::Put { entry: Entry::Image(hash.to_string()), value });
+                    }
+                }
+            }
+            p.changes = keep;
+        }
+        self.unblock();
+        self.flush(&NoRecompute)
+    }
+
+    /// Let the batches go whose images are all uploaded.
+    fn unblock(&mut self) {
+        let awaiting = &self.awaiting;
+        for p in self.pending.iter_mut().filter(|p| p.blocked) {
+            p.blocked = p.changes.iter().any(|c| refers_to(c, awaiting));
+        }
+        // Everything after a batch that still waits waits too.
+        let mut after = false;
+        for p in self.pending.iter_mut() {
+            after |= p.blocked;
+            p.blocked = after;
         }
     }
 
@@ -201,7 +269,8 @@ impl Client {
     fn externalize(&mut self, changes: &mut [Change], doc: &Document) -> Result<(), Error> {
         for c in changes.iter_mut() {
             let Change::Put { entry: Entry::Image(key), value } = c else { continue };
-            let (Some(len), Some(img)) = (self.uploaded.get(key.as_str()).copied(), doc.images.get(key.as_str())) else { continue };
+            let known = self.uploaded.get(key.as_str()).or_else(|| self.awaiting.get(key.as_str())).copied();
+            let (Some(len), Some(img)) = (known, doc.images.get(key.as_str())) else { continue };
             if assets::is_placeholder(img) {
                 continue;
             }
@@ -302,7 +371,7 @@ impl Client {
         if d.changes.is_empty() {
             return Ok(None);
         }
-        if !self.uploaded.is_empty() {
+        if !self.uploaded.is_empty() || !self.awaiting.is_empty() {
             self.externalize(&mut d.changes, doc)?;
         }
         let step = match undo_label {
@@ -410,7 +479,8 @@ impl Client {
         let batch_id = self.next_batch;
         // `next_batch` starts from the welcome's `last_batch`, the host's word: saturate.
         self.next_batch = self.next_batch.saturating_add(1);
-        self.pending.push_back(Pending { batch_id, base_seq: self.seq, changes, kind, step, rebased: false, sent: false });
+        let blocked = self.pending.back().is_some_and(|p| p.blocked) || changes.iter().any(|c| refers_to(c, &self.awaiting));
+        self.pending.push_back(Pending { batch_id, base_seq: self.seq, changes, kind, step, rebased: false, sent: false, blocked });
     }
 
     /// The waiting batches that can go now, in order (see [`Pending::sent`]).
@@ -424,6 +494,10 @@ impl Client {
             if p.sent {
                 i += 1;
                 continue;
+            }
+            // Waiting for an image to upload, and so is everything after it.
+            if p.blocked {
+                break;
             }
             if matches!(p.kind, BatchKind::Undo | BatchKind::Redo) {
                 if i > 0 {
