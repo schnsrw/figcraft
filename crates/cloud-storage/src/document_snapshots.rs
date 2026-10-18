@@ -438,6 +438,28 @@ pub async fn restore_latest_snapshot_with<T>(
     transaction: &mut TenantTransaction<'_>,
     store: &ObjectStore,
     document_id: CloudDocumentId,
+    accept: impl FnMut(SessionState) -> Option<T>,
+) -> Result<Restore<T>, SnapshotStoreError> {
+    restore_snapshot_with(transaction, store, document_id, None, accept).await
+}
+
+/// [`restore_latest_snapshot_with`] limited to snapshots at or below `max_seq`: the starting point
+/// for rebuilding the document as it was at an earlier sequence (named versions, S6-041).
+pub async fn restore_snapshot_at_or_before_with<T>(
+    transaction: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    document_id: CloudDocumentId,
+    max_seq: i64,
+    accept: impl FnMut(SessionState) -> Option<T>,
+) -> Result<Restore<T>, SnapshotStoreError> {
+    restore_snapshot_with(transaction, store, document_id, Some(max_seq), accept).await
+}
+
+async fn restore_snapshot_with<T>(
+    transaction: &mut TenantTransaction<'_>,
+    store: &ObjectStore,
+    document_id: CloudDocumentId,
+    max_seq: Option<i64>,
     mut accept: impl FnMut(SessionState) -> Option<T>,
 ) -> Result<Restore<T>, SnapshotStoreError> {
     let rows: Vec<CandidateRow> = sqlx::query_as(concat!(
@@ -447,6 +469,7 @@ pub async fn restore_latest_snapshot_with<T>(
         "JOIN documents d ON d.tenant_id = s.tenant_id AND d.id = s.document_id ",
         "JOIN objects o ON o.tenant_id = s.tenant_id AND o.id = s.object_id ",
         "WHERE s.tenant_id = $1::uuid AND s.document_id = $2::uuid AND s.state = 'verified' AND s.seq <= d.current_seq ",
+        "AND ($5::bigint IS NULL OR s.seq <= $5::bigint) ",
         "AND o.kind = 'snapshot' AND o.state = 'verified' AND o.bucket = $3 ",
         "ORDER BY s.seq DESC, s.created_at DESC, s.id DESC LIMIT $4"
     ))
@@ -454,6 +477,7 @@ pub async fn restore_latest_snapshot_with<T>(
     .bind(document_id.to_string())
     .bind(store.bucket_name())
     .bind(MAX_RESTORE_CANDIDATES)
+    .bind(max_seq)
     .fetch_all(transaction.connection())
     .await
     .map_err(database_error)?;

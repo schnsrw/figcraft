@@ -12,6 +12,8 @@ figcraft-cloud-storage = { path = "../cloud-storage" }
 figcraft-collab = { workspace = true }
 figcraft-collab-net = { workspace = true }
 log = { workspace = true }
+# S6-041: restoring a version submits one batch to the room as an ordinary client (blocking client).
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 sqlx = { workspace = true }
 # The collaboration hub's backend is synchronous: it drives storage on a runtime of its own.
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
@@ -22,7 +24,6 @@ figcraft-doc = { workspace = true }
 figcraft-engine = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros"] }
-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 
 [lints]
 workspace = true

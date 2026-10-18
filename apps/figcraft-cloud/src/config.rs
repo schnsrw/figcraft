@@ -66,6 +66,8 @@ pub(super) struct CloudConfig {
     password_params: figcraft_cloud_auth::password::HashParams,
     /// Password hashes computed at once (`FIGCRAFT_PASSWORD_CONCURRENCY`).
     password_concurrency: usize,
+    /// `FIGCRAFT_INTERNAL_RELAY_ADDR`: where the API reaches the relay (`host:port`).
+    relay_addr: String,
     /// Sign-in lockout (`FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD`, `_BASE_SECONDS`, `_MAX_SECONDS`).
     login_lockout: figcraft_cloud_storage::credentials::LockoutPolicy,
     /// Document images (TS-009): `FIGCRAFT_IMAGE_MAX_BYTES`, `FIGCRAFT_IMAGE_TENANT_QUOTA_BYTES`,
@@ -99,6 +101,7 @@ impl Default for CloudConfig {
             trusted_proxies: Vec::new(),
             password_params: figcraft_cloud_auth::password::HashParams::default(),
             password_concurrency: 4,
+            relay_addr: "127.0.0.1:8082".to_string(),
             login_lockout: figcraft_cloud_storage::credentials::LockoutPolicy::default(),
             images: crate::api::images_api::ImageSettings::default(),
         }
@@ -251,6 +254,17 @@ impl CloudConfig {
                     config.password_concurrency =
                         bounded(value, 1, 64, "FIGCRAFT_PASSWORD_CONCURRENCY must be a whole number from 1 to 64")? as usize;
                 }
+                "FIGCRAFT_INTERNAL_RELAY_ADDR" => {
+                    let valid = value.rsplit_once(':').is_some_and(|(host, port)| {
+                        !host.is_empty()
+                            && port.parse::<u16>().is_ok()
+                            && host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'[' | b']' | b':'))
+                    });
+                    if !valid {
+                        return Err("FIGCRAFT_INTERNAL_RELAY_ADDR must be host:port");
+                    }
+                    config.relay_addr = value.to_string();
+                }
                 "FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD" => {
                     config.login_lockout.threshold =
                         bounded(value, 1, 100, "FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD must be a whole number from 1 to 100")? as u32;
@@ -355,6 +369,11 @@ impl CloudConfig {
     /// The Argon2id cost for new password hashes.
     pub(super) const fn password_params(&self) -> figcraft_cloud_auth::password::HashParams {
         self.password_params
+    }
+
+    /// Where the API reaches the relay.
+    pub(super) fn relay_addr(&self) -> &str {
+        &self.relay_addr
     }
 
     /// When and for how long failing sign-ins lock an account.
@@ -547,6 +566,7 @@ fn is_known_setting(key: &str) -> bool {
         "FIGCRAFT_PASSWORD_PASSES",
         "FIGCRAFT_PASSWORD_LANES",
         "FIGCRAFT_PASSWORD_CONCURRENCY",
+        "FIGCRAFT_INTERNAL_RELAY_ADDR",
         "FIGCRAFT_LOGIN_LOCKOUT_THRESHOLD",
         "FIGCRAFT_LOGIN_LOCKOUT_BASE_SECONDS",
         "FIGCRAFT_IMAGE_MAX_BYTES",

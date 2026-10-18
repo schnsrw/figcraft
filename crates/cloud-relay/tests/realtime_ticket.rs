@@ -567,3 +567,86 @@ fn every_batch_records_whether_a_person_acted_directly_through_a_team_or_through
     hosting.stop();
     Ok(())
 }
+
+#[test]
+fn restoring_an_earlier_state_adds_one_ordinary_batch_and_keeps_every_earlier_one() -> TestResult {
+    use figcraft_cloud_relay::restore::{Applied, apply_document};
+    use figcraft_cloud_relay::server_at;
+    use figcraft_cloud_storage::objects::ObjectStore;
+    use figcraft_collab::Limits;
+    let Some(fixture) = Fixture::new()? else {
+        return Ok(());
+    };
+    let file = fixture.document.to_string();
+    let (ada, ben) = (fixture.member(Role::Editor), fixture.member(Role::Editor));
+    let expires = expiry(now(), MAX_TICKET_SECS);
+    let (mut hosting, _sweeper) = fixture.serve(true);
+    let addr = hosting.addr();
+    let store = ObjectStore::new(&fixture.objects)?;
+
+    // Ada makes three edits; Ben watches the room.
+    let mut a = Raw::join(addr, &file, &fixture.ticket(&ada, fixture.document, true, expires));
+    let (a_id, seq, _, page) = a.welcome();
+    let mut b = Raw::join(addr, &file, &fixture.ticket(&ben, fixture.document, true, expires));
+    let (b_id, ..) = b.welcome();
+    a.rename(seq, 1, page, "First draft");
+    let s1 = a.confirmation(a_id, 1).unwrap();
+    a.rename(s1, 2, page, "Second draft");
+    let s2 = a.confirmation(a_id, 2).unwrap();
+    a.rename(s2, 3, page, "Final");
+    let s3 = a.confirmation(a_id, 3).unwrap();
+    assert_eq!(s3, 3);
+    let deadline = Instant::now() + WAIT;
+    while fixture.attributions().len() < 3 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    assert_eq!(fixture.attributions().len(), 3);
+
+    // The document as it was after the first edit, rebuilt from the durable history alone.
+    let limits = Limits::default();
+    let then = fixture.runtime.block_on(server_at(&fixture.pool, &store, fixture.tenant, fixture.document, 1, limits)).unwrap();
+    let now_state = fixture.runtime.block_on(server_at(&fixture.pool, &store, fixture.tenant, fixture.document, 3, limits)).unwrap();
+    assert_ne!(then.document(), now_state.document());
+    // A sequence the log does not reach is refused, not guessed.
+    assert!(fixture.runtime.block_on(server_at(&fixture.pool, &store, fixture.tenant, fixture.document, 99, limits)).is_err());
+
+    // Restore: one batch, by the person who asked, through the relay.
+    let target = then.document().clone();
+    let ticket = fixture.ticket(&ada, fixture.document, true, expires);
+    let applied = apply_document(addr, &file, &ticket, &target, Duration::from_secs(20)).unwrap();
+    assert_eq!(applied, Applied::Batch { seq: 4 });
+    // Everyone connected sees an ordinary edit with the next sequence number.
+    let seen = loop {
+        match b.next() {
+            Some(ServerMsg::Changes(accepted)) if accepted.seq == 4 => break accepted,
+            Some(_) => {}
+            None => panic!("Ben never saw the restore"),
+        }
+    };
+    assert_ne!(seen.author, b_id);
+    // Nothing earlier was rewritten: five events? no, four, in order, and the new one is Ada's.
+    let deadline = Instant::now() + WAIT;
+    while fixture.attributions().len() < 4 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let events = fixture.attributions();
+    assert_eq!(events.iter().map(|e| e.0).collect::<Vec<_>>(), vec![1, 2, 3, 4]);
+    assert_eq!(events[3].1, ada.principal.to_string(), "the restore is attributed to the person who asked");
+    let head = fixture.runtime.block_on(server_at(&fixture.pool, &store, fixture.tenant, fixture.document, 4, limits)).unwrap();
+    assert_eq!(head.document(), then.document(), "the head now equals the restored version");
+    let before = fixture.runtime.block_on(server_at(&fixture.pool, &store, fixture.tenant, fixture.document, 3, limits)).unwrap();
+    assert_eq!(before.document(), now_state.document(), "the history before it is intact");
+
+    // Restoring what the room already holds sends nothing.
+    let again = apply_document(addr, &file, &fixture.ticket(&ada, fixture.document, true, expires), &target, Duration::from_secs(20)).unwrap();
+    assert_eq!(again, Applied::Unchanged);
+    // A viewer's ticket cannot restore: the room refuses the batch.
+    let viewer = fixture.member(Role::Viewer);
+    let denied =
+        apply_document(addr, &file, &fixture.ticket(&viewer, fixture.document, false, expires), now_state.document(), Duration::from_secs(20));
+    assert!(denied.is_err(), "{denied:?}");
+    assert_eq!(fixture.attributions().len(), 4);
+    drop((a, b));
+    hosting.stop();
+    Ok(())
+}
