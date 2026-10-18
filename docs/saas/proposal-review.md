@@ -3,6 +3,10 @@
 > **Status:** reconciled with the repository · **Reviewed:** 2026-10-16 · **Input:**
 > `FigCraft_Enterprise_PRD_HLD_LLD_Architecture_v1.docx`
 
+> **Later browser amendment:** the 2026-10-18 owner decision
+> [SAAS-ADR-018](wasm-first-browser-decision.md) supersedes this review's React-owned browser
+> composition. The rest of this file records the 2026-10-16 proposal review as it occurred.
+
 ## Verdict
 
 The supplied proposal has the right product and distributed-systems direction. Its three-layer

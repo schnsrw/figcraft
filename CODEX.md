@@ -1,5 +1,12 @@
 # FigCraft fork handoff
 
+> **Current active work:** read [`SESSION_HANDOFF.md`](SESSION_HANDOFF.md) first. It records
+> the 2026-10-18 combined-branch audit, local test state, credentials location, and the
+> owner's **WASM-first browser architecture correction**. Read the code findings and
+> migration plan in [`docs/saas/wasm-first-browser-decision.md`](docs/saas/wasm-first-browser-decision.md).
+> The React-shell direction and continuation steps below are historical; do not resume
+> iframe/CSS work as the browser architecture.
+
 > **Purpose:** durable session context for Codex and other repository agents  
 > **Last updated:** 2026-10-17
 > **Active program:** self-hostable single-tenant, multi-tenant and embedded FigCraft SaaS
@@ -24,8 +31,10 @@ the continuation point, a blocker or a major decision changes.
 
 - Preserve FigCraft's Rust document engine, renderer, command model, native app and Rust/WASM
   editor. This is an additive SaaS fork, not an editor rewrite.
-- The fork-owned React/TypeScript code is limited to `webapp/`: browser routing, login, workspace
-  and administration UI, HTTP integration and a typed lifecycle bridge around Rust/WASM.
+- Historical baseline: fork-owned React/TypeScript under `webapp/` owns browser routing, login,
+  workspace and administration UI around Rust/WASM. The owner superseded this browser composition
+  on 2026-10-18 with [SAAS-ADR-018](docs/saas/wasm-first-browser-decision.md): the existing
+  Rust/WASM FigCraft app is the target browser product, with narrow browser/cloud adapters.
 - TypeScript does not own document semantics, commands, undo, conflict resolution or a second
   realtime protocol. Snapshots and collaboration batches cross the bridge as opaque data.
 - Build one modular Rust cloud binary with `all`, `api`, `relay` and `worker` roles. Use PostgreSQL

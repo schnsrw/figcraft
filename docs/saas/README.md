@@ -1,6 +1,6 @@
 # FigCraft SaaS platform
 
-> **Status:** architecture baseline · **Last updated:** 2026-10-17 · **Owner:** fork maintainers
+> **Status:** browser architecture amendment pending implementation · **Last updated:** 2026-10-18 · **Owner:** fork maintainers
 
 This directory defines the SaaS extension maintained by this fork. It turns FigCraft's existing
 local-first editor and collaboration server into a deployable platform for three product modes:
@@ -32,6 +32,7 @@ auditing and operations.
 | [Filesystem migration report](filesystem-migration-report.md) | Read-only `figcraft-server` data-directory scanner and the versioned migration report format (S2-021) |
 | [Object store client decision](object-store-client-decision.md) | S3-compatible client choice (`rusty-s3` signing over `reqwest`/Rustls/ring), licences and alternatives (S3-001) |
 | [Task tracker](tracker.md) | Complete checkbox inventory for implementation and release readiness |
+| [WASM-first browser decision](wasm-first-browser-decision.md) | Owner's 2026-10-18 architecture correction, code findings, migration plan and acceptance criteria |
 
 ## Architecture decisions
 
@@ -52,10 +53,11 @@ These decisions are the default until a replacement is recorded in this director
 | SAAS-ADR-011 | Route AI through a provider-neutral server gateway | Provider secrets, quotas, policy, audit and local-model support stay out of clients |
 | SAAS-ADR-012 | Apply AI mutations through the command and collaboration path | AI edits receive authorization, validation, history, synchronization and undo semantics |
 | SAAS-ADR-013 | Keep fork-owned work in additive directories and adapter seams | Regular upstream merges should not repeatedly conflict with editor implementation files |
-| SAAS-ADR-014 | Permit TypeScript only in a fork-owned React SaaS shell and browser bridge | React is useful for account, workspace and administration UX; Rust remains authoritative for editing, collaboration and persistence |
+| SAAS-ADR-014 | Historical: permit TypeScript only in a fork-owned React SaaS shell and browser bridge; **superseded for the target browser product by SAAS-ADR-018** | The React shell was built, but duplicating home/navigation and embedding the editor produced a split experience |
 | SAAS-ADR-015 | Defer NATS or another durable message bus | PostgreSQL jobs and an outbox are sufficient until measured throughput or fan-out proves otherwise |
 | SAAS-ADR-016 | Give each cloud document one identity across browser and desktop | Opening a cloud file must not create unrelated local copies or split its history |
 | SAAS-ADR-017 | Send large document images as verified asset references, bytes over HTTP to object storage | Inline base64 images are limited to about 11 MiB by the 16 MiB event cap and loop the sender above it; see [large-images.md](large-images.md) |
+| SAAS-ADR-018 | Make the existing FigCraft Rust/WASM application the primary browser product; add narrow authenticated cloud HTTP and host integration at its browser edge | Reuse its home, tabs, templates and Rust-owned collaboration; avoid a second product UI and editor lifecycle. [Decision and migration record](wasm-first-browser-decision.md) |
 
 ## Target repository layout
 
@@ -63,12 +65,12 @@ These decisions are the default until a replacement is recorded in this director
 apps/
   figcraft-cloud/          one binary with all, api, relay and worker roles
   figcraft-server/         existing filesystem-backed self-hosted server
-  figcraft-web/            existing Rust/WASM browser editor
+  figcraft-web/            Rust/WASM browser product and thin cloud/browser adapter (target)
 
 webapp/
-  saas/                    React and TypeScript workspace shell
-  packages/editor-bridge/  typed lifecycle around the Rust/WASM editor
-  packages/api-client/     generated or schema-verified HTTP client
+  saas/                    current React workspace shell; migration source, not target owner
+  packages/editor-bridge/  current typed lifecycle bridge; reassess for host embedding only
+  packages/api-client/     current generated or schema-verified HTTP client
 
 crates/
   cloud-domain/            tenant, workspace, identity, role and quota types
@@ -100,6 +102,7 @@ together. Service boundaries and dependency direction matter more than the numbe
 | Review | Date | Authority | Scope | Outcome | Amendments |
 |---|---|---|---|---|---|
 | S0-014 | 2026-10-16 | Product owner, by explicit session authorization | SAAS-ADR-001 through SAAS-ADR-016 | Accepted as written | None |
+| Browser direction | 2026-10-18 | Product owner, by explicit session correction | SAAS-ADR-014 | Superseded by SAAS-ADR-018 | Existing React code remains until the WASM-first path is implemented and verified |
 
 This acceptance authorizes implementation that depends on the architecture baseline. It does not
 assign the architecture, security or operations reviewer identities tracked separately by S0-013.

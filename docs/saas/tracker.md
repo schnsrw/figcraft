@@ -6,6 +6,13 @@ This is the authoritative execution checklist for the fork's SaaS platform. Chec
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
 the same commit as the completed task.
 
+**Browser architecture correction (2026-10-18):** the owner selected the existing Rust/WASM
+FigCraft application as the browser product. [The decision record](wasm-first-browser-decision.md)
+documents the mistake, code findings, migration and acceptance evidence. React browser work
+already checked below remains historical evidence; it does not prove the new WASM-first journey.
+The unchecked TS-015 and S6-020/022–025 work must be assessed against the amended target. Counts
+and checkboxes are unchanged by this documentation decision.
+
 ## Status legend
 
 - `[ ]` not completed
@@ -121,14 +128,13 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
 - [ ] **TS-011** The team can find its work: recents, search across the workspace's files,
   libraries and settings screens (rest of S6-020).
   Progress (not complete): recents on the home page (this browser), name search across workspaces, projects and files (`/search`, client-side over the lists the caller can read, bounded; no server search yet) and a Settings page for the sign-in methods (`/settings`, owners and admins) in `webapp/saas/src/screens/{search,settings}.tsx`, with DB-free tests (`find.test.tsx`; 149 web tests). Not built: libraries; full-text or server-side search.
-- [ ] **TS-015** The web app looks and feels like a product, not a prototype (owner feedback
-  2026-10-18: "UI is shitty"). A design pass on every workspace screen from real-browser
-  screenshots: one consistent layout grid and spacing scale, a clear header with workspace and
-  person, file cards with a thumbnail or initial instead of bare lists, helpful empty states with
-  one obvious next action, readable typography and contrast in both light and dark, forms that
-  look finished (validation next to the field, loading and success states), responsive down to a
-  tablet, and the file name, collaborator names and avatars carried into the editor. Reviewed with
-  before and after screenshots from `webapp/e2e`.
+- [ ] **TS-015** The browser product feels like one complete design tool. Owner feedback on
+  2026-10-18 rejected the React shell, CSS-only passes and iframe composition. Deliver the
+  [WASM-first browser experience](wasm-first-browser-decision.md): FigCraft home, templates,
+  workspaces, document tabs, editor, sharing and account journeys in one coherent UI. Review the
+  real sign-in → workspace → create/open → two tabs → edit/share → home path at desktop and tablet
+  sizes, including loading, empty, permission and recovery states. Capture before/after screenshots
+  and accessible keyboard/screen-reader evidence. This remains unchecked.
 - [ ] **TS-016** HTTPS for a team's own hostname: sign-in cookies are `Secure`, so a name other
   than localhost must be served over HTTPS (a LAN name with Caddy's own authority, or a public
   domain with an automatic certificate). `deploy/saas/compose.tls.yaml` and `Caddyfile.tls` exist
@@ -2649,16 +2655,18 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ### Browser workspace
 
-- [ ] **S6-020** Build React/TypeScript navigation for recents, projects, libraries, search,
-  notifications and settings inside `webapp/`.
-  Progress (not complete): sign-in, first-run and organisation screens; workspace home with workspaces, projects and files (create, rename, archive, restore), recents (this browser only), people (members, roles, teams), invitations and a share dialog (`webapp/saas/src/screens/*`, docs/saas/web-workspace.md). Libraries, search, notifications and settings are not built, so this stays open.
+- [ ] **S6-020** Build Rust/WASM navigation for recents, cloud workspaces/projects/documents,
+  libraries, search, notifications and settings, following [SAAS-ADR-018](wasm-first-browser-decision.md).
+  Historical progress: React sign-in, first-run and organisation screens; workspace home with workspaces, projects and files (create, rename, archive, restore), browser-local recents, people, invitations and a share dialog (`webapp/saas/src/screens/*`, docs/saas/web-workspace.md). These may be migration references, but do not complete the amended Rust/WASM task. Libraries, full search, notifications and the integrated WASM cloud catalog remain open.
 - [x] **S6-021** Implement stable `/workspace/{workspace_id}/file/{document_id}` routing and deep
   links.
   Evidence: `webapp/saas/src/router.tsx` (stable URLs `/`, `/workspace/{id}`, `/workspace/{id}/file/{id}`, `/people`, `/invite`; UUID-only ids, anything else is the not-found page without an API call), `api/client.ts` and `session.tsx` (typed client; 401, 403 `bootstrap_required`, 503 and network states), `screens/file.tsx` (the file page: role, Open in editor from `GET /documents/{id}/collab-link`, Share). Deep links survive sign-in through the server-validated `return_to` (only a same-origin absolute path is sent; open-redirect shapes fall back to `/`); an invitation token is parked in session storage across the round trip and stripped from the address bar. Tests: `router.test.tsx`, `App.test.tsx`, `screens/workspace.test.tsx` (96 vitest tests in `webapp/saas`, `npm run check` green). Not done: the editor does not mount inside the page yet (Open in editor navigates to `/edit/#join=…`, S6-022); no screen-reader audit (S6-025); the full browser flow through a real identity provider was not exercised (see docs/saas/web-workspace.md).
 - [ ] **S6-022** Implement the typed editor mount, open, close, local-change, remote-change,
-  connection-state, selection and export bridge.
+  connection-state, selection and export bridge. Reassess this historical bridge wording under
+  SAAS-ADR-018: the Rust app should own these behaviors, with only a narrow host embedding seam.
 - [ ] **S6-023** Keep snapshots and collaboration batches opaque to TypeScript and add tests that
-  prevent browser-shell document semantics.
+  prevent browser-shell document semantics. Under SAAS-ADR-018, retain one Rust document model and
+  one Rust-owned browser collaboration connection per file; any host JavaScript remains opaque.
 - [ ] **S6-024** Open, edit, reconnect and export one cloud document without manual file import.
 - [ ] **S6-025** Complete WCAG 2.2 AA checks for workspace surfaces and keyboard/screen-reader audit
   of the integrated editor.
