@@ -475,3 +475,82 @@ fn replaying_a_journal_does_not_recheck_assets() {
     assert_eq!(again.seq(), 1);
     assert!(assets::is_placeholder(again.document().images.get(&hash(1)).unwrap()));
 }
+
+// ---- batches that wait for an upload ------------------------------------------------------
+
+fn batch_ids(msgs: &[ClientMsg]) -> Vec<u64> {
+    msgs.iter().filter_map(|m| if let ClientMsg::Changes { batch_id, .. } = m { Some(*batch_id) } else { None }).collect()
+}
+
+#[test]
+fn a_batch_waits_for_its_image_to_be_uploaded_and_so_does_everything_after_it() {
+    let store = Arc::new(Store::default());
+    let mut s = server(&store);
+    let (mut a, _) = join(&mut s, &modern());
+    let key = hash(21);
+    let len = 3 * MIB;
+    let d = image_doc(&a, &key, len);
+    a.expect_upload(&key, len as u64);
+    // The edit is made at once (the view shows the image) but nothing goes out.
+    assert!(a.edit(&d).unwrap().is_none());
+    assert_eq!(a.pending(), 1);
+    assert_eq!(a.document().images.get(&key).unwrap().bytes.len(), len);
+    let mut renamed = a.document().clone();
+    renamed.name = "while uploading".into();
+    assert!(a.edit(&renamed).unwrap().is_none(), "a later edit queues behind it");
+    assert_eq!(a.pending(), 2);
+    assert!(a.images_to_upload(&image_doc(&a, &hash(22), len), 1).iter().all(|(k, _)| k != &key));
+    // The upload finishes: both go out, in order, the first as a small reference.
+    store.put(&key, len as u64);
+    let out = a.mark_uploaded(&key, len as u64);
+    assert_eq!(batch_ids(&out).len(), 2, "{out:?}");
+    assert!(message::encode(&out[0]).unwrap().len() < 400);
+    for m in out {
+        let reply = s.receive(a.id(), m);
+        assert!(reject_reason(&reply).is_none(), "{reply:?}");
+        deliver(&mut a, &reply);
+    }
+    assert_eq!(a.pending(), 0);
+    assert_eq!(s.document().name, "while uploading");
+    assert!(assets::is_placeholder(s.document().images.get(&key).unwrap()));
+    assert_eq!(a.document().images.get(&key).unwrap().bytes.len(), len, "the author keeps its bytes");
+}
+
+#[test]
+fn an_upload_that_cannot_be_made_sends_the_bytes_inline() {
+    let store = Arc::new(Store::default());
+    let mut s = server(&store);
+    let (mut a, _) = join(&mut s, &modern());
+    let key = hash(23);
+    let d = image_doc(&a, &key, MIB);
+    a.expect_upload(&key, MIB as u64);
+    assert!(a.edit(&d).unwrap().is_none());
+    let out = a.abandon_upload(&key);
+    assert_eq!(out.len(), 1);
+    let ClientMsg::Changes { changes, .. } = &out[0] else { panic!("not a batch") };
+    assert!(changes.iter().any(|c| matches!(c, Change::Put { entry: Entry::Image(_), value } if value.0.get("bytes").is_some())), "{changes:?}");
+    let reply = s.receive(a.id(), out[0].clone());
+    assert!(reject_reason(&reply).is_none());
+    assert_eq!(s.document().images.get(&key).unwrap().bytes.len(), MIB, "the server holds the bytes it was sent");
+}
+
+#[test]
+fn a_reconnect_keeps_waiting_batches_waiting() {
+    let store = Arc::new(Store::default());
+    let mut s = server(&store);
+    let (mut a, _) = join(&mut s, &modern());
+    let key = hash(24);
+    let d = image_doc(&a, &key, MIB);
+    a.expect_upload(&key, MIB as u64);
+    assert!(a.edit(&d).unwrap().is_none());
+    a.disconnect();
+    s.leave(a.id());
+    let ClientMsg::Hello(h) = a.reconnect(hello(&modern())) else { panic!() };
+    let (_, out) = s.join(h).unwrap();
+    let Some(Outgoing::To(_, welcome)) = out.first().cloned() else { panic!() };
+    assert!(a.receive(welcome, &NoRecompute).unwrap().is_empty(), "nothing goes out before the upload is done");
+    store.put(&key, MIB as u64);
+    let out = a.mark_uploaded(&key, MIB as u64);
+    assert_eq!(out.len(), 1);
+    assert!(reject_reason(&s.receive(a.id(), out[0].clone())).is_none());
+}

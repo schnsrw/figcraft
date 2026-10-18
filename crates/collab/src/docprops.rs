@@ -190,6 +190,16 @@ fn image_json(img: &ImageData) -> Result<Json, Error> {
     })
 }
 
+/// The value of an image sent inline (its bytes in base64).
+pub(crate) fn inline_value(img: &ImageData) -> Result<Json, Error> {
+    Json::of(&ImageValue {
+        width: img.width,
+        height: img.height,
+        bytes: Some(base64::engine::general_purpose::STANDARD.encode(img.bytes.as_slice())),
+        asset: None,
+    })
+}
+
 /// The value of an image reference.
 pub(crate) fn ref_value(width: u32, height: u32, len: u64) -> Result<Json, Error> {
     Json::of(&ImageValue { width, height, bytes: None, asset: Some(AssetValue { len }) })
