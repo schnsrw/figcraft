@@ -35,12 +35,14 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use figcraft_cloud_auth::authz::{Action, Resource, Subject, decide};
-use figcraft_cloud_domain::{ErrorCode, PrincipalId, ProjectId, ResourceState, TenantId, Uuid, WorkspaceId};
+use figcraft_cloud_domain::policy::Inviter;
+use figcraft_cloud_domain::{ErrorCode, PrincipalId, ProjectId, ResourceState, Role, TenantId, Uuid, WorkspaceId};
 use figcraft_cloud_storage::TenantTransaction;
 use figcraft_cloud_storage::effective_roles::{resolve_team_role, resolve_workspace_access};
 use figcraft_cloud_storage::invitations::{self, InvitationError, InvitationRecord};
 use figcraft_cloud_storage::metadata::PageSize;
 use figcraft_cloud_storage::teams::{self, GrantTarget, OwnedResource, TeamError, TeamGrant, TeamRecord, TeamRole, WorkspaceGrantRole};
+use figcraft_cloud_storage::workspace_policy;
 use serde::{Deserialize, Serialize};
 
 use super::AppState;
@@ -68,7 +70,7 @@ pub(crate) fn routes() -> Router<AppState> {
         .route("/invitations/accept", post(accept_invitation))
 }
 
-fn team_error(error: TeamError) -> ApiError {
+pub(super) fn team_error(error: TeamError) -> ApiError {
     match error {
         TeamError::InvalidSlug | TeamError::InvalidName | TeamError::InvalidPageSize => invalid(),
         TeamError::Conflict | TeamError::InvalidState | TeamError::NotTenantMember | TeamError::LastManager => conflict(),
@@ -100,7 +102,7 @@ fn team_role(value: &str) -> Result<TeamRole, ApiError> {
 }
 
 /// Resolve `team` for the caller and authorize `action` on it under the disclosure policy.
-async fn authorize_team(call: &mut TenantCall<'_>, team: &str, action: Action) -> Result<Uuid, ApiError> {
+pub(super) async fn authorize_team(call: &mut TenantCall<'_>, team: &str, action: Action) -> Result<Uuid, ApiError> {
     let id = path_uuid(team)?;
     let (state, member_role) =
         resolve_team_role(&mut call.transaction, call.principal, id).await.map_err(storage_unavailable)?.ok_or(ApiError::not_found())?;
@@ -109,6 +111,33 @@ async fn authorize_team(call: &mut TenantCall<'_>, team: &str, action: Action) -
         return Ok(id);
     }
     Err(denied(decide(&call.subject, &resource, Action::TeamView).allow))
+}
+
+/// Who is inviting to `team`: a workspace administrator, the team's lead, or an editor-level member
+/// of the team. Anyone who cannot even see the team gets `404`; a visible team member with no right to
+/// invite `403`.
+async fn authorize_inviter(call: &mut TenantCall<'_>, team: &str) -> Result<(Uuid, Inviter), ApiError> {
+    let id = path_uuid(team)?;
+    let (state, member_role) =
+        resolve_team_role(&mut call.transaction, call.principal, id).await.map_err(storage_unavailable)?.ok_or(ApiError::not_found())?;
+    let admin = decide(&call.subject, &Resource::Tenant, Action::MemberManage).allow;
+    let resource = Resource::Team { state, member_role };
+    if !decide(&call.subject, &resource, Action::TeamView).allow {
+        return Err(ApiError::not_found());
+    }
+    let inviter = if admin {
+        Inviter::Admin
+    } else {
+        match member_role {
+            Some(Role::TeamManager) => Inviter::TeamLead,
+            Some(Role::Editor) => Inviter::TeamMember,
+            _ => return Err(ApiError::forbidden()),
+        }
+    };
+    if state != ResourceState::Active {
+        return Err(conflict());
+    }
+    Ok((id, inviter))
 }
 
 /// Authorize `workspace.manage_members` on `workspace` (`404` when the caller holds no role).
@@ -371,11 +400,17 @@ async fn remove_team_member(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct GrantBody {
+pub(super) struct GrantBody {
     role: String,
 }
 
-fn workspace_grant_role(value: &str) -> Result<WorkspaceGrantRole, ApiError> {
+impl GrantBody {
+    pub(super) fn role(&self) -> &str {
+        &self.role
+    }
+}
+
+pub(super) fn workspace_grant_role(value: &str) -> Result<WorkspaceGrantRole, ApiError> {
     match value {
         "workspace_admin" => Ok(WorkspaceGrantRole::WorkspaceAdmin),
         "editor" => Ok(WorkspaceGrantRole::Editor),
@@ -613,8 +648,21 @@ async fn create_invitation(
 ) -> Result<Response, ApiError> {
     let role = team_role(&body.role)?;
     let mut call = open(&state, &caller, &tenant).await?;
-    let id = authorize_team(&mut call, &team, Action::TeamManage).await?;
-    require_tenant(&call.subject, Action::MemberManage)?;
+    let (id, inviter) = authorize_inviter(&mut call, &team).await?;
+    let policy = workspace_policy::load(&mut call.transaction).await.map_err(|_| storage_unavailable(()))?;
+    // Delegation (S6-055): administrators always may; team leads and members only as far as the
+    // workspace policy lets them, never above their own level, and never into guest roles when
+    // guests are off.
+    if !policy.may_invite(inviter) || (inviter != Inviter::Admin && role == TeamRole::TeamManager) {
+        return Err(ApiError::forbidden());
+    }
+    if !policy.permits_new_member(match role {
+        TeamRole::Commenter => Role::Commenter,
+        TeamRole::Viewer => Role::Viewer,
+        TeamRole::Editor | TeamRole::TeamManager => Role::Editor,
+    }) {
+        return Err(conflict());
+    }
     let created = invitations::create_link_invitation(&mut call.transaction, id, body.email.as_deref(), role, call.principal, body.expires_in_secs)
         .await
         .map_err(invitation_error)?;

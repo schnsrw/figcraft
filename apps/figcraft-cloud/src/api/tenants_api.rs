@@ -481,6 +481,10 @@ async fn add_member(
     let mut call = open(&state, &caller, &tenant).await?;
     require_tenant(&call.subject, Action::MemberManage)?;
     require_tenant(&call.subject, member_action(None, Some(role)))?;
+    let policy = figcraft_cloud_storage::workspace_policy::load(&mut call.transaction).await.map_err(storage_unavailable)?;
+    if !policy.permits_new_member(role) {
+        return Err(conflict());
+    }
     let principal_ok: Option<bool> = sqlx::query_scalar("SELECT state = 'active' FROM principals WHERE id = $1::uuid")
         .bind(body.principal_id.to_string())
         .fetch_optional(call.transaction.connection())

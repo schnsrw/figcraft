@@ -239,11 +239,11 @@ async fn invitation_signup_creates_the_account_membership_and_session_atomically
     assert_eq!(reply.body["tenant_id"], w.tenant.to_string());
     let cookie = reply.session().ok_or("no session cookie")?;
 
-    // The new person is signed in as a viewer of the tenant, member of the invited team.
+    // The new person is signed in as a member (editor) of the tenant, the level the invited team role implies.
     let reply = call(&app, Method::GET, &format!("/api/v1/tenants/{}/whoami", w.tenant), &[("cookie", &cookie)], None).await;
     assert_eq!(
         (reply.status, reply.body["role"].as_str(), reply.body["principal"].as_str()),
-        (StatusCode::OK, Some("viewer"), Some(principal.as_str()))
+        (StatusCode::OK, Some("editor"), Some(principal.as_str()))
     );
     assert_eq!(w.count("SELECT count(*) FROM team_members WHERE principal_id = $1::uuid AND state = 'active'", &principal).await?, 1);
     // The login is the invited address; only an Argon2id hash is stored.

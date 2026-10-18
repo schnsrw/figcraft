@@ -358,7 +358,7 @@ async fn invitations_are_shown_once_accepted_atomically_and_refused_when_spent()
     let accepted = accept_invitation(&pool, &created.token, invitee, Some("ADA@example.com")).await?;
     assert_eq!((accepted.id, accepted.tenant_id, accepted.team_id, accepted.team_role), (created.id, tenant_id, team, TeamRole::Editor));
     assert!(accepted.joined_tenant);
-    assert_eq!(tenant_role(&pool, tenant_id, invitee).await?, Some(("viewer".into(), "active".into())));
+    assert_eq!(tenant_role(&pool, tenant_id, invitee).await?, Some(("editor".into(), "active".into())));
     let team_role: String =
         sqlx::query_scalar("SELECT role FROM team_members WHERE team_id = $1::uuid AND principal_id = $2::uuid AND state = 'active'")
             .bind(team.to_string())
@@ -378,7 +378,7 @@ async fn invitations_are_shown_once_accepted_atomically_and_refused_when_spent()
     transaction.commit().await?;
     let again = accept_invitation(&pool, &third.token, invitee, None).await?;
     assert!(!again.joined_tenant);
-    assert_eq!(tenant_role(&pool, tenant_id, invitee).await?, Some(("viewer".into(), "active".into())));
+    assert_eq!(tenant_role(&pool, tenant_id, invitee).await?, Some(("editor".into(), "active".into())));
 
     // Revoked and expired invitations are refused.
     let mut transaction = tx(&pool, tenant_id).await?;

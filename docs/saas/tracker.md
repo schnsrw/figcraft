@@ -1,6 +1,6 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (25/58) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (26/58) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
@@ -24,7 +24,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 25 / 58 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 26 / 58 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -2864,9 +2864,25 @@ holds projects. The platform API calls the company `workspace` in its paths and 
 
 #### Block B: Hierarchy rules
 
-- [ ] **S6-052** The project level: projects belong to a workspace and optionally a team, documents
+- [x] **S6-052** The project level: projects belong to a workspace and optionally a team, documents
   belong to a project, team-to-project grants and inheritance (extend `effective_roles.rs` and the
   existing tables; no duplicate model). Depends on S4-010.
+  Evidence: `effective_roles.rs` now resolves ownership: members of the team that owns a workspace or
+  a project get its full role capped by their team role (lead administers, editor edits, commenter and
+  viewer comment and read), reaching down to documents, plus new migration `20261018000030` table
+  `project_team_grants` (team-to-project grants, forced RLS; `teams::grant_to_team` / `revoke_team_grant`
+  / `list_project_team_grants`). API (`api/hierarchy_api.rs`, OpenAPI `openapi/hierarchy-api-v1.json`):
+  `GET /tenants/{t}/projects/{p}/team-grants`, `PUT/DELETE /tenants/{t}/teams/{team}/grants/projects/{p}`,
+  `POST /workspaces/{w}/projects` takes `owning_team_id` (caller must lead that team), projects report
+  `owning_team_id`. DB-free unit tests: role arithmetic for every team role, guest ceilings, source
+  naming (`effective_roles.rs`), and a test that every documented operation is routed and needs a
+  session (`hierarchy_api.rs`). Live tests (skip without a database) `crates/cloud-storage/tests/
+  team_projects.rs` (4): deny by default, owning team by role, workspace ownership covers its projects,
+  sharing with another team capped by team role, revoke, archived team and removed member lose access.
+  Also changed: a person who accepts a team invitation now joins the workspace at the level the team
+  role implies (editor, commenter or viewer) instead of always viewer, because a workspace `viewer` is a
+  ceiling over every resource role and invited editors could not edit. Not done: no UI; the existing
+  `PUT /teams/{team}/owned/...` routes (admin sets ownership) are unchanged.
 - [ ] **S6-053** Management direction as an explicit authorization matrix in code
   (`cloud-auth` authz) and in `security.md`: owner > workspace admin > team lead > member > guest;
   an admin cannot remove or demote the owner or grant above their own level; a team lead cannot
@@ -2878,9 +2894,23 @@ holds projects. The platform API calls the company `workspace` in its paths and 
 - [ ] **S6-055** Delegated administration: a workspace admin creates teams and assigns team leads; a
   team lead creates projects and invites members to their team within workspace policy. Depends on
   S6-053.
+  Status: implemented, not yet proven end to end. A team lead can create a project owned by their team
+  (`POST /workspaces/{w}/projects` with `owning_team_id`) and invite to their team
+  (`POST /tenants/{t}/teams/{team}/invitations`) when the workspace policy `who_may_invite` allows it
+  (`team_leads` by default; never a new team lead; no guest roles when guests are off). The policy
+  decision is unit-tested without a database (`cloud-domain` `may_invite`, `permits_new_member`). Missing:
+  an HTTP-level test of the whole lead flow, and the admin-creates-team-and-assigns-lead screens.
 - [ ] **S6-056** Per-workspace policy settings (allowed sign-in methods `oidc|password`, who may
   invite, guest access, share-link policy) editable only by owner and admins and enforced on the
   server. Depends on S6-053; sign-in method enforcement depends on S6-035.
+  Status: implemented, HTTP-level enforcement tests missing. `GET/PUT /api/v1/tenants/{t}/policy`
+  (owner and administrators write, any member reads; shape in `openapi/hierarchy-api-v1.json`),
+  migration `20261018000031` (`tenants.policy`), `crates/cloud-storage/src/workspace_policy.rs`
+  (sign-in methods are read from and written to the account settings the sign-in code already enforces;
+  a stricter share-link policy revokes the links it no longer allows), enforcement in invitation
+  creation (who may invite, guests), direct member add (guests) and share-link creation. Unit tests
+  without a database for the decisions and the stored shape; the schema was applied to the dev database
+  and the existing live suites pass. Missing: live HTTP tests of each enforcement point; the UI.
 - [ ] **S6-057** SSO sync: OIDC group or claim to team membership mapping per workspace (the design
   in `identity-mapping-policy.md`, not yet built) and deprovisioning when a member disappears from
   the identity provider. Depends on S6-053.
@@ -3177,3 +3207,4 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-043: collaborators are shown as the account they signed in with (name and palette colour set by the relay, share-link label for link joins); hub hook FP-014. S6 reaches 23/58. |
 | 2026-10-18 | S6-039: every committed batch records its principal and how access was held (member, team, share link) (schema 20261018000032). S6 reaches 24/58. |
 | 2026-10-18 | S6-040: document history API (activity runs by person and access, checkpoints kept apart, last-edited summary), paged and permission-checked. S6 reaches 25/58. |
+| 2026-10-18 | S6-052: a team that owns a workspace or project gives its members access by team role, projects can be shared with other teams, new team invitees join at the level of their team role. Policy API and delegated invitations implemented (S6-055/056 not yet ticked). S6 reaches 23/58. |
