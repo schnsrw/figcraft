@@ -31,7 +31,7 @@ describe("session states", () => {
       await screen.findByRole("heading", { name: "Your files" }),
     ).toBeTruthy();
     expect(screen.getByRole("navigation", { name: "Main" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
+    expect(screen.getByLabelText("Account menu")).toBeTruthy();
     expect(document.title).toBe("Files · FigCraft");
   });
 
@@ -209,6 +209,7 @@ describe("session states", () => {
       status: 204,
     });
     render(<App client={api.client()} />);
+    await userEvent.click(await screen.findByLabelText("Account menu"));
     await userEvent.click(
       await screen.findByRole("button", { name: "Sign out" }),
     );

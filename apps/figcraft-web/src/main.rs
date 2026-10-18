@@ -33,6 +33,11 @@ mod query_tests;
 // The branding validator is pure (tested on the host); only the browser shell calls it.
 #[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
 mod branding;
+// FigCraft Cloud: the cloud file's editor page (pure parsing, tested on the host) and its loader.
+#[cfg(target_arch = "wasm32")]
+mod cloud;
+#[cfg_attr(not(target_arch = "wasm32"), allow(dead_code))]
+mod cloud_route;
 #[cfg(target_arch = "wasm32")]
 mod web;
 

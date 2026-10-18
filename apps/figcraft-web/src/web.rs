@@ -66,16 +66,30 @@ pub fn start() {
                         log::info!("figcraft-web: wgpu backend {:?}", rs.adapter.get_info().backend);
                     }
                     let reduce_motion = web_sys::window().and_then(|w| w.match_media("(prefers-reduced-motion: reduce)").ok().flatten());
-                    let mut session = Session::new();
+                    let hash = web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default();
+                    let join = crate::query::join_link(&hash);
+                    // FigCraft Cloud: `/workspace/<id>/file/<id>` is that cloud file's editor page.
+                    let path = web_sys::window().and_then(|w| w.location().pathname().ok()).unwrap_or_default();
+                    let route = crate::cloud_route::file_route(&path);
+                    // A joined or cloud file owns this page: start with no file, so it doesn't open
+                    // beside an unrelated "Untitled" one.
+                    let mut session = if join.is_some() || route.is_some() { Session::empty() } else { Session::new() };
                     // Live sessions: the browser joins sessions a desktop app hosts; whatever arrives
                     // on the socket wakes the page for a frame.
                     let ctx = cc.egui_ctx.clone();
                     session.live.install(Box::new(figcraft_collab_net::NetLink::new(std::sync::Arc::new(move || ctx.request_repaint()))));
                     let mut fig = FigApp::new(session, Box::new(WebServices { reduce_motion, ctx: cc.egui_ctx.clone() }));
-                    // `#join=<link>`: join that session, as opening an invite link does on the desktop.
-                    let hash = web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default();
                     let mut pending_name = None;
-                    if let Some(link) = crate::query::join_link(&hash) {
+                    let mut cloud = None;
+                    if let Some(route) = route {
+                        // Cloud editor mode at once (no Home, "Opening…"); the file's name, project
+                        // and invite arrive from the API.
+                        fig.cloud = Some(crate::cloud::initial(&route));
+                        let slot = crate::cloud::Slot::default();
+                        crate::cloud::open(route, std::rc::Rc::clone(&slot), cc.egui_ctx.clone());
+                        cloud = Some(slot);
+                    } else if let Some(link) = join {
+                        // `#join=<link>`: join that session, as opening an invite link does on the desktop.
                         let link = js_sys::decode_uri_component(link).ok().and_then(|s| s.as_string()).unwrap_or_else(|| link.to_string());
                         pending_name = crate::query::join_name(&hash)
                             .and_then(|name| js_sys::decode_uri_component(name).ok().and_then(|s| s.as_string()))
@@ -84,7 +98,7 @@ pub fn start() {
                         figcraft_ui_egui::live::open_invite(&mut fig, &link);
                         clear_join_fragment();
                     }
-                    Ok(Box::new(WebShell { fig, pending_name }))
+                    Ok(Box::new(WebShell { fig, pending_name, cloud }))
                 }),
             )
             .await;
@@ -128,6 +142,16 @@ fn clear_join_fragment() {
     }
 }
 
+/// The tab's title for a cloud file: "<file> – <product>" (the product from the branding title).
+fn set_page_title(name: &str) {
+    if name.is_empty() {
+        return;
+    }
+    let Some(document) = web_sys::window().and_then(|w| w.document()) else { return };
+    let product = document.title();
+    document.set_title(&if product.is_empty() { name.to_string() } else { format!("{name} – {product}") });
+}
+
 fn query() -> String {
     web_sys::window().and_then(|w| w.location().search().ok()).unwrap_or_default()
 }
@@ -135,8 +159,10 @@ fn query() -> String {
 struct WebShell {
     fig: FigApp,
     /// The name the workspace gave the cloud file this page joined (`#name=…&join=…`), applied once
-    /// if the joined file still has the placeholder name.
+    /// if the joined file still has the placeholder name. A cloud file's comes from the API.
     pending_name: Option<String>,
+    /// FigCraft Cloud: the cloud file being opened, until its answer is taken.
+    cloud: Option<crate::cloud::Slot>,
 }
 
 /// The placeholder every new cloud file starts with (`figcraft_cloud_relay::collab_backend::BASE_NAME`).
@@ -145,6 +171,30 @@ const PLACEHOLDER_NAME: &str = "Untitled";
 const MAX_FILE_NAME_CHARS: usize = 80;
 
 impl WebShell {
+    /// FigCraft Cloud: take the opened file's metadata and join its live session, or show why it
+    /// can't open. A session that fails before the file arrives shows as unavailable.
+    fn take_cloud(&mut self) {
+        if let Some(opened) = self.cloud.as_ref().and_then(|slot| slot.borrow_mut().take()) {
+            match opened {
+                crate::cloud::Opened::Ready { file, invite } => {
+                    self.pending_name = Some(file.name.clone()).filter(|n| !n.is_empty());
+                    set_page_title(&file.name);
+                    self.fig.cloud = Some(file);
+                    figcraft_ui_egui::live::open_invite(&mut self.fig, &invite);
+                }
+                crate::cloud::Opened::Failed(file) => self.fig.cloud = Some(file),
+            }
+        }
+        let failed = matches!(self.fig.session.live().status, figcraft_engine::live::Status::Failed { .. });
+        if failed
+            && !self.fig.has_files()
+            && let Some(file) = self.fig.cloud.as_mut()
+            && file.problem.is_none()
+        {
+            file.problem = Some(figcraft_ui_egui::cloud::Problem::Unavailable);
+        }
+    }
+
     /// A new cloud file's document is the same placeholder for everyone, whatever the workspace
     /// calls the file. Once the session is live and its document has arrived, the first person in
     /// gives it the workspace's name as an ordinary rename: it syncs, is saved with the file and
@@ -169,6 +219,7 @@ impl WebShell {
 impl eframe::App for WebShell {
     // `FigApp::ui` runs its own per-frame logic first (fonts, theme), like the desktop app.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.take_cloud();
         self.apply_cloud_name();
         self.fig.ui(ui);
     }
@@ -207,6 +258,17 @@ impl Services for WebServices {
         let Some(window) = web_sys::window() else { return };
         if let Err(e) = window.open_with_url_and_target(url, "_blank") {
             log::error!("couldn't open {url}: {e:?}");
+        }
+    }
+    /// Same-tab navigation to a path on this site (the cloud file browser); anything else is ignored.
+    fn navigate(&mut self, url: &str) {
+        if !url.starts_with('/') || url.starts_with("//") || url.contains('\\') {
+            log::warn!("not navigating to {url:?}: not a path on this site");
+            return;
+        }
+        let Some(window) = web_sys::window() else { return };
+        if let Err(e) = window.location().assign(url) {
+            log::error!("couldn't go to {url}: {e:?}");
         }
     }
     fn reduce_motion(&self) -> bool {

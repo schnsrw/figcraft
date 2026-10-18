@@ -11,6 +11,7 @@ pub mod bidi;
 pub mod branch_ui;
 pub mod canvas;
 pub mod cjk;
+pub mod cloud;
 pub mod colorpicker;
 pub mod comments;
 pub mod component_panel;
@@ -85,6 +86,8 @@ mod canvas_fixes_tests;
 #[cfg(test)]
 mod canvas_image_rect_tests;
 #[cfg(test)]
+mod cloud_tests;
+#[cfg(test)]
 mod colorpicker_selection_tests;
 #[cfg(test)]
 mod comments_tests;
@@ -98,6 +101,8 @@ mod design_paste_tests;
 mod dev_mode_tests;
 #[cfg(test)]
 mod duplicate_paint_tests;
+#[cfg(test)]
+mod export_download_tests;
 #[cfg(test)]
 mod export_preview_tests;
 #[cfg(test)]
@@ -201,8 +206,6 @@ mod text_enter_tests;
 #[cfg(test)]
 mod titlebar_tests;
 #[cfg(test)]
-mod export_download_tests;
-#[cfg(test)]
 mod variables_export_ui_tests;
 #[cfg(test)]
 mod variables_rename_tests;
@@ -264,6 +267,10 @@ pub trait Services {
         None
     }
     fn open_url(&mut self, _url: &str) {}
+    /// Go to `url` in place of this page (the browser's same-tab navigation); elsewhere it opens.
+    fn navigate(&mut self, url: &str) {
+        self.open_url(url);
+    }
     /// Show the file at `path` in the platform's file manager (Finder, Explorer), selected where the
     /// platform can.
     fn reveal_path(&mut self, _path: &std::path::Path) {}
@@ -681,6 +688,9 @@ impl Default for UiState {
 pub struct FigApp {
     pub session: Session,
     pub ui: UiState,
+    /// FigCraft Cloud editor mode: this page edits one cloud file ([`cloud`]); no Home, no tabs,
+    /// no local file commands.
+    pub cloud: Option<cloud::CloudFile>,
     pub canvas: canvas::CanvasState,
     pub services: Box<dyn Services>,
     worker: Option<render_worker::Worker>,
@@ -728,6 +738,7 @@ impl FigApp {
         Self {
             ui: UiState { left_width, right_width, pages_height, ..UiState::default() },
             session,
+            cloud: None,
             canvas: canvas::CanvasState::default(),
             services,
             worker: None,
@@ -1427,7 +1438,12 @@ impl FigApp {
         // The Inspect tab measures on hover without Alt.
         self.session.tool.redlines = self.ui.right_tab == RightTab::Inspect;
         self.end_pen_outside_design();
-        tabs::tab_bar(self, ui);
+        if self.cloud.is_some() {
+            // The file browser is the cloud web app's: nothing here opens Home.
+            self.ui.home = false;
+        } else {
+            tabs::tab_bar(self, ui);
+        }
         if self.ui.present.is_some() {
             // A close request can arrive while the presenter fills the window. Let its unsaved
             // changes dialog take Escape and draw above the player just as it does in the editor.
@@ -1440,6 +1456,14 @@ impl FigApp {
             return;
         }
         if !self.has_files() || self.ui.home {
+            if self.cloud.is_some() {
+                cloud::opening(self, ui);
+                dialogs::keys(self, &ctx);
+                dialogs::show(self, &ctx);
+                self.toast_ui(&ctx);
+                windows::requests(self, &ctx);
+                return;
+            }
             home::show(self, ui);
             // The shortcuts panel belongs to the canvas; it doesn't hang over the home screen
             // (cleared after the home widgets, which may have just asked for it).

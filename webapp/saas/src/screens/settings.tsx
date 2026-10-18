@@ -29,18 +29,24 @@ export function SettingsScreen() {
         <ErrorNotice error={loaded.error} retry={reload} />
       )}
       {loaded.kind === "ready" && (
-        <SignInSettings
-          initial={loaded.value}
-          canEdit={canEdit}
-          onSave={async (next) => {
-            await settings.put(client, tenantId, next);
-            reload();
-          }}
-        />
+        <section
+          className="settings-panel"
+          aria-labelledby="authentication-heading"
+        >
+          <h2 id="authentication-heading">Authentication</h2>
+          <p className="muted small">
+            Control how members access this workspace.
+          </p>
+          <SignInSettings
+            initial={loaded.value}
+            canEdit={canEdit}
+            onSave={async (next) => {
+              await settings.put(client, tenantId, next);
+              reload();
+            }}
+          />
+        </section>
       )}
-      <p className="muted small">
-        Libraries and notification settings aren't available yet.
-      </p>
     </>
   );
 }
@@ -79,7 +85,7 @@ function SignInSettings({
 
   return (
     <form
-      className="form"
+      className="form settings-form"
       data-testid="settings-form"
       onSubmit={(event) => {
         event.preventDefault();

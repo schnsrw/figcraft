@@ -1,6 +1,5 @@
 import { Link, useRouter } from "../router";
 import { AccountScreen } from "./account";
-import { FileScreen } from "./file";
 import { HomeScreen } from "./home";
 import { InviteScreen } from "./invite";
 import { PeopleScreen } from "./people";
@@ -23,13 +22,10 @@ export function ReadyRoutes() {
         />
       );
     case "file":
-      return (
-        <FileScreen
-          key={route.documentId}
-          workspaceId={route.workspaceId}
-          documentId={route.documentId}
-        />
-      );
+    case "editor":
+      // The web server serves the FigCraft editor at a file's URL; this app only gets here when
+      // it doesn't (a development server), so say where the file is instead of a blank page.
+      return <EditorElsewhere workspaceId={route.workspaceId} />;
     case "people":
       return <PeopleScreen />;
     case "invite":
@@ -55,4 +51,18 @@ export function ReadyRoutes() {
     case "not_found":
       return null;
   }
+}
+
+/** A file's URL rendered by this app: the editor isn't served here. */
+function EditorElsewhere({ workspaceId }: { workspaceId: string }) {
+  return (
+    <section className="panel narrow" aria-labelledby="editor-elsewhere">
+      <h1 id="editor-elsewhere">Files open in the editor</h1>
+      <p>
+        This address opens the file in the FigCraft editor, which this server
+        doesn&apos;t serve.
+      </p>
+      <Link to={`/workspace/${workspaceId}`}>Back to files</Link>
+    </section>
+  );
 }

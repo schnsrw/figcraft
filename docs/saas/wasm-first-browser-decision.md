@@ -4,6 +4,42 @@
 > it has been implemented**. It supersedes the browser composition in SAAS-ADR-014. The current
 > deployment still serves a React application at `/` and the FigCraft WASM application at `/edit/`.
 
+## Revision, 2026-10-18 evening: the editor is WASM, the file browser may stay HTML
+
+The owner refined the decision. The goal is a self-hosted clone of the hosted design tool's
+workflow, and what must not break is the **editing experience and the impression of one product**.
+Some screens may stay in React. The split now follows the incumbent's public, observable product:
+
+- **File browser (HTML; React today):** sign-in, setup, invitations, home and recents, workspaces,
+  teams, projects, file lists, templates, sharing from a file's menu, people, account and settings.
+- **Editor (Rust/WASM, full page, no iframe, no host chrome):** one cloud file at its own URL,
+  `/workspace/{workspace}/file/{document}`. The web server serves the WASM editor at that path;
+  the editor reads the ids from the path, asks the cloud API for the file's name, project, share
+  permission and collaboration invite, and joins the live session. In this *cloud editor mode*
+  (`crates/ui-egui/src/cloud.rs`) there is no Home and no tab strip (the browser tab is the file's
+  tab); the main menu starts with **Back to files**; the left panel shows the project under the
+  file name; Share copies the file's link; local file commands (Open, Save, Save as, Open recent,
+  Close tab, Join/Publish live session, local versions and branches) are hidden from menus, the
+  Actions palette and shortcuts. Save says changes are saved automatically.
+- **Handoff:** the file browser navigates to a file with a full page load; React's own file page
+  and iframe were removed. Recents are recorded by the file browser when a file is opened.
+- **One look:** the file browser takes its colours, type and radii from the editor's theme tokens
+  (planned next: generated from `theme::Tokens`), so the two read as one product.
+
+The sections below remain the analysis that led here. Where they assign home, templates and
+navigation to the Rust UI, this revision replaces them: those stay in the file browser, with the
+API work listed in "Remaining work" below.
+
+### Remaining work (in order)
+
+1. Shared design tokens between the editor and the file browser; restyle the file browser.
+2. Realtime ticket renewal before a reconnect (tickets last 60 seconds).
+3. An editor-context endpoint (file, breadcrumb, role, permissions and invite in one call).
+4. Full Share dialog in the editor (members, team access, links) on the existing APIs.
+5. Templates from the API (`GET /templates`, create a document from a template on the server),
+   duplicate, move, per-user recents and drafts, file thumbnails.
+6. Cloud version history in the editor (replacing the hidden local version commands).
+
 ## Decision and the mistake
 
 The authenticated browser product should be the existing FigCraft Rust/egui application compiled

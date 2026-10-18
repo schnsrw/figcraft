@@ -333,50 +333,43 @@ function ReadyAccount() {
     state.session.deployment !== "single" && tenants.length > 1;
   const person = profile.kind === "ready" ? profile.value : null;
   return (
-    <div className="account" role="group" aria-label="Account">
-      <Link
-        to="/account"
-        className="account-who"
-        aria-label={
-          person === null
-            ? "Your account"
-            : `Your account, ${person.display_name}`
-        }
-      >
-        {person !== null && (
-          <Avatar name={person.display_name} color={person.color} />
-        )}
+    <details className="account-menu">
+      <summary aria-label="Account menu">
+        <Avatar
+          name={person?.display_name ?? "Account"}
+          color={person?.color}
+        />
         <span className="account-text">
-          {person !== null && (
-            <span className="account-name">{person.display_name}</span>
-          )}
-          {currentName !== undefined && !switchable && (
+          <span className="account-name">
+            {person?.display_name ?? "Account"}
+          </span>
+          {currentName !== undefined && (
             <span className="account-org">{currentName}</span>
           )}
         </span>
-      </Link>
-      {switchable && (
-        <span className="account-org">
-          <select
-            aria-label="Organisation"
-            value={current}
-            onChange={(event) => void chooseTenant(event.target.value)}
-          >
-            {tenants.map((tenant) => (
-              <option key={tenant.id} value={tenant.id}>
-                {tenant.name}
-              </option>
-            ))}
-          </select>
-        </span>
-      )}
-      <button
-        type="button"
-        className="button small"
-        onClick={() => void signOut()}
-      >
-        Sign out
-      </button>
-    </div>
+      </summary>
+      <div className="account-menu-content">
+        <Link to="/account">Your account</Link>
+        {switchable && (
+          <label className="account-switcher">
+            Organisation
+            <select
+              aria-label="Organisation"
+              value={current}
+              onChange={(event) => void chooseTenant(event.target.value)}
+            >
+              {tenants.map((tenant) => (
+                <option key={tenant.id} value={tenant.id}>
+                  {tenant.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        )}
+        <button type="button" onClick={() => void signOut()}>
+          Sign out
+        </button>
+      </div>
+    </details>
   );
 }

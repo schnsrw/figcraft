@@ -113,6 +113,10 @@ pub fn record_recent(app: &mut FigApp, key: &str) {
 }
 
 pub fn invoke(app: &mut FigApp, id: &str) {
+    if crate::cloud::blocks(app, id) {
+        crate::cloud::blocked(app, id);
+        return;
+    }
     match id {
         "file.open" => app.open_dialog(),
         "plugin.import" => crate::plugins_ui::import_dialog(app),
@@ -263,6 +267,9 @@ fn menu_level(app: &mut FigApp, ui: &mut Ui, prefix: &str) -> bool {
                     separator(ui);
                     last_sep = true;
                 }
+                continue;
+            }
+            if crate::cloud::blocks(app, m.id) {
                 continue;
             }
             last_sep = false;
@@ -750,8 +757,22 @@ pub fn popups(app: &mut FigApp, ctx: &egui::Context) {
     // Main menu.
     if app.ui.main_menu {
         let mut close = false;
-        let area = egui::Area::new(main_menu_id()).fixed_pos(pos2(8.0, crate::tabs::HEIGHT + 48.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+        // Below the rail's menu button: under the tab strip, which a cloud file doesn't have.
+        let tabs_h = if app.cloud.is_some() { 0.0 } else { crate::tabs::HEIGHT };
+        let area = egui::Area::new(main_menu_id()).fixed_pos(pos2(8.0, tabs_h + 48.0)).order(egui::Order::Foreground).show(ctx, |ui| {
             menu_frame(ui, &t, At { root: main_menu_id(), path: String::new() }, |ui| {
+                // A cloud file goes back to the file browser first, as a hosted editor's menu does.
+                if app.cloud.is_some() {
+                    let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
+                    plain_row_hover(ui, &resp);
+                    a11y::menu_item(&resp, tr("Back to files"), "", None);
+                    ui.painter().text(pos2(r.min.x + 10.0, r.center().y), Align2::LEFT_CENTER, tr("Back to files"), regular(12.0), t.menu_text);
+                    if resp.clicked() {
+                        crate::cloud::back_to_files(app);
+                        close = true;
+                    }
+                    separator(ui);
+                }
                 // Quick actions search row.
                 let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 30.0), Sense::click());
                 plain_row_hover(ui, &resp);
@@ -1124,6 +1145,11 @@ pub(crate) fn palette_sections(app: &FigApp, q: &str, tab: PaletteTab) -> Vec<(S
     if tab != PaletteTab::Assets {
         out.push((tr("Plugins").to_string(), plugin_rows(app, q)));
         out.push((tr("Widgets").to_string(), widget_rows(app, q)));
+    }
+    if app.cloud.is_some() {
+        for (_, rows) in &mut out {
+            rows.retain(|r| !r.key.strip_prefix("command:").is_some_and(crate::cloud::hides));
+        }
     }
     out.retain(|(_, rows)| !rows.is_empty());
     out

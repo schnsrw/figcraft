@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MAX_RETURN_TO,
   formatRoute,
+  isEditorPath,
   parseRoute,
   safeReturnTo,
   signInHref,
@@ -29,6 +30,13 @@ describe("parseRoute", () => {
       workspaceId: WORKSPACE_ID,
       documentId: DOCUMENT_ID,
     });
+    expect(
+      parseRoute(`/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}/edit`),
+    ).toEqual({
+      name: "editor",
+      workspaceId: WORKSPACE_ID,
+      documentId: DOCUMENT_ID,
+    });
   });
 
   it("round-trips through formatRoute", () => {
@@ -38,6 +46,7 @@ describe("parseRoute", () => {
       "/invite",
       `/workspace/${WORKSPACE_ID}`,
       `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`,
+      `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}/edit`,
     ]) {
       expect(formatRoute(parseRoute(path))).toBe(path);
     }
@@ -61,6 +70,23 @@ describe("parseRoute", () => {
     ]) {
       expect(parseRoute(path), path).toEqual({ name: "not_found" });
     }
+  });
+});
+
+describe("isEditorPath", () => {
+  it("sends files to the FigCraft editor page and keeps the rest in the app", () => {
+    expect(isEditorPath(`/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`)).toBe(
+      true,
+    );
+    expect(
+      isEditorPath(`/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}/edit`),
+    ).toBe(true);
+    expect(
+      isEditorPath(`/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}?x=1`),
+    ).toBe(true);
+    expect(isEditorPath(`/workspace/${WORKSPACE_ID}`)).toBe(false);
+    expect(isEditorPath("/")).toBe(false);
+    expect(isEditorPath(`/workspace/${WORKSPACE_ID}/file/nope`)).toBe(false);
   });
 });
 

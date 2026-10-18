@@ -5,7 +5,8 @@
  * |---|---|
  * | `/` | workspace home |
  * | `/workspace/{workspace_id}` | one workspace's projects and files |
- * | `/workspace/{workspace_id}/file/{document_id}` | one file (the editor opens from here) |
+ * | `/workspace/{workspace_id}/file/{document_id}` | the file in the FigCraft editor (not this app) |
+ * | `/workspace/{workspace_id}/file/{document_id}/edit` | the same (older links) |
  * | `/people` | members, teams and invitations |
  * | `/invite` | accept an invitation (the token arrives in the URL fragment) |
  *
@@ -35,6 +36,7 @@ export type Route =
   | { name: "home" }
   | { name: "workspace"; workspaceId: string }
   | { name: "file"; workspaceId: string; documentId: string }
+  | { name: "editor"; workspaceId: string; documentId: string }
   | { name: "people" }
   | { name: "invite" }
   | { name: "setup" }
@@ -73,9 +75,13 @@ export function parseRoute(pathname: string): Route {
       third === "file" &&
       documentId !== undefined &&
       isUuid(documentId) &&
-      rest.length === 0
+      (rest.length === 0 || (rest.length === 1 && rest[0] === "edit"))
     ) {
-      return { name: "file", workspaceId, documentId };
+      return {
+        name: rest.length === 0 ? "file" : "editor",
+        workspaceId,
+        documentId,
+      };
     }
   }
   return { name: "not_found" };
@@ -89,6 +95,8 @@ export function formatRoute(route: Route): string {
       return `/workspace/${route.workspaceId}`;
     case "file":
       return `/workspace/${route.workspaceId}/file/${route.documentId}`;
+    case "editor":
+      return `/workspace/${route.workspaceId}/file/${route.documentId}/edit`;
     case "people":
       return "/people";
     case "invite":
@@ -131,6 +139,20 @@ export function safeReturnTo(path: string): string {
   return path;
 }
 
+/**
+ * Whether `path` is a file's page. The web server serves the FigCraft editor (Rust/WASM) there,
+ * full page, so going to a file loads that page instead of rendering a route in this app.
+ */
+export function isEditorPath(path: string): boolean {
+  const name = parseRoute(path.split("?")[0] ?? "/").name;
+  return name === "file" || name === "editor";
+}
+
+/** Full page loads, through one place so tests can watch them (jsdom doesn't navigate). */
+export const pageLoad = {
+  assign: (url: string) => window.location.assign(url),
+};
+
 /** The sign-in URL that comes back to `path` (path and query only, never a fragment). */
 export function signInHref(path: string): string {
   return `/api/v1/auth/login?return_to=${encodeURIComponent(safeReturnTo(path))}`;
@@ -161,6 +183,10 @@ export function RouterProvider({ children }: { children: ReactNode }) {
     (to: string, options?: { replace?: boolean }) => {
       // Only same-origin absolute paths are navigated to from inside the app.
       const target = safeReturnTo(to);
+      if (isEditorPath(target)) {
+        pageLoad.assign(target);
+        return;
+      }
       if (options?.replace === true) {
         window.history.replaceState(null, "", target);
       } else {

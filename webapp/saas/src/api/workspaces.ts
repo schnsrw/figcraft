@@ -107,38 +107,3 @@ export const documents = {
   collabLink: (client: ApiClient, id: string) =>
     client.get<CollabLink>(`/documents/${id}/collab-link`),
 };
-
-/**
- * Where the browser may go to open the editor: the server's `editor_url`, accepted only when it is
- * the editor page (`/edit/`) with a `#join=` fragment on this same origin. Anything else is
- * `null` and the caller shows the link instead of navigating. With `fileName` the address becomes
- * `#name=<file name>&join=<invite>`.
- */
-export function safeEditorUrl(
-  editorUrl: string,
-  origin: string = window.location.origin,
-  fileName?: string,
-): string | null {
-  let url: URL;
-  try {
-    url = new URL(editorUrl, origin);
-  } catch {
-    return null;
-  }
-  if (
-    url.origin !== origin ||
-    url.pathname !== "/edit/" ||
-    url.search !== "" ||
-    !url.hash.startsWith("#join=")
-  ) {
-    return null;
-  }
-  // The file's name goes before the invite link, so a new file opens under the name the workspace
-  // gave it instead of the editor's placeholder. The editor reads at most 80 characters.
-  const name = fileName?.trim().slice(0, 80);
-  if (name) {
-    const link = url.hash.slice("#join=".length);
-    url.hash = `#name=${encodeURIComponent(name)}&join=${link}`;
-  }
-  return url.href;
-}

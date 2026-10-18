@@ -108,14 +108,46 @@ function api(over: { can?: object } = {}) {
     });
 }
 
-async function openShare(fake: FakeApi) {
-  window.history.replaceState(
-    null,
-    "",
-    `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`,
+/** The workspace page's file list, where each file's menu offers Share. */
+function onWorkspacePage(fake: FakeApi) {
+  return fake
+    .on("GET /workspaces/" + WORKSPACE_ID + "/projects", page([PROJECT]))
+    .on("GET /projects/" + PROJECT_ID, {
+      body: { ...PROJECT, can: { create_document: true } },
+    })
+    .on(
+      "GET /projects/" + PROJECT_ID + "/documents",
+      page([
+        {
+          id: DOCUMENT_ID,
+          workspace_id: WORKSPACE_ID,
+          project_id: PROJECT_ID,
+          name: "Homepage",
+          state: "active",
+        },
+      ]),
+    );
+}
+
+const PROJECT = {
+  id: PROJECT_ID,
+  workspace_id: WORKSPACE_ID,
+  owning_team_id: null,
+  name: "Website",
+  state: "active",
+};
+
+async function shareFromFiles(fake: FakeApi) {
+  window.history.replaceState(null, "", `/workspace/${WORKSPACE_ID}`);
+  render(<App client={onWorkspacePage(fake).client()} />);
+  await userEvent.click(
+    await screen.findByLabelText("More actions for Homepage"),
   );
-  render(<App client={fake.client()} />);
-  await userEvent.click(await screen.findByRole("button", { name: "Share" }));
+  await userEvent.click(screen.getByRole("button", { name: "Share Homepage" }));
+}
+
+async function openShare(fake: FakeApi) {
+  await shareFromFiles(fake);
   return await screen.findByRole("dialog", { name: "Share “Homepage”" });
 }
 
@@ -142,15 +174,12 @@ describe("share dialog", () => {
     ).toBeTruthy();
   });
 
-  it("is offered only to people who can share", async () => {
-    window.history.replaceState(
-      null,
-      "",
-      `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`,
+  it("opens only for people who can share and says so to others", async () => {
+    await shareFromFiles(api({ can: { share: false } }));
+    expect((await screen.findByRole("status")).textContent).toContain(
+      "You can't change who has access to “Homepage”.",
     );
-    render(<App client={api({ can: { share: false } }).client()} />);
-    await screen.findByRole("heading", { name: /Homepage/ });
-    expect(screen.queryByRole("button", { name: "Share" })).toBeNull();
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 
   it("changes, adds and removes direct access", async () => {
@@ -277,13 +306,13 @@ describe("share dialog", () => {
     ).toBe(true);
   });
 
-  it("closes with Escape and returns focus to the Share button", async () => {
+  it("closes with Escape and returns focus to the file's Share item", async () => {
     const dialog = await openShare(api());
     await within(dialog).findByRole("list", { name: "People" });
     await userEvent.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).toBeNull();
     expect(document.activeElement).toBe(
-      screen.getByRole("button", { name: "Share" }),
+      screen.getByRole("button", { name: "Share Homepage" }),
     );
   });
 });

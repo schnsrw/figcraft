@@ -48,7 +48,7 @@ function Shell({ branding }: { branding: Branding }) {
   const { state } = useSession();
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${state.kind === "ready" ? " is-ready" : ""}`}>
       <a className="skip-link" href="#main">
         Skip to content
       </a>
@@ -70,31 +70,36 @@ function Shell({ branding }: { branding: Branding }) {
           )}
           <span>{branding.productName}</span>
         </Link>
-        {state.kind === "ready" && (
-          <nav className="topnav" aria-label="Main">
-            <NavItem to="/" on={["home", "workspace", "file"]}>
-              Files
-            </NavItem>
-            <NavItem to="/search" on={["search"]}>
-              Search
-            </NavItem>
-            <NavItem to="/people" on={["people"]}>
-              People
-            </NavItem>
-            {(state.tenant.role === "tenant_owner" ||
-              state.tenant.role === "tenant_admin") && (
-              <NavItem to="/settings" on={["settings"]}>
-                Settings
-              </NavItem>
-            )}
-          </nav>
-        )}
         <AccountMenu />
       </header>
 
-      <Main>
-        <Body branding={branding} />
-      </Main>
+      <div className="shell-body">
+        {state.kind === "ready" && (
+          <aside className="app-nav">
+            <span className="app-nav-label">Workspace</span>
+            <nav className="topnav" aria-label="Main">
+              <NavItem to="/" on={["home", "workspace", "file"]}>
+                Files
+              </NavItem>
+              <NavItem to="/search" on={["search"]}>
+                Search
+              </NavItem>
+              <NavItem to="/people" on={["people"]}>
+                People
+              </NavItem>
+              {(state.tenant.role === "tenant_owner" ||
+                state.tenant.role === "tenant_admin") && (
+                <NavItem to="/settings" on={["settings"]}>
+                  Settings
+                </NavItem>
+              )}
+            </nav>
+          </aside>
+        )}
+        <Main>
+          <Body branding={branding} />
+        </Main>
+      </div>
 
       {showFooter && (
         <footer className="site-footer">
@@ -183,7 +188,11 @@ function Body({ branding }: { branding: Branding }) {
         <SignInScreen
           productName={branding.productName}
           signInHref={href}
-          deepLink={route.name === "file" || route.name === "workspace"}
+          deepLink={
+            route.name === "file" ||
+            route.name === "editor" ||
+            route.name === "workspace"
+          }
         />
       );
     }
@@ -217,6 +226,7 @@ const TITLES: Record<string, string> = {
   home: "Files",
   workspace: "Workspace",
   file: "File",
+  editor: "Editor",
   people: "People",
   invite: "Invitation",
   setup: "Set up",

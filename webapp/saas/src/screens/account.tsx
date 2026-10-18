@@ -14,9 +14,11 @@ export function AccountScreen() {
       <p className="intro">
         How you appear to others, your password, and where you're signed in.
       </p>
-      <ProfileSection />
-      <PasswordSection />
-      <SessionsSection />
+      <div className="account-grid">
+        <ProfileSection />
+        <PasswordSection />
+        <SessionsSection />
+      </div>
     </>
   );
 }

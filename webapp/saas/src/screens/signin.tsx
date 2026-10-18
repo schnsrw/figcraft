@@ -198,66 +198,72 @@ export function SignInScreen({
   const any = methods.password || methods.oidc;
 
   return (
-    <section className="panel narrow" aria-labelledby="signin-heading">
-      <h1 id="signin-heading">{heading}</h1>
-      <p className="intro">
-        {deepLink
-          ? "Sign in to open this link. You will come back to it afterwards."
-          : "Sign in to open your files, projects and team."}
-      </p>
-      {reference !== "" && (
-        <p className="muted small" data-testid="signin-workspace-name">
-          Workspace <strong>{reference}</strong>{" "}
-          <button
-            type="button"
-            className="linkbutton"
-            onClick={() => {
-              rememberWorkspace("");
-              setWorkspace("");
+    <div className="auth-layout">
+      <aside className="auth-art" aria-hidden="true">
+        <span className="eyebrow">A space to make things</span>
+        <strong>Good work is made together.</strong>
+        <div className="auth-art-forms">
+          <span className="auth-form-circle" />
+          <span className="auth-form-frame" />
+          <span className="auth-form-chip" />
+        </div>
+        <span className="auth-art-foot">FigCraft / Design workspace</span>
+      </aside>
+      <section className="panel narrow" aria-labelledby="signin-heading">
+        <h1 id="signin-heading">{heading}</h1>
+        <p className="intro">
+          {deepLink
+            ? "Sign in to open this link. You will come back to it afterwards."
+            : "Sign in to open your files, projects and team."}
+        </p>
+        {reference !== "" && (
+          <p className="muted small" data-testid="signin-workspace-name">
+            Workspace <strong>{reference}</strong>{" "}
+            <button
+              type="button"
+              className="linkbutton"
+              onClick={() => {
+                rememberWorkspace("");
+                setWorkspace("");
+              }}
+            >
+              Change
+            </button>
+          </p>
+        )}
+        {methods.bootstrap_required === true && (
+          <p className="notice" role="status" data-testid="signin-first-run">
+            This workspace hasn't been set up yet.{" "}
+            <Link to="/setup">Set up the first administrator</Link>
+          </p>
+        )}
+        {methods.password && (
+          <PasswordForm
+            tenant={reference === "" ? null : reference}
+            onDone={() => {
+              if (reference !== "") rememberWorkspace(reference);
+              void refresh();
             }}
-          >
-            Change
-          </button>
-        </p>
-      )}
-      {methods.bootstrap_required === true && (
-        <p className="notice" role="status" data-testid="signin-first-run">
-          This workspace hasn't been set up yet.{" "}
-          <Link to="/setup">Set up the first administrator</Link>
-        </p>
-      )}
-      {methods.password && (
-        <PasswordForm
-          tenant={reference === "" ? null : reference}
-          onDone={() => {
-            if (reference !== "") rememberWorkspace(reference);
-            void refresh();
-          }}
-        />
-      )}
-      {methods.password && methods.oidc && (
-        <p className="muted small separator">or</p>
-      )}
-      {methods.oidc && (
-        <SignInButton
-          href={signInHref}
-          testId="signin-oidc"
-          label="Sign in with your organisation account"
-        />
-      )}
-      {!any && (
-        <p role="alert" className="notice error">
-          No sign-in method is turned on for this workspace. Ask an
-          administrator to enable one.
-        </p>
-      )}
-      {methods.bootstrap_required !== true && (
-        <p className="muted small" style={{ marginTop: "var(--s-4)" }}>
-          Setting this up for the first time?{" "}
-          <Link to="/setup">Set up the first administrator</Link>
-        </p>
-      )}
-    </section>
+          />
+        )}
+        {methods.password && methods.oidc && (
+          <p className="muted small separator">or</p>
+        )}
+        {methods.oidc && (
+          <SignInButton
+            href={signInHref}
+            testId="signin-oidc"
+            label="Sign in with your organisation account"
+          />
+        )}
+        {!any && (
+          <p role="alert" className="notice error">
+            No sign-in method is turned on for this workspace. Ask an
+            administrator to enable one.
+          </p>
+        )}
+      </section>
+    </div>
   );
 }
 

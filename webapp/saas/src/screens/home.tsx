@@ -8,9 +8,7 @@ import {
   LoadingNotice,
   PageHeader,
   StateBadge,
-  initialOf,
   relativeTime,
-  tint,
   useLoad,
 } from "../components";
 import { clearRecents, readRecents } from "../recents";
@@ -26,19 +24,43 @@ export function HomeScreen() {
   const canCreate = hasRole(tenant?.role ?? null, WORKSPACE_CREATORS);
   const [list, reload] = useLoad(() => workspaces.list(client), [client]);
   const [showArchived, setShowArchived] = useState(false);
+  const [creating, setCreating] = useState(false);
   const archivedId = useId();
 
   const create = async (name: string) => {
     await workspaces.create(client, name);
     reload();
+    setCreating(false);
   };
 
   return (
     <>
       <PageHeader
         title="Your files"
-        description="Pick up where you left off, or open a workspace to see its projects and files."
+        description="Recent designs and workspaces"
+        actions={
+          canCreate && list.kind === "ready" && list.value.items.length > 0 ? (
+            <button
+              type="button"
+              className="button primary"
+              onClick={() => setCreating((value) => !value)}
+            >
+              {creating ? "Cancel" : "New workspace"}
+            </button>
+          ) : undefined
+        }
       />
+
+      {creating && (
+        <section aria-label="New workspace" className="card-form create-panel">
+          <CreateForm
+            label="Workspace name"
+            buttonLabel="Create workspace"
+            successLabel={(name) => `Workspace “${name}” created.`}
+            onCreate={create}
+          />
+        </section>
+      )}
 
       {tenant !== null && <RecentFiles tenantId={tenant.id} />}
 
@@ -80,21 +102,6 @@ export function HomeScreen() {
           />
         )}
       </section>
-
-      {canCreate && list.kind === "ready" && list.value.items.length > 0 && (
-        <section
-          aria-labelledby="new-workspace-heading"
-          className="section card-form"
-        >
-          <h2 id="new-workspace-heading">New workspace</h2>
-          <CreateForm
-            label="Workspace name"
-            buttonLabel="Create workspace"
-            successLabel={(name) => `Workspace “${name}” created.`}
-            onCreate={create}
-          />
-        </section>
-      )}
     </>
   );
 }
@@ -145,25 +152,18 @@ function WorkspaceCards({
   }
   return (
     <>
-      <ul className="cards" aria-label="Workspaces">
+      <ul className="workspace-list" aria-label="Workspaces">
         {items.map((workspace) => (
-          <li className="card" key={workspace.id}>
-            <div
-              className="tile small"
-              style={{ background: tint(workspace.id) }}
-              aria-hidden="true"
-            >
-              {initialOf(workspace.name)}
+          <li key={workspace.id}>
+            <span className="workspace-glyph" aria-hidden="true" />
+            <div className="workspace-list-copy">
+              <Link to={`/workspace/${workspace.id}`}>{workspace.name}</Link>
+              <span className="muted small">Projects and design files</span>
             </div>
-            <div className="card-body">
-              <Link className="card-title" to={`/workspace/${workspace.id}`}>
-                {workspace.name}
-              </Link>
-              <div className="card-meta">
-                <StateBadge state={workspace.state} />
-                <span>Open to see projects and files</span>
-              </div>
-            </div>
+            <StateBadge state={workspace.state} />
+            <span className="workspace-list-chevron" aria-hidden="true">
+              ›
+            </span>
           </li>
         ))}
       </ul>
@@ -195,27 +195,23 @@ function RecentFiles({ tenantId }: { tenantId: string }) {
           Clear recents
         </button>
       </div>
-      <ul className="recents" aria-label="Recent files">
+      <ul className="workspace-list recent-list" aria-label="Recent files">
         {recents.map((recent) => (
-          <li className="card" key={recent.documentId}>
-            <div
-              className="tile small"
-              style={{ background: tint(recent.documentId) }}
-              aria-hidden="true"
-            >
-              {initialOf(recent.name)}
-            </div>
-            <div className="card-body">
+          <li key={recent.documentId}>
+            <span className="document-glyph" aria-hidden="true" />
+            <div className="workspace-list-copy">
               <Link
-                className="card-title"
                 to={`/workspace/${recent.workspaceId}/file/${recent.documentId}`}
               >
                 {recent.name}
               </Link>
-              <span className="card-meta">
+              <span className="muted small">
                 Opened {relativeTime(Math.floor(recent.at / 1000))}
               </span>
             </div>
+            <span className="workspace-list-chevron" aria-hidden="true">
+              ›
+            </span>
           </li>
         ))}
       </ul>

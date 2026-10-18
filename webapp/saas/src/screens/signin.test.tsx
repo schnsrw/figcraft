@@ -243,6 +243,18 @@ describe("password sign-in", () => {
         .getAttribute("href"),
     ).toBe("/setup");
   });
+
+  it("does not offer first-run setup after the owner exists", async () => {
+    const { api } = passwordApi({
+      ...methodsPassword,
+      bootstrap_required: false,
+    });
+    render(<App client={api.client()} />);
+    await screen.findByTestId("signin-password-form");
+    expect(
+      screen.queryByRole("link", { name: "Set up the first administrator" }),
+    ).toBeNull();
+  });
 });
 
 describe("first-run owner setup with a password", () => {
