@@ -1,10 +1,17 @@
 # SaaS implementation tracker
 
-> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (25/58) · **Last updated:** 2026-10-18
+> **Status:** S1 complete (22/22); S2 complete (21/21); S3 complete (20/20); Core slice complete (5/5); S4 complete (25/25); S5 in progress (24/25); S6 in progress (26/58) · **Last updated:** 2026-10-18
 
 This is the authoritative execution checklist for the fork's SaaS platform. Check a task only when
 its acceptance evidence exists in the repository or linked release evidence. Update this file in
 the same commit as the completed task.
+
+**Browser architecture correction (2026-10-18):** the owner selected the existing Rust/WASM
+FigCraft application as the browser product. [The decision record](wasm-first-browser-decision.md)
+documents the mistake, code findings, migration and acceptance evidence. React browser work
+already checked below remains historical evidence; it does not prove the new WASM-first journey.
+The unchecked TS-015 and S6-020/022–025 work must be assessed against the amended target. Counts
+and checkboxes are unchanged by this documentation decision.
 
 ## Status legend
 
@@ -24,7 +31,7 @@ the same commit as the completed task.
 | **Core slice** Browser co-editing on the cloud stack (pulled forward) | complete | 5 / 5 | Two browsers co-edit through the gateway and survive a cloud restart |
 | S4 Identity, tenancy and authorization | complete | 25 / 25 | Isolation and role suite passes |
 | S5 Distributed collaboration relay | in progress | 24 / 25 | Fenced multi-replica relay passes failure tests |
-| S6 Browser, desktop and embedded integration | in progress | 25 / 58 | All clients complete cloud workflows |
+| S6 Browser, desktop and embedded integration | in progress | 26 / 58 | All clients complete cloud workflows |
 | S7 AI gateway and server WASM | not started | 0 / 27 | Safe auditable command and asset jobs |
 | S8 Operations, quotas, billing and security | not started | 0 / 33 | Production security and restore gates pass |
 | S9 Production rollout | not started | 0 / 18 | General-availability review passes |
@@ -121,14 +128,13 @@ its acceptance evidence exists, and only then. The gate is a **real-browser run*
 - [ ] **TS-011** The team can find its work: recents, search across the workspace's files,
   libraries and settings screens (rest of S6-020).
   Progress (not complete): recents on the home page (this browser), name search across workspaces, projects and files (`/search`, client-side over the lists the caller can read, bounded; no server search yet) and a Settings page for the sign-in methods (`/settings`, owners and admins) in `webapp/saas/src/screens/{search,settings}.tsx`, with DB-free tests (`find.test.tsx`; 149 web tests). Not built: libraries; full-text or server-side search.
-- [ ] **TS-015** The web app looks and feels like a product, not a prototype (owner feedback
-  2026-10-18: "UI is shitty"). A design pass on every workspace screen from real-browser
-  screenshots: one consistent layout grid and spacing scale, a clear header with workspace and
-  person, file cards with a thumbnail or initial instead of bare lists, helpful empty states with
-  one obvious next action, readable typography and contrast in both light and dark, forms that
-  look finished (validation next to the field, loading and success states), responsive down to a
-  tablet, and the file name, collaborator names and avatars carried into the editor. Reviewed with
-  before and after screenshots from `webapp/e2e`.
+- [ ] **TS-015** The browser product feels like one complete design tool. Owner feedback on
+  2026-10-18 rejected the React shell, CSS-only passes and iframe composition. Deliver the
+  [WASM-first browser experience](wasm-first-browser-decision.md): FigCraft home, templates,
+  workspaces, document tabs, editor, sharing and account journeys in one coherent UI. Review the
+  real sign-in → workspace → create/open → two tabs → edit/share → home path at desktop and tablet
+  sizes, including loading, empty, permission and recovery states. Capture before/after screenshots
+  and accessible keyboard/screen-reader evidence. This remains unchecked.
 - [ ] **TS-016** HTTPS for a team's own hostname: sign-in cookies are `Secure`, so a name other
   than localhost must be served over HTTPS (a LAN name with Caddy's own authority, or a public
   domain with an automatic certificate). `deploy/saas/compose.tls.yaml` and `Caddyfile.tls` exist
@@ -2649,16 +2655,18 @@ forward; the full milestones keep their tasks and replace this slice's shortcuts
 
 ### Browser workspace
 
-- [ ] **S6-020** Build React/TypeScript navigation for recents, projects, libraries, search,
-  notifications and settings inside `webapp/`.
-  Progress (not complete): sign-in, first-run and organisation screens; workspace home with workspaces, projects and files (create, rename, archive, restore), recents (this browser only), people (members, roles, teams), invitations and a share dialog (`webapp/saas/src/screens/*`, docs/saas/web-workspace.md). Libraries, search, notifications and settings are not built, so this stays open.
+- [ ] **S6-020** Build Rust/WASM navigation for recents, cloud workspaces/projects/documents,
+  libraries, search, notifications and settings, following [SAAS-ADR-018](wasm-first-browser-decision.md).
+  Historical progress: React sign-in, first-run and organisation screens; workspace home with workspaces, projects and files (create, rename, archive, restore), browser-local recents, people, invitations and a share dialog (`webapp/saas/src/screens/*`, docs/saas/web-workspace.md). These may be migration references, but do not complete the amended Rust/WASM task. Libraries, full search, notifications and the integrated WASM cloud catalog remain open.
 - [x] **S6-021** Implement stable `/workspace/{workspace_id}/file/{document_id}` routing and deep
   links.
   Evidence: `webapp/saas/src/router.tsx` (stable URLs `/`, `/workspace/{id}`, `/workspace/{id}/file/{id}`, `/people`, `/invite`; UUID-only ids, anything else is the not-found page without an API call), `api/client.ts` and `session.tsx` (typed client; 401, 403 `bootstrap_required`, 503 and network states), `screens/file.tsx` (the file page: role, Open in editor from `GET /documents/{id}/collab-link`, Share). Deep links survive sign-in through the server-validated `return_to` (only a same-origin absolute path is sent; open-redirect shapes fall back to `/`); an invitation token is parked in session storage across the round trip and stripped from the address bar. Tests: `router.test.tsx`, `App.test.tsx`, `screens/workspace.test.tsx` (96 vitest tests in `webapp/saas`, `npm run check` green). Not done: the editor does not mount inside the page yet (Open in editor navigates to `/edit/#join=…`, S6-022); no screen-reader audit (S6-025); the full browser flow through a real identity provider was not exercised (see docs/saas/web-workspace.md).
 - [ ] **S6-022** Implement the typed editor mount, open, close, local-change, remote-change,
-  connection-state, selection and export bridge.
+  connection-state, selection and export bridge. Reassess this historical bridge wording under
+  SAAS-ADR-018: the Rust app should own these behaviors, with only a narrow host embedding seam.
 - [ ] **S6-023** Keep snapshots and collaboration batches opaque to TypeScript and add tests that
-  prevent browser-shell document semantics.
+  prevent browser-shell document semantics. Under SAAS-ADR-018, retain one Rust document model and
+  one Rust-owned browser collaboration connection per file; any host JavaScript remains opaque.
 - [ ] **S6-024** Open, edit, reconnect and export one cloud document without manual file import.
 - [ ] **S6-025** Complete WCAG 2.2 AA checks for workspace surfaces and keyboard/screen-reader audit
   of the integrated editor.
@@ -2864,9 +2872,25 @@ holds projects. The platform API calls the company `workspace` in its paths and 
 
 #### Block B: Hierarchy rules
 
-- [ ] **S6-052** The project level: projects belong to a workspace and optionally a team, documents
+- [x] **S6-052** The project level: projects belong to a workspace and optionally a team, documents
   belong to a project, team-to-project grants and inheritance (extend `effective_roles.rs` and the
   existing tables; no duplicate model). Depends on S4-010.
+  Evidence: `effective_roles.rs` now resolves ownership: members of the team that owns a workspace or
+  a project get its full role capped by their team role (lead administers, editor edits, commenter and
+  viewer comment and read), reaching down to documents, plus new migration `20261018000030` table
+  `project_team_grants` (team-to-project grants, forced RLS; `teams::grant_to_team` / `revoke_team_grant`
+  / `list_project_team_grants`). API (`api/hierarchy_api.rs`, OpenAPI `openapi/hierarchy-api-v1.json`):
+  `GET /tenants/{t}/projects/{p}/team-grants`, `PUT/DELETE /tenants/{t}/teams/{team}/grants/projects/{p}`,
+  `POST /workspaces/{w}/projects` takes `owning_team_id` (caller must lead that team), projects report
+  `owning_team_id`. DB-free unit tests: role arithmetic for every team role, guest ceilings, source
+  naming (`effective_roles.rs`), and a test that every documented operation is routed and needs a
+  session (`hierarchy_api.rs`). Live tests (skip without a database) `crates/cloud-storage/tests/
+  team_projects.rs` (4): deny by default, owning team by role, workspace ownership covers its projects,
+  sharing with another team capped by team role, revoke, archived team and removed member lose access.
+  Also changed: a person who accepts a team invitation now joins the workspace at the level the team
+  role implies (editor, commenter or viewer) instead of always viewer, because a workspace `viewer` is a
+  ceiling over every resource role and invited editors could not edit. Not done: no UI; the existing
+  `PUT /teams/{team}/owned/...` routes (admin sets ownership) are unchanged.
 - [ ] **S6-053** Management direction as an explicit authorization matrix in code
   (`cloud-auth` authz) and in `security.md`: owner > workspace admin > team lead > member > guest;
   an admin cannot remove or demote the owner or grant above their own level; a team lead cannot
@@ -2878,9 +2902,23 @@ holds projects. The platform API calls the company `workspace` in its paths and 
 - [ ] **S6-055** Delegated administration: a workspace admin creates teams and assigns team leads; a
   team lead creates projects and invites members to their team within workspace policy. Depends on
   S6-053.
+  Status: implemented, not yet proven end to end. A team lead can create a project owned by their team
+  (`POST /workspaces/{w}/projects` with `owning_team_id`) and invite to their team
+  (`POST /tenants/{t}/teams/{team}/invitations`) when the workspace policy `who_may_invite` allows it
+  (`team_leads` by default; never a new team lead; no guest roles when guests are off). The policy
+  decision is unit-tested without a database (`cloud-domain` `may_invite`, `permits_new_member`). Missing:
+  an HTTP-level test of the whole lead flow, and the admin-creates-team-and-assigns-lead screens.
 - [ ] **S6-056** Per-workspace policy settings (allowed sign-in methods `oidc|password`, who may
   invite, guest access, share-link policy) editable only by owner and admins and enforced on the
   server. Depends on S6-053; sign-in method enforcement depends on S6-035.
+  Status: implemented, HTTP-level enforcement tests missing. `GET/PUT /api/v1/tenants/{t}/policy`
+  (owner and administrators write, any member reads; shape in `openapi/hierarchy-api-v1.json`),
+  migration `20261018000031` (`tenants.policy`), `crates/cloud-storage/src/workspace_policy.rs`
+  (sign-in methods are read from and written to the account settings the sign-in code already enforces;
+  a stricter share-link policy revokes the links it no longer allows), enforcement in invitation
+  creation (who may invite, guests), direct member add (guests) and share-link creation. Unit tests
+  without a database for the decisions and the stored shape; the schema was applied to the dev database
+  and the existing live suites pass. Missing: live HTTP tests of each enforcement point; the UI.
 - [ ] **S6-057** SSO sync: OIDC group or claim to team membership mapping per workspace (the design
   in `identity-mapping-policy.md`, not yet built) and deprovisioning when a member disappears from
   the identity provider. Depends on S6-053.
@@ -3177,3 +3215,5 @@ Add one row per preview, beta, release candidate and production release.
 | 2026-10-18 | S6-043: collaborators are shown as the account they signed in with (name and palette colour set by the relay, share-link label for link joins); hub hook FP-014. S6 reaches 23/58. |
 | 2026-10-18 | S6-039: every committed batch records its principal and how access was held (member, team, share link) (schema 20261018000032). S6 reaches 24/58. |
 | 2026-10-18 | S6-040: document history API (activity runs by person and access, checkpoints kept apart, last-edited summary), paged and permission-checked. S6 reaches 25/58. |
+| 2026-10-18 | S6-052: a team that owns a workspace or project gives its members access by team role, projects can be shared with other teams, new team invitees join at the level of their team role. Policy API and delegated invitations implemented (S6-055/056 not yet ticked). S6 reaches 23/58. |
+| 2026-10-18 | S6-020 revision (owner): the editor is the WASM app at a file's own URL (cloud editor mode: no Home/tabs, Back to files, project label, link Share, local file commands hidden); the file browser stays HTML, opens files with a full page load, and offers Share from each file's menu. React's iframe file page removed. No milestone count changed. |

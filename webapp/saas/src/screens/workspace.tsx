@@ -17,13 +17,13 @@ import {
   PageHeader,
   StateBadge,
   asApiError,
-  initialOf,
   relativeTime,
-  tint,
   useLoad,
 } from "../components";
+import { addRecent } from "../recents";
 import { Link, useRouter } from "../router";
-import { useSession } from "../session";
+import { useReady, useSession } from "../session";
+import { ShareDialog } from "./share";
 
 /** `resource_inactive` on a workspace route means it is suspended, archived or being deleted. */
 export function WorkspaceInactive({ error }: { error: ApiError }) {
@@ -64,6 +64,7 @@ export function WorkspaceScreen({ workspaceId }: { workspaceId: string }) {
   const [dialog, setDialog] = useState<Dialog | null>(null);
   const [problem, setProblem] = useState<ApiError | null>(null);
   const [showArchived, setShowArchived] = useState(false);
+  const [creatingProject, setCreatingProject] = useState(false);
   const [filesVersion, setFilesVersion] = useState(0);
 
   if (workspace.kind === "loading") {
@@ -128,45 +129,49 @@ export function WorkspaceScreen({ workspaceId }: { workspaceId: string }) {
         }
         description={`${visibleProjects.length} project${visibleProjects.length === 1 ? "" : "s"}`}
         actions={
-          <>
-            {can?.rename === true && (
-              <button
-                type="button"
-                className="button"
-                onClick={() => setDialog({ kind: "rename-workspace" })}
-              >
-                Rename workspace
-              </button>
-            )}
-            {can?.archive === true && ws.state === "active" && (
-              <button
-                type="button"
-                className="button"
-                onClick={() =>
-                  void act(
-                    () => workspaces.archive(client, ws.id),
-                    reloadWorkspace,
-                  )
-                }
-              >
-                Archive workspace
-              </button>
-            )}
-            {can?.restore === true && ws.state === "archived" && (
-              <button
-                type="button"
-                className="button primary"
-                onClick={() =>
-                  void act(
-                    () => workspaces.restore(client, ws.id),
-                    reloadWorkspace,
-                  )
-                }
-              >
-                Restore workspace
-              </button>
-            )}
-          </>
+          (can?.rename === true ||
+            can?.archive === true ||
+            can?.restore === true) && (
+            <details className="row-menu header-menu">
+              <summary aria-label="Workspace actions">More actions</summary>
+              <div className="row-menu-content">
+                {can?.rename === true && (
+                  <button
+                    type="button"
+                    onClick={() => setDialog({ kind: "rename-workspace" })}
+                  >
+                    Rename workspace
+                  </button>
+                )}
+                {can?.archive === true && ws.state === "active" && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void act(
+                        () => workspaces.archive(client, ws.id),
+                        reloadWorkspace,
+                      )
+                    }
+                  >
+                    Archive workspace
+                  </button>
+                )}
+                {can?.restore === true && ws.state === "archived" && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void act(
+                        () => workspaces.restore(client, ws.id),
+                        reloadWorkspace,
+                      )
+                    }
+                  >
+                    Restore workspace
+                  </button>
+                )}
+              </div>
+            </details>
+          )
         }
       />
 
@@ -174,7 +179,19 @@ export function WorkspaceScreen({ workspaceId }: { workspaceId: string }) {
 
       <div className="layout-two">
         <aside className="side-panel" aria-labelledby="projects-heading">
-          <h2 id="projects-heading">Projects</h2>
+          <div className="side-panel-head">
+            <h2 id="projects-heading">Projects</h2>
+            {can?.create_project === true && ws.state === "active" && (
+              <button
+                type="button"
+                className="button small"
+                aria-expanded={creatingProject}
+                onClick={() => setCreatingProject((value) => !value)}
+              >
+                {creatingProject ? "Cancel" : "New project"}
+              </button>
+            )}
+          </div>
           {projectList.kind === "loading" && (
             <LoadingNotice label="Loading projects…" />
           )}
@@ -212,23 +229,26 @@ export function WorkspaceScreen({ workspaceId }: { workspaceId: string }) {
                   Show archived
                 </label>
               )}
-              {can?.create_project === true && ws.state === "active" && (
-                <div className="side-form">
-                  <CreateForm
-                    label="New project"
-                    buttonLabel="Add project"
-                    onCreate={async (name) => {
-                      const created = await projects.create(
-                        client,
-                        ws.id,
-                        name,
-                      );
-                      reloadProjects();
-                      navigate(`/workspace/${ws.id}?project=${created.id}`);
-                    }}
-                  />
-                </div>
-              )}
+              {can?.create_project === true &&
+                ws.state === "active" &&
+                creatingProject && (
+                  <div className="side-form">
+                    <CreateForm
+                      label="New project"
+                      buttonLabel="Add project"
+                      onCreate={async (name) => {
+                        const created = await projects.create(
+                          client,
+                          ws.id,
+                          name,
+                        );
+                        setCreatingProject(false);
+                        reloadProjects();
+                        navigate(`/workspace/${ws.id}?project=${created.id}`);
+                      }}
+                    />
+                  </div>
+                )}
             </>
           )}
         </aside>
@@ -334,6 +354,14 @@ function ProjectFiles({
   onProblem: (error: ApiError | null) => void;
 }) {
   const { client } = useSession();
+  const { tenantId } = useReady();
+  const { navigate } = useRouter();
+  const [sharing, setSharing] = useState<{
+    id: string;
+    name: string;
+    canEdit: boolean;
+  } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [detail, reloadDetail] = useLoad(
     () => projects.get(client, project.id),
     [client, project.id],
@@ -343,6 +371,7 @@ function ProjectFiles({
     [client, project.id, version],
   );
   const [showArchived, setShowArchived] = useState(false);
+  const [creating, setCreating] = useState(false);
   const can = detail.kind === "ready" ? detail.value.can : undefined;
 
   const act = async (action: () => Promise<unknown>, after: () => void) => {
@@ -363,9 +392,40 @@ function ProjectFiles({
       : [];
 
   const canAdd = can?.create_document === true && project.state === "active";
+  // A file opens in the FigCraft editor, full page (the web server serves it at the file's URL).
+  // This browser remembers it for the home page's recents first.
+  const openFile = (file: { id: string; name: string }) => {
+    addRecent(tenantId, {
+      documentId: file.id,
+      workspaceId,
+      name: file.name,
+      at: Date.now(),
+    });
+    navigate(`/workspace/${workspaceId}/file/${file.id}`);
+  };
+  // Share needs the file's own permissions (the list has none): read it, then open the dialog or
+  // say why not.
+  const share = async (file: CloudDocument) => {
+    onProblem(null);
+    setNotice(null);
+    try {
+      const found = await documents.get(client, file.id);
+      if (found.can?.share === true) {
+        setSharing({
+          id: found.id,
+          name: found.name,
+          canEdit: found.can.edit === true,
+        });
+      } else {
+        setNotice(`You can't change who has access to “${file.name}”.`);
+      }
+    } catch (error) {
+      onProblem(asApiError(error));
+    }
+  };
   const createFile = async (name: string) => {
-    await documents.create(client, project.id, name);
-    reloadFiles();
+    const created = await documents.create(client, project.id, name);
+    openFile(created);
   };
 
   return (
@@ -375,53 +435,65 @@ function ProjectFiles({
           {project.name} <StateBadge state={project.state} />
         </h2>
         <div className="actions">
-          {can?.rename === true && (
+          {canAdd && items.length > 0 && (
             <button
               type="button"
-              className="button small"
-              onClick={onRenameProject}
+              className="button primary small"
+              onClick={() => setCreating((value) => !value)}
             >
-              Rename project
+              {creating ? "Cancel" : "New file"}
             </button>
           )}
-          {can?.archive === true && project.state === "active" && (
-            <button
-              type="button"
-              className="button small"
-              onClick={() =>
-                void act(
-                  () => projects.archive(client, project.id),
-                  () => {
-                    onProjectChanged();
-                    reloadDetail();
-                  },
-                )
-              }
-            >
-              Archive project
-            </button>
-          )}
-          {can?.restore === true && project.state === "archived" && (
-            <button
-              type="button"
-              className="button small"
-              onClick={() =>
-                void act(
-                  () => projects.restore(client, project.id),
-                  () => {
-                    onProjectChanged();
-                    reloadDetail();
-                  },
-                )
-              }
-            >
-              Restore project
-            </button>
+          {(can?.rename === true ||
+            can?.archive === true ||
+            can?.restore === true) && (
+            <details className="row-menu header-menu">
+              <summary aria-label="Project actions">More actions</summary>
+              <div className="row-menu-content">
+                {can?.rename === true && (
+                  <button type="button" onClick={onRenameProject}>
+                    Rename project
+                  </button>
+                )}
+                {can?.archive === true && project.state === "active" && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void act(
+                        () => projects.archive(client, project.id),
+                        () => {
+                          onProjectChanged();
+                          reloadDetail();
+                        },
+                      )
+                    }
+                  >
+                    Archive project
+                  </button>
+                )}
+                {can?.restore === true && project.state === "archived" && (
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void act(
+                        () => projects.restore(client, project.id),
+                        () => {
+                          onProjectChanged();
+                          reloadDetail();
+                        },
+                      )
+                    }
+                  >
+                    Restore project
+                  </button>
+                )}
+              </div>
+            </details>
           )}
         </div>
       </div>
 
-      {canAdd && items.length > 0 && (
+      {canAdd && items.length > 0 && creating && (
         <div className="card-form">
           <CreateForm
             label="New file"
@@ -460,23 +532,28 @@ function ProjectFiles({
               />
             )
           ) : (
-            <ul className="cards" aria-label="Files">
+            <ul className="file-list" aria-label="Files">
               {items.map((file) => (
-                <li className="card" key={file.id}>
-                  <div
-                    className="tile"
-                    style={{ background: tint(file.id) }}
-                    aria-hidden="true"
-                  >
-                    {initialOf(file.name)}
-                  </div>
-                  <div className="card-body">
-                    <Link
-                      className="card-title"
-                      to={`/workspace/${workspaceId}/file/${file.id}`}
-                    >
-                      {file.name}
-                    </Link>
+                <li className="file-row" key={file.id}>
+                  <span className="document-glyph" aria-hidden="true" />
+                  <div className="file-row-main">
+                    {file.state === "active" ? (
+                      <Link
+                        to={`/workspace/${workspaceId}/file/${file.id}`}
+                        onClick={() =>
+                          addRecent(tenantId, {
+                            documentId: file.id,
+                            workspaceId,
+                            name: file.name,
+                            at: Date.now(),
+                          })
+                        }
+                      >
+                        {file.name}
+                      </Link>
+                    ) : (
+                      <span className="file-name">{file.name}</span>
+                    )}
                     <div className="card-meta">
                       <StateBadge state={file.state} />
                       {file.updated_at !== undefined && (
@@ -484,54 +561,78 @@ function ProjectFiles({
                       )}
                     </div>
                   </div>
-                  <div className="card-actions">
-                    {can?.create_document === true &&
-                      file.state === "active" && (
+                  <details className="row-menu">
+                    <summary aria-label={`More actions for ${file.name}`}>
+                      <span aria-hidden="true">···</span>
+                    </summary>
+                    <div className="row-menu-content">
+                      {file.state === "active" && (
                         <button
                           type="button"
-                          className="button"
-                          aria-label={`Rename ${file.name}`}
-                          onClick={() => onRenameFile(file)}
+                          aria-label={`Share ${file.name}`}
+                          onClick={() => void share(file)}
                         >
-                          Rename
+                          Share
                         </button>
                       )}
-                    {workspaceCan?.archive === true &&
-                      file.state === "active" && (
-                        <button
-                          type="button"
-                          className="button"
-                          aria-label={`Archive ${file.name}`}
-                          onClick={() =>
-                            void act(
-                              () => documents.archive(client, file.id),
-                              reloadFiles,
-                            )
-                          }
-                        >
-                          Archive
-                        </button>
-                      )}
-                    {workspaceCan?.restore === true &&
-                      file.state === "archived" && (
-                        <button
-                          type="button"
-                          className="button"
-                          aria-label={`Restore ${file.name}`}
-                          onClick={() =>
-                            void act(
-                              () => documents.restore(client, file.id),
-                              reloadFiles,
-                            )
-                          }
-                        >
-                          Restore
-                        </button>
-                      )}
-                  </div>
+                      {can?.create_document === true &&
+                        file.state === "active" && (
+                          <button
+                            type="button"
+                            aria-label={`Rename ${file.name}`}
+                            onClick={() => onRenameFile(file)}
+                          >
+                            Rename
+                          </button>
+                        )}
+                      {workspaceCan?.archive === true &&
+                        file.state === "active" && (
+                          <button
+                            type="button"
+                            aria-label={`Archive ${file.name}`}
+                            onClick={() =>
+                              void act(
+                                () => documents.archive(client, file.id),
+                                reloadFiles,
+                              )
+                            }
+                          >
+                            Archive
+                          </button>
+                        )}
+                      {workspaceCan?.restore === true &&
+                        file.state === "archived" && (
+                          <button
+                            type="button"
+                            aria-label={`Restore ${file.name}`}
+                            onClick={() =>
+                              void act(
+                                () => documents.restore(client, file.id),
+                                reloadFiles,
+                              )
+                            }
+                          >
+                            Restore
+                          </button>
+                        )}
+                    </div>
+                  </details>
                 </li>
               ))}
             </ul>
+          )}
+          {notice !== null && (
+            <p className="notice" role="status">
+              {notice}
+            </p>
+          )}
+          {sharing !== null && (
+            <ShareDialog
+              documentId={sharing.id}
+              documentName={sharing.name}
+              canEdit={sharing.canEdit}
+              onClose={() => setSharing(null)}
+            />
           )}
           {files.value.truncated && (
             <p className="muted small">Showing the first files only.</p>

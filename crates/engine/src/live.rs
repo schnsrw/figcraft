@@ -53,6 +53,10 @@ use serde_json::{Value, json};
 
 pub use figcraft_collab::message::{Peer, Presence};
 
+#[path = "live_images.rs"]
+mod images;
+pub use images::{AssetEvent, ImageActivity, MAX_INLINE_IMAGE};
+
 use crate::cmd::CommandSpec;
 use crate::collab::EngineRecompute;
 use crate::params::{get, num, req_string, string};
@@ -319,6 +323,9 @@ pub enum Event {
         job: u64,
         reply: Box<NetReply>,
     },
+    /// An image transfer the link was asked for ([`LiveLink::asset_put`], [`LiveLink::asset_get`])
+    /// finished.
+    Asset(AssetEvent),
 }
 
 /// A request to a server outside a live session: its plugin directory, a team library, or keeping
@@ -527,6 +534,18 @@ pub trait LiveLink: Send {
     fn leave(&mut self, session: SessionId);
     /// Your latest presence in `session` (the link throttles and coalesces).
     fn presence(&mut self, session: SessionId, p: &Presence);
+    /// Upload image `hash` (the file's SHA-256, `bytes` its content) to the asset store of
+    /// `session`'s server, which told the session it holds assets. Returns at once; how it ended
+    /// (after the link's own retries) arrives as [`Event::Asset`]. An `Err` means this link can't:
+    /// the image is sent inside the file instead.
+    fn asset_put(&mut self, _session: SessionId, _hash: &str, _bytes: Arc<Vec<u8>>) -> std::result::Result<(), String> {
+        Err("this connection can't upload images".into())
+    }
+    /// Fetch image `hash` from the asset store of `session`'s server; the bytes (or why not,
+    /// after the link has tried again for a while) arrive as [`Event::Asset`].
+    fn asset_get(&mut self, _session: SessionId, _hash: &str) -> std::result::Result<(), String> {
+        Err("this connection can't download images".into())
+    }
     /// A message for `session`'s server (document changes), sent in order.
     fn send(&mut self, session: SessionId, msg: ClientMsg);
     /// Events since the last call, each with its session ([`NO_SESSION`] for answers to
@@ -605,6 +624,8 @@ pub struct Live {
     pub spotlight: Option<u32>,
     /// You spotlight: everyone follows you.
     pub spotlighting: bool,
+    /// Large images by reference: what the server takes, and the transfers under way.
+    images: images::Images,
 }
 
 /// The fewest seconds between two drag previews you send (about 20 a second).
@@ -958,6 +979,7 @@ impl Session {
         for id in self.live.sessions.keys().copied().collect::<Vec<_>>() {
             self.live_deferred(id);
             self.live_follow_apply(id);
+            self.live_images_fetch(id);
         }
         self.online_recoveries();
         true
@@ -967,6 +989,7 @@ impl Session {
         let e = match e {
             Event::Library { link, reply } => return self.library_answer(&link, reply),
             Event::Net { job, reply } => return self.background_answer(job, *reply),
+            Event::Asset(asset) => return self.live_asset_event(id, asset),
             e => e,
         };
         // A session left meanwhile: what was still on its way is dropped.
@@ -995,6 +1018,7 @@ impl Session {
                     live.drag_sent = None;
                     live.chat.clear();
                     live.spotlight = None;
+                    live.images.reconnecting();
                     if let Some(c) = live.client.as_mut() {
                         c.disconnect();
                     }
@@ -1077,7 +1101,7 @@ impl Session {
                     Some(error.map_or_else(|| "Your report was sent to the server's operator".into(), |e| format!("The report wasn't sent: {e}")));
             }
             // Answered above.
-            Event::Library { .. } | Event::Net { .. } => {}
+            Event::Library { .. } | Event::Net { .. } | Event::Asset(_) => {}
         }
     }
 
@@ -1086,6 +1110,13 @@ impl Session {
     fn live_signal_in(&mut self, id: SessionId, peer: u32, sig: Signal) {
         let Some(sig) = sig.clean() else { return };
         let Some(live) = self.live.sessions.get_mut(&id) else { return };
+        // The server holds assets: large images travel by reference (told to this client only).
+        if sig.kind == Signal::ASSETS {
+            if live.info.as_ref().is_none_or(|i| i.me == peer) {
+                live.images.policy = sig.asset_policy();
+            }
+            return;
+        }
         let name = live.peers.get(&peer).map(|p| p.name.clone());
         match (sig.kind.as_str(), name) {
             (Signal::READY, _) if live.info.as_ref().is_some_and(|i| i.me == peer) => {
@@ -1354,6 +1385,14 @@ impl Session {
         let (id, doc, synced) = (live.id, ds.doc.clone(), live.synced.clone());
         if self.live_read_only(uid).is_some() {
             // Nothing goes out: what changed outside a command is put back.
+            if let Some(s) = synced {
+                self.apply_remote(uid, s);
+            }
+            return;
+        }
+        // Large images are uploaded first (the batch that adds them waits in the client).
+        if let Err(why) = self.live_images_begin(id, &doc) {
+            self.message = Some(why);
             if let Some(s) = synced {
                 self.apply_remote(uid, s);
             }

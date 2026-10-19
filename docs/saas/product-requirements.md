@@ -88,20 +88,24 @@ protocols, tenant-aware schema and container image.
 
 ### Browser product experience
 
-- Use React and TypeScript for the fork-owned SaaS shell, routing, identity screens, workspace
-  management and browser integration after the root repository policy defines this exception.
-- Keep the editor engine, document state, rendering, commands, reconciliation and undo in the
-  existing Rust/WASM application.
+The following target was amended by [SAAS-ADR-018](wasm-first-browser-decision.md) on
+2026-10-18. The current React deployment does not yet meet it.
+
+- Use the existing Rust/WASM FigCraft application for browser home, templates, tabs, editor,
+  identity and workspace UI. Add narrow browser/cloud adapters for authenticated HTTP and host
+  integration.
+- Keep the editor engine, document state, rendering, commands, reconciliation, undo and live
+  collaboration in Rust.
 - Provide workspace navigation for recents, projects, shared libraries, search, notifications and
   settings.
-- Use `/workspace/{workspace_id}/file/{document_id}` as the stable editor route, subject to the
-  public API's final identifier encoding.
+- Preserve stable workspace and document deep links when the WASM application becomes the entry
+  route; settle the final URL shape during migration and test reload/sign-in return paths.
 - Preserve one cloud document identifier across browser, desktop, API, realtime and webhook
   surfaces.
-- Expose a typed TypeScript-to-Rust/WASM host contract for mount, open, close, local changes,
-  remote changes, connection state, selection and export.
-- Meet WCAG 2.2 AA for the workspace shell and include the editor in keyboard and screen-reader
-  audits.
+- Expose only the narrow versioned host handshake needed for embedding; the Rust app owns
+  document lifecycle and collaboration.
+- Meet WCAG 2.2 AA for the browser product, including account and workspace views, and include
+  the editor in keyboard and screen-reader audits.
 
 ### Desktop cloud documents
 

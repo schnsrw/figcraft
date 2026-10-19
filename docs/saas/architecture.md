@@ -1,6 +1,6 @@
 # SaaS architecture
 
-> **Status:** target design · **Last updated:** 2026-10-17
+> **Status:** target design, browser amended by [SAAS-ADR-018](wasm-first-browser-decision.md) · **Last updated:** 2026-10-18
 
 ## Context
 
@@ -15,7 +15,7 @@ tenant-aware control plane and distributed room ownership.
 ## System topology
 
 ```text
-Desktop client    React shell + WASM editor    Host product backend
+Desktop client     Rust/WASM browser app       Host product backend
       |                       |                         |
       +-----------------------+-------------------------+
                               |
@@ -55,23 +55,22 @@ release version. Production may run separate replicas without building different
 
 ## Browser composition
 
-The browser product deliberately combines two runtimes:
+The target browser product uses the existing FigCraft Rust/WASM UI as one application. The
+2026-10-18 [decision record](wasm-first-browser-decision.md) explains why the present React
+shell and iframe are being replaced; the target is not implemented yet.
 
 | Runtime | Owns |
 |---|---|
-| React and TypeScript | Authentication flow, routing, workspace and project screens, libraries, notifications, administration, HTTP API client and editor lifecycle |
-| Rust compiled to WASM | Document state, commands, canvas, rendering, selection, optimistic edits, collaboration changes, reconciliation and undo |
+| Rust compiled to WASM | Home, tabs, templates, workspace and project navigation, account and administration UI, document state, commands, canvas, rendering, selection, collaboration and undo |
+| Browser adapter in `apps/figcraft-web` | Same-origin authenticated HTTP, browser URL/history, cookie-bearing requests, clipboard/downloads and any small host handshake |
 | Rust cloud service | Authorization, WebSocket authority, PostgreSQL transactions, object storage and jobs |
 
 Browser WASM cannot open native TCP sockets. It uses browser-provided networking through bindings.
-The existing `crates/collab-net/src/web.rs` already wraps `web_sys::WebSocket`. The initial SaaS
-bridge keeps that Rust client as the single owner of the collaboration connection. TypeScript
-obtains a short-lived document ticket over authenticated HTTP and passes the ticket and `wss:`
-endpoint when opening the editor. Do not run a competing TypeScript collaboration client.
-
-The bridge carries opaque serialized snapshots and collaboration messages plus small lifecycle
-events. TypeScript does not interpret document changes, resolve conflicts, replay commands or own
-an alternate document model.
+`crates/collab-net/src/web.rs` already wraps `web_sys::WebSocket` and can join multiple live
+sessions in one app. It remains the only browser collaboration connection owner. The browser
+adapter obtains authorized cloud metadata and an invite/ticket over same-origin HTTP; document
+state and collaboration stay in Rust. A host embedding bridge, if needed, carries only bounded
+lifecycle and identity information, never an alternate document model or realtime client.
 
 ## Component boundaries
 

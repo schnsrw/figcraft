@@ -87,10 +87,16 @@ pub fn right_panel(app: &mut FigApp, ui: &mut Ui) {
     let label = ui.painter().layout_no_wrap(tr("Share").to_string(), semibold(11.5), Color32::WHITE);
     let sw = (label.size().x + 24.0).max(56.0);
     let share = Rect::from_min_size(pos2(top.max.x - 14.0 - sw, top.center().y - 16.0), vec2(sw, 32.0));
-    let sresp = ui.interact(share, ui.id().with("share"), Sense::click()).tip(tr("Share: live session, export"));
+    let tip = if app.cloud.is_some() { tr("Share this file") } else { tr("Share: live session, export") };
+    let sresp = ui.interact(share, ui.id().with("share"), Sense::click()).tip(tip);
     ui.painter().rect_filled(share, CornerRadius::same(6), if sresp.hovered() { t.accent_hover } else { ACCENT });
     ui.painter().galley(share.center() - label.size() / 2.0, label, Color32::WHITE);
-    crate::live::share_popover(app, &sresp);
+    // A cloud file is shared through the cloud (its link); a local file through a live session.
+    if app.cloud.is_some() {
+        crate::cloud::share_popover(app, &sresp);
+    } else {
+        crate::live::share_popover(app, &sresp);
+    }
     // Play presents; its chevron opens the play menu (present, or preview in a pane).
     let play = Rect::from_min_size(pos2(share.min.x - 50.0, top.center().y - 14.0), vec2(42.0, 28.0));
     let (tri_r, chev_r) =

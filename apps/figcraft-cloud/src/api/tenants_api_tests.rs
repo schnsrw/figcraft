@@ -654,9 +654,26 @@ async fn invitations_are_created_once_listed_revoked_and_accepted() -> Fallible<
     assert_eq!(call(&app, Some(world.owner), Method::POST, &format!("{team}/members"), Some(manager)).await.0, StatusCode::CREATED);
     let invite = serde_json::json!({"email": "d2-invitee@example.com", "role": "editor"});
 
-    // A team manager without member.manage cannot invite into the tenant; viewers see 404.
+    // Delegation (S6-055): a team manager invites when the workspace policy lets team leads; when
+    // only administrators may, the same call is refused. Viewers see 404 either way.
+    let policy_path = format!("/api/v1/tenants/{}/policy", world.tenant);
+    let policy = |who: &str| serde_json::json!({"allowed_sign_in_methods": ["password"], "who_may_invite": who, "guest_access": true, "share_links": "view_and_edit"});
+    assert_eq!(call(&app, Some(world.admin), Method::PUT, &policy_path, Some(policy("admins_only"))).await.0, StatusCode::OK);
     assert_eq!(call(&app, Some(world.editor), Method::POST, &format!("{team}/invitations"), Some(invite.clone())).await.0, StatusCode::FORBIDDEN);
+    assert_eq!(
+        call(&app, Some(world.editor), Method::PUT, &policy_path, Some(policy("members"))).await.0,
+        StatusCode::FORBIDDEN,
+        "a team lead cannot change the policy"
+    );
+    assert_eq!(call(&app, Some(world.admin), Method::PUT, &policy_path, Some(policy("team_leads"))).await.0, StatusCode::OK);
+    let (status, body) = call(&app, Some(world.admin), Method::GET, &policy_path, None).await;
+    assert_eq!((status, body["who_may_invite"].as_str(), body["allowed_sign_in_methods"].is_array()), (StatusCode::OK, Some("team_leads"), true));
     assert_eq!(call(&app, Some(world.viewer), Method::POST, &format!("{team}/invitations"), Some(invite.clone())).await.0, StatusCode::NOT_FOUND);
+    // A team lead cannot invite another lead; the lead's invitation as editor works.
+    let lead_invite = serde_json::json!({"email": "d2-lead@example.com", "role": "team_manager"});
+    assert_eq!(call(&app, Some(world.editor), Method::POST, &format!("{team}/invitations"), Some(lead_invite)).await.0, StatusCode::FORBIDDEN);
+    let (status, led) = call(&app, Some(world.editor), Method::POST, &format!("{team}/invitations"), Some(invite.clone())).await;
+    assert_eq!(status, StatusCode::CREATED, "{led}");
     let (status, created) = call(&app, Some(world.admin), Method::POST, &format!("{team}/invitations"), Some(invite.clone())).await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let token = created["token"].as_str().unwrap().to_owned();
@@ -665,7 +682,7 @@ async fn invitations_are_created_once_listed_revoked_and_accepted() -> Fallible<
     // Listing never shows the token; the team manager may list the team's invitations.
     let (status, body) = call(&app, Some(world.editor), Method::GET, &format!("{team}/invitations"), None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["items"].as_array().unwrap().len(), 2);
+    assert_eq!(body["items"].as_array().unwrap().len(), 3);
     assert!(!body.to_string().contains(&token));
     assert_eq!(
         call(&app, Some(world.editor), Method::GET, &format!("/api/v1/tenants/{}/invitations", world.tenant), None).await.0,
@@ -700,7 +717,7 @@ async fn invitations_are_created_once_listed_revoked_and_accepted() -> Fallible<
         let (status, body) = call(&app, Some(invitee), Method::POST, "/api/v1/invitations/accept", Some(serde_json::json!({"token": token}))).await;
         assert_eq!((status, code(&body)), (StatusCode::NOT_FOUND, "not_found"));
     }
-    // The invitee is now a viewer of the tenant and an editor on the team.
+    // The invitee is now an editor of the tenant (the level the team role implies) and of the team.
     assert_eq!(call(&app, Some(invitee), Method::GET, &team, None).await.0, StatusCode::OK);
     Ok(())
 }

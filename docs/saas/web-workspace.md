@@ -1,5 +1,12 @@
 # Web workspace (`webapp/saas`)
 
+> Historical implementation record. On 2026-10-18 the owner chose the existing FigCraft
+> Rust/WASM application as the primary browser product; see the
+> [decision and migration record](wasm-first-browser-decision.md). The React screens and routes
+> documented below currently exist, but they are no longer the target owner of home, workspaces
+> or editor navigation. Treat tests cited here as evidence for the current React implementation,
+> not for the replacement Rust/WASM flow.
+
 The browser application a person signs in to: files, workspaces, people and sharing around the
 Rust/WASM editor. It is a React/TypeScript single-page app (the repository's one TypeScript
 exception) served by the web container at `/`, with the editor at `/edit/`. It holds no document

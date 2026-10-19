@@ -152,7 +152,14 @@ pub fn left_panel(app: &mut FigApp, ui: &mut Ui) {
         if let (Some(new), _) = crate::widgets::rename_field(ui, Id::new("filename"), &name, nr, semibold(13.0), start) {
             app.run("file.rename", json!({"name": new}));
         }
-        ui.painter().text(pos2(head.min.x + 16.0, head.min.y + 46.0), Align2::LEFT_CENTER, tr("Drafts"), regular(11.0), t.text_secondary);
+        // A cloud file names its project (which leads back to the files); a local file is a draft.
+        if let Some(project) = app.cloud.as_ref().map(|c| c.project.clone()) {
+            if !project.is_empty() && crate::cloud::project_label(ui, pos2(head.min.x + 16.0, head.min.y + 46.0), head.width() - 64.0, &project) {
+                crate::cloud::back_to_files(app);
+            }
+        } else {
+            ui.painter().text(pos2(head.min.x + 16.0, head.min.y + 46.0), Align2::LEFT_CENTER, tr("Drafts"), regular(11.0), t.text_secondary);
+        }
     }
     let hr = Rect::from_center_size(pos2(head.max.x - 24.0, head.min.y + 24.0), vec2(24.0, 24.0));
     let hresp = ui.interact(hr, ui.id().with("hideui"), Sense::click()).tip(tr("Collapse panel"));

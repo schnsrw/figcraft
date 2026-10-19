@@ -31,6 +31,7 @@ pub(crate) mod context;
 pub(crate) mod cursor;
 pub(crate) mod documents_api;
 pub(crate) mod error;
+pub(crate) mod hierarchy_api;
 pub(crate) mod history_api;
 pub(crate) mod host_api;
 pub(crate) mod host_events;
@@ -43,6 +44,7 @@ pub(crate) mod rate_limit;
 pub(crate) mod realtime;
 pub(crate) mod teams_api;
 pub(crate) mod tenants_api;
+pub(crate) mod versions_api;
 
 use std::sync::Arc;
 
@@ -74,6 +76,9 @@ pub(crate) struct ApiConfig {
     pub(crate) max_body_bytes: usize,
     /// Document image limits (TS-009).
     pub(crate) images: images_api::ImageSettings,
+    /// Where this process reaches the relay's WebSocket port (`host:port`), for restoring a version
+    /// as an ordinary edit (`FIGCRAFT_INTERNAL_RELAY_ADDR`).
+    pub(crate) relay_addr: String,
 }
 
 impl Default for ApiConfig {
@@ -84,6 +89,7 @@ impl Default for ApiConfig {
             auth_rate_limit: RateLimitConfig::default(),
             max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             images: images_api::ImageSettings::default(),
+            relay_addr: "127.0.0.1:8082".to_string(),
         }
     }
 }
@@ -291,8 +297,10 @@ pub(crate) fn api_router(state: AppState) -> Router {
         .merge(account_routes::resource_routes())
         .merge(me_routes::self_service_routes())
         .merge(me_api::me_routes())
+        .merge(hierarchy_api::hierarchy_routes())
         .merge(admin_users_routes::resource_routes())
         .merge(history_api::history_routes())
+        .merge(versions_api::version_routes())
         .merge(documents_api::routes())
         .merge(images_api::router())
         .merge(host_api::router());

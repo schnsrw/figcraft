@@ -1,0 +1,601 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "FigCraft Cloud hierarchy API",
+    "version": "1.0.0",
+    "description": "Workspace policy, team ownership of projects and project sharing, and the signed-in person's workspace list. Levels: owner, administrator, team lead, member (editor), guest (commenter or viewer). A higher level manages the lower ones; a lower level never reaches up or sideways. Every failure uses the fixed error envelope."
+  },
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ],
+  "security": [
+    {
+      "session": []
+    }
+  ],
+  "paths": {
+    "/hierarchy/openapi.json": {
+      "get": {
+        "operationId": "getHierarchyOpenApi",
+        "summary": "This document.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "The OpenAPI document.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/me/workspaces": {
+      "get": {
+        "operationId": "listMyWorkspaces",
+        "summary": "The workspaces the signed-in person belongs to, with their state and role.",
+        "description": "Works before any workspace is chosen (GET /tenants needs a workspace context). A workspace in pending deletion is not listed. A workspace that is suspended or archived is listed with that state: every call into it answers 409 resource_inactive.",
+        "responses": {
+          "200": {
+            "description": "A page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkspacePage"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/tenants/{tenant}/policy": {
+      "get": {
+        "operationId": "getWorkspacePolicy",
+        "summary": "The workspace policy.",
+        "description": "Any member may read it.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Tenant"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "put": {
+        "operationId": "setWorkspacePolicy",
+        "summary": "Replace the workspace policy.",
+        "description": "Owner and administrators only. At least one sign-in method must remain; turning on oidc needs an identity provider configured on the server (409 otherwise). A stricter share-link policy revokes the links it no longer allows and reports how many. Guests turned off does not remove existing guests.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Tenant"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PolicyInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The saved policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/tenants/{tenant}/projects/{project}/team-grants": {
+      "get": {
+        "operationId": "listProjectTeamGrants",
+        "summary": "The team that owns a project and the teams it is shared with.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Tenant"
+          },
+          {
+            "$ref": "#/components/parameters/Project"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ownership and grants.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectGrants"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/tenants/{tenant}/teams/{team}/grants/projects/{project}": {
+      "put": {
+        "operationId": "shareProjectWithTeam",
+        "summary": "Share a project with a team at a role.",
+        "description": "Needs team management on the team and administration of the project. Each member gets the role capped by their own team role. Documents inherit it.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Tenant"
+          },
+          {
+            "$ref": "#/components/parameters/Team"
+          },
+          {
+            "$ref": "#/components/parameters/Project"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Grant"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Shared."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "delete": {
+        "operationId": "unshareProjectFromTeam",
+        "summary": "Withdraw a team's access to a project.",
+        "description": "Needs administration of the project; works on archived teams.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Tenant"
+          },
+          {
+            "$ref": "#/components/parameters/Team"
+          },
+          {
+            "$ref": "#/components/parameters/Project"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Withdrawn."
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/workspaces/{workspace}/projects": {
+      "post": {
+        "operationId": "createProject",
+        "summary": "Create a project, optionally owned by a team.",
+        "description": "With owning_team_id the caller must lead that team (or administer the tenant); the team's members inherit access to the project and its files by their team role. The workspace-level create-project permission still applies. Team ownership of existing projects and spaces is set with PUT /tenants/{tenant}/teams/{team}/owned/projects/{project} and .../owned/workspaces/{workspace}.",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/Workspace"
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProject"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Project"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "__Host-figcraft_session"
+      }
+    },
+    "parameters": {
+      "Tenant": {
+        "name": "tenant",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "Team": {
+        "name": "team",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "Project": {
+        "name": "project",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "Workspace": {
+        "name": "workspace",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "description": "A space inside the workspace (the database `workspaces` table)."
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "Failure in the fixed envelope.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Policy": {
+        "type": "object",
+        "properties": {
+          "allowed_sign_in_methods": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "password",
+                "oidc"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 2,
+            "uniqueItems": true
+          },
+          "who_may_invite": {
+            "enum": [
+              "admins_only",
+              "team_leads",
+              "members"
+            ],
+            "description": "Administrators always may. team_leads adds the lead of the team invited to; members adds editor-level members of that team. Non-administrators can never invite someone above themselves (a team lead is not invited by a non-administrator)."
+          },
+          "guest_access": {
+            "type": "boolean",
+            "description": "Whether commenter and viewer members may be added, directly or by invitation."
+          },
+          "share_links": {
+            "enum": [
+              "disabled",
+              "view_only",
+              "view_and_edit"
+            ]
+          },
+          "oidc_available": {
+            "type": "boolean",
+            "description": "Response only: the server has an identity provider configured."
+          },
+          "share_links_revoked": {
+            "type": "integer",
+            "description": "Response of PUT only."
+          }
+        },
+        "additionalProperties": false
+      },
+      "PolicyInput": {
+        "type": "object",
+        "properties": {
+          "allowed_sign_in_methods": {
+            "type": "array",
+            "items": {
+              "enum": [
+                "password",
+                "oidc"
+              ]
+            },
+            "minItems": 1,
+            "maxItems": 2,
+            "uniqueItems": true
+          },
+          "who_may_invite": {
+            "enum": [
+              "admins_only",
+              "team_leads",
+              "members"
+            ]
+          },
+          "guest_access": {
+            "type": "boolean"
+          },
+          "share_links": {
+            "enum": [
+              "disabled",
+              "view_only",
+              "view_and_edit"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "allowed_sign_in_methods",
+          "who_may_invite",
+          "guest_access",
+          "share_links"
+        ]
+      },
+      "ProjectGrants": {
+        "type": "object",
+        "properties": {
+          "owning_team_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "team_id": {
+                  "type": "string",
+                  "format": "uuid"
+                },
+                "team_name": {
+                  "type": "string"
+                },
+                "role": {
+                  "enum": [
+                    "workspace_admin",
+                    "editor",
+                    "commenter",
+                    "viewer"
+                  ]
+                }
+              },
+              "additionalProperties": false
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "Grant": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "enum": [
+              "workspace_admin",
+              "editor",
+              "commenter",
+              "viewer"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "role"
+        ]
+      },
+      "CreateProject": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "owning_team_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false,
+        "required": [
+          "name"
+        ]
+      },
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "workspace_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "owning_team_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Workspace": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "pending",
+              "active",
+              "suspended",
+              "archived",
+              "deleting",
+              "deleted"
+            ]
+          },
+          "plan_id": {
+            "type": "string"
+          },
+          "home_region": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "tenant_owner",
+              "tenant_admin",
+              "editor",
+              "commenter",
+              "viewer"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "WorkspacePage": {
+        "type": "object",
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Workspace"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "code": {
+                "type": "string"
+              },
+              "message": {
+                "type": "string"
+              },
+              "request_id": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

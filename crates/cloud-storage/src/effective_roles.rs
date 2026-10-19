@@ -9,7 +9,13 @@
 //!   resource; `editor`, `commenter` and `viewer` grant no resource access by themselves;
 //! * direct `workspace_members` (applies to the workspace, its projects and their documents);
 //! * `workspace_team_grants` through an active team membership in an active team;
-//! * direct `document_members` and `document_team_grants` (that document only).
+//! * direct `document_members` and `document_team_grants` (that document only);
+//! * ownership (S6-052): members of the team that owns a workspace or a project receive the
+//!   owner's full role on it, capped by their team role, so a team `editor` edits everything the
+//!   team owns, a `commenter` or `viewer` only comments or reads, and a `team_manager` (team lead)
+//!   administers what the team owns. Ownership reaches down: a team-owned workspace covers its
+//!   projects and documents, a team-owned project its documents;
+//! * `project_team_grants`: a team a project is shared with, at the granted role capped the same way.
 //!
 //! Team grants are capped by the member's team role: a team `editor` gets at most `editor` from a
 //! `workspace_admin` grant, `commenter`/`viewer` members at most their role, and a
@@ -35,6 +41,12 @@ pub enum RoleSource {
     WorkspaceTeamGrant,
     DocumentMember,
     DocumentTeamGrant,
+    /// The member belongs to the team that owns the workspace (S6-052).
+    WorkspaceOwnerTeam,
+    /// The member belongs to the team that owns the project (S6-052).
+    ProjectOwnerTeam,
+    /// The member belongs to a team the project is shared with (S6-052).
+    ProjectTeamGrant,
 }
 
 impl RoleSource {
@@ -44,6 +56,9 @@ impl RoleSource {
             "workspace_team" => Some(Self::WorkspaceTeamGrant),
             "document_member" => Some(Self::DocumentMember),
             "document_team" => Some(Self::DocumentTeamGrant),
+            "workspace_owner" => Some(Self::WorkspaceOwnerTeam),
+            "project_owner" => Some(Self::ProjectOwnerTeam),
+            "project_team" => Some(Self::ProjectTeamGrant),
             _ => None,
         }
     }
@@ -242,6 +257,7 @@ async fn candidates(
     principal_id: PrincipalId,
     workspace: &str,
     document: Option<&str>,
+    project: Option<&str>,
 ) -> Result<Vec<(RoleSource, Role)>, MembershipError> {
     let rows: Vec<(String, String, Option<String>)> = sqlx::query_as(
         "SELECT 'workspace_member', role, NULL::text FROM workspace_members \
@@ -259,12 +275,28 @@ async fn candidates(
            JOIN teams t ON t.tenant_id = g.tenant_id AND t.id = g.team_id AND t.state = 'active' \
            JOIN team_members tm ON tm.tenant_id = g.tenant_id AND tm.team_id = g.team_id AND tm.state = 'active' \
            WHERE g.tenant_id = $1::uuid AND g.document_id = $3::uuid AND tm.principal_id = $4::uuid \
+         UNION ALL \
+         SELECT 'workspace_owner', 'workspace_admin', tm.role FROM workspaces w \
+           JOIN teams t ON t.tenant_id = w.tenant_id AND t.id = w.owning_team_id AND t.state = 'active' \
+           JOIN team_members tm ON tm.tenant_id = t.tenant_id AND tm.team_id = t.id AND tm.state = 'active' \
+           WHERE w.tenant_id = $1::uuid AND w.id = $2::uuid AND tm.principal_id = $4::uuid \
+         UNION ALL \
+         SELECT 'project_owner', 'workspace_admin', tm.role FROM projects p \
+           JOIN teams t ON t.tenant_id = p.tenant_id AND t.id = p.owning_team_id AND t.state = 'active' \
+           JOIN team_members tm ON tm.tenant_id = t.tenant_id AND tm.team_id = t.id AND tm.state = 'active' \
+           WHERE p.tenant_id = $1::uuid AND p.id = $5::uuid AND tm.principal_id = $4::uuid \
+         UNION ALL \
+         SELECT 'project_team', g.role, tm.role FROM project_team_grants g \
+           JOIN teams t ON t.tenant_id = g.tenant_id AND t.id = g.team_id AND t.state = 'active' \
+           JOIN team_members tm ON tm.tenant_id = g.tenant_id AND tm.team_id = g.team_id AND tm.state = 'active' \
+           WHERE g.tenant_id = $1::uuid AND g.project_id = $5::uuid AND tm.principal_id = $4::uuid \
          LIMIT 512",
     )
     .bind(transaction.tenant_id().to_string())
     .bind(workspace)
     .bind(document)
     .bind(principal_id.to_string())
+    .bind(project)
     .fetch_all(transaction.connection())
     .await
     .map_err(|_| MembershipError::Database)?;
@@ -289,6 +321,7 @@ async fn resolve(
     states: Vec<ResourceState>,
     workspace: String,
     document: Option<String>,
+    project: Option<String>,
 ) -> Result<Option<ResourceAccess>, MembershipError> {
     let Some(tenant) = resolve_tenant_access(transaction, principal_id).await? else {
         return Ok(None);
@@ -296,7 +329,7 @@ async fn resolve(
     let state = combined_state(&states);
     let (role, sources) = match tenant.tenant_role {
         Some(tenant_role) if tenant.grants() => {
-            let found = candidates(transaction, principal_id, &workspace, document.as_deref()).await?;
+            let found = candidates(transaction, principal_id, &workspace, document.as_deref(), project.as_deref()).await?;
             strongest(tenant_role, &found)
         }
         _ => (None, Vec::new()),
@@ -320,7 +353,7 @@ pub async fn resolve_workspace_access(
     let Some(state) = state else {
         return Ok(None);
     };
-    resolve(transaction, principal_id, vec![parse_state(&state)?], workspace_id.to_string(), None).await
+    resolve(transaction, principal_id, vec![parse_state(&state)?], workspace_id.to_string(), None, None).await
 }
 
 /// Facts for `principal_id` on a project (inherits the workspace's grants).
@@ -341,7 +374,15 @@ pub async fn resolve_project_access(
     let Some((project_state, workspace_state, workspace)) = row else {
         return Ok(None);
     };
-    resolve(transaction, principal_id, vec![parse_state(&project_state)?, parse_state(&workspace_state)?], workspace, None).await
+    resolve(
+        transaction,
+        principal_id,
+        vec![parse_state(&project_state)?, parse_state(&workspace_state)?],
+        workspace,
+        None,
+        Some(project_id.to_string()),
+    )
+    .await
 }
 
 /// Facts for `principal_id` on a document (workspace grants plus the document's own).
@@ -350,8 +391,8 @@ pub async fn resolve_document_access(
     principal_id: PrincipalId,
     document_id: CloudDocumentId,
 ) -> Result<Option<ResourceAccess>, MembershipError> {
-    let row: Option<(String, String, String, String)> = sqlx::query_as(
-        "SELECT d.state, p.state, w.state, w.id::text FROM documents d \
+    let row: Option<(String, String, String, String, String)> = sqlx::query_as(
+        "SELECT d.state, p.state, w.state, w.id::text, p.id::text FROM documents d \
          JOIN projects p ON p.tenant_id = d.tenant_id AND p.id = d.project_id \
          JOIN workspaces w ON w.tenant_id = d.tenant_id AND w.id = d.workspace_id \
          WHERE d.tenant_id = $1::uuid AND d.id = $2::uuid",
@@ -361,11 +402,11 @@ pub async fn resolve_document_access(
     .fetch_optional(transaction.connection())
     .await
     .map_err(|_| MembershipError::Database)?;
-    let Some((document_state, project_state, workspace_state, workspace)) = row else {
+    let Some((document_state, project_state, workspace_state, workspace, project)) = row else {
         return Ok(None);
     };
     let states = vec![parse_state(&document_state)?, parse_state(&project_state)?, parse_state(&workspace_state)?];
-    resolve(transaction, principal_id, states, workspace, Some(document_id.to_string())).await
+    resolve(transaction, principal_id, states, workspace, Some(document_id.to_string()), Some(project)).await
 }
 
 /// The principal's active role in a team (`None` when not an active member of an active team),
@@ -419,6 +460,39 @@ mod tests {
         assert_eq!(strongest(Role::Commenter, &[(RoleSource::WorkspaceMember, Role::WorkspaceAdmin)]).0, Some(Role::Commenter));
         // Editors are not capped.
         assert_eq!(strongest(Role::Editor, &[(RoleSource::WorkspaceMember, Role::WorkspaceAdmin)]).0, Some(Role::WorkspaceAdmin));
+    }
+
+    /// The team an owner team gives, as the SQL branches produce it: the full `workspace_admin` role
+    /// capped by the member's role in the team.
+    fn owned(team_role: Role) -> Vec<(RoleSource, Role)> {
+        capped_team_grant(Role::WorkspaceAdmin, team_role).map(|role| (RoleSource::ProjectOwnerTeam, role)).into_iter().collect()
+    }
+
+    #[test]
+    fn owning_a_project_gives_members_the_role_their_team_role_allows() {
+        // Lead, editor, commenter and viewer of the owning team.
+        let role = |team_role| strongest(Role::Editor, &owned(team_role)).0;
+        assert_eq!(role(Role::TeamManager), Some(Role::WorkspaceAdmin));
+        assert_eq!(role(Role::Editor), Some(Role::Editor));
+        assert_eq!(role(Role::Commenter), Some(Role::Commenter));
+        assert_eq!(role(Role::Viewer), Some(Role::Viewer));
+        // A tenant guest in the owning team stays a guest, whatever the team says.
+        assert_eq!(strongest(Role::Viewer, &owned(Role::TeamManager)).0, Some(Role::Viewer));
+        assert_eq!(strongest(Role::Commenter, &owned(Role::Editor)).0, Some(Role::Commenter));
+        // Belonging to no owning team grants nothing.
+        assert_eq!(strongest(Role::Editor, &[]).0, None);
+        // The strongest of several sources wins and is reported, ownership included.
+        let found = [(RoleSource::ProjectTeamGrant, Role::Viewer), (RoleSource::ProjectOwnerTeam, Role::Editor)];
+        assert_eq!(strongest(Role::Editor, &found), (Some(Role::Editor), vec![RoleSource::ProjectOwnerTeam]));
+        // Sources round-trip from the SQL names.
+        for (name, source) in [
+            ("workspace_owner", RoleSource::WorkspaceOwnerTeam),
+            ("project_owner", RoleSource::ProjectOwnerTeam),
+            ("project_team", RoleSource::ProjectTeamGrant),
+        ] {
+            assert_eq!(RoleSource::parse(name), Some(source));
+        }
+        assert_eq!(RoleSource::parse("tenant"), None);
     }
 
     #[test]

@@ -12,7 +12,7 @@
 //! then does everything in one tenant transaction: it locks the invitation row (`FOR UPDATE`, with
 //! the pending predicate re-evaluated after any wait, so of two concurrent accepts exactly one
 //! wins), checks the tenant and team are active, adds or reactivates the tenant membership (role
-//! `viewer` for new members) and the team membership, marks the invitation accepted and records
+//! `editor`, `commenter` or `viewer` by the invited team role, for new members) and the team membership, marks the invitation accepted and records
 //! `invitation.accept`, then commits.
 
 use base64::Engine as _;
@@ -300,7 +300,7 @@ pub async fn list_pending_invitations(
 /// Accept the invitation `token` names, as `principal` (an active `user`). When the identity
 /// layer has a verified email for the principal it passes it as `verified_email`, and it must
 /// equal the invited address (case-insensitively); `None` skips that check (for example a
-/// provider that issues no email claim). New tenant members join as `viewer`; an already active
+/// provider that issues no email claim). New tenant members join at the level of the invited team role (`editor` for team managers and editors, otherwise `commenter` or `viewer`); an already active
 /// member keeps their tenant role, and an already active team member keeps their team role.
 /// Commits on success; on any error nothing changes.
 pub async fn accept_invitation(
@@ -325,6 +325,16 @@ pub async fn accept_invitation(
     let accepted = accept_in(&mut transaction, &hash, principal, verified_email).await?;
     transaction.commit().await.map_err(|_| InvitationError::Database)?;
     Ok(accepted)
+}
+
+/// The workspace role a newcomer gets from the team role they were invited with.
+#[must_use]
+pub(crate) const fn tenant_role_for(team_role: TeamRole) -> &'static str {
+    match team_role {
+        TeamRole::TeamManager | TeamRole::Editor => "editor",
+        TeamRole::Commenter => "commenter",
+        TeamRole::Viewer => "viewer",
+    }
 }
 
 pub(crate) async fn accept_in(
@@ -387,25 +397,30 @@ pub(crate) async fn accept_in(
             .fetch_optional(transaction.connection())
             .await
             .map_err(|error| database_error(&error))?;
+    // A newcomer joins the workspace at the level the team role implies: someone invited to edit
+    // is a member (`editor`), a commenter or viewer stays a guest. Guests are capped everywhere.
+    let tenant_role = tenant_role_for(team_role);
     let joined_tenant = match membership.as_deref() {
         Some("active") => false,
         Some("suspended") => return Err(InvitationError::PrincipalUnavailable),
         Some(_) => {
             sqlx::query(
-                "UPDATE tenant_members SET state = 'active', role = 'viewer', updated_at = now() \
+                "UPDATE tenant_members SET state = 'active', role = $3, updated_at = now() \
                  WHERE tenant_id = $1::uuid AND principal_id = $2::uuid",
             )
             .bind(transaction.tenant_id().to_string())
             .bind(principal.to_string())
+            .bind(tenant_role)
             .execute(transaction.connection())
             .await
             .map_err(|error| database_error(&error))?;
             true
         }
         None => {
-            sqlx::query("INSERT INTO tenant_members (tenant_id, principal_id, role) VALUES ($1::uuid, $2::uuid, 'viewer')")
+            sqlx::query("INSERT INTO tenant_members (tenant_id, principal_id, role) VALUES ($1::uuid, $2::uuid, $3)")
                 .bind(transaction.tenant_id().to_string())
                 .bind(principal.to_string())
+                .bind(tenant_role)
                 .execute(transaction.connection())
                 .await
                 .map_err(|error| database_error(&error))?;
@@ -432,6 +447,18 @@ pub(crate) async fn accept_in(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn newcomers_join_at_the_level_their_team_role_implies() {
+        assert_eq!(tenant_role_for(TeamRole::TeamManager), "editor");
+        assert_eq!(tenant_role_for(TeamRole::Editor), "editor");
+        assert_eq!(tenant_role_for(TeamRole::Commenter), "commenter");
+        assert_eq!(tenant_role_for(TeamRole::Viewer), "viewer");
+        // Never an administrator, whatever the team role.
+        for role in [TeamRole::TeamManager, TeamRole::Editor, TeamRole::Commenter, TeamRole::Viewer] {
+            assert!(!matches!(tenant_role_for(role), "tenant_owner" | "tenant_admin"));
+        }
+    }
 
     #[test]
     fn tokens_are_43_url_safe_characters_and_distinct() {

@@ -41,6 +41,17 @@
 		file_server
 	}
 
+	# FigCraft Cloud: a file's page is the editor itself (WASM, full page; no iframe). It reads the
+	# file's ids from the path and asks the API for it; the file browser links here.
+	@cloudfile path_regexp cloudfile ^/workspace/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/file/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(/edit)?/?$
+	handle @cloudfile {
+		root * /srv
+		rewrite * /edit/index.html
+		header Cache-Control "no-cache"
+		header X-Content-Type-Options nosniff
+		file_server
+	}
+
 	handle {
 		root * /srv
 		try_files {path} /index.html

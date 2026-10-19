@@ -8,6 +8,14 @@ name = "Español"
 status = "draft — needs native review"
 
 [ui]
+"Back to files" = "Volver a los archivos"
+"Changes are saved automatically" = "Los cambios se guardan automáticamente"
+"Couldn't download the export" = "No se pudo descargar la exportación"
+"Couldn't open this file" = "No se pudo abrir este archivo"
+"Couldn't reach the server. Reload the page to try again." = "No se pudo conectar con el servidor. Vuelve a cargar la página para intentarlo de nuevo."
+"It doesn't exist, or you don't have access to it." = "No existe o no tienes acceso a él."
+"Opening {name}…" = "Abriendo {name}…"
+"People with access to this file can open its link." = "Las personas con acceso a este archivo pueden abrir su enlace."
 "Compatibility notes" = "Notas de compatibilidad"
 "Couldn't download the variables" = "No se pudieron descargar las variables"
 

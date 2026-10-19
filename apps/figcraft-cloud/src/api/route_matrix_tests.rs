@@ -478,7 +478,6 @@ const UNLISTED: &[&str] = &[
     "/tenants/{t}/audit",
     "/tenants/{t}/support-access",
     "/tenants/{t}/teams/{team}/grants",
-    "/tenants/{t}/teams/{team}/grants/projects/{p}",
     "/tenants/{t}/teams/{team}/owned/libraries/{d}",
     "/tenants/{t}/members/{m}/sessions",
     // Workspace team grants are written through the team routes; only the listing is here.

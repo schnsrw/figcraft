@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::ResourceState;
+use crate::{ResourceState, Role};
 
 /// A way to sign in to a workspace.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -60,26 +60,66 @@ pub struct WorkspacePolicy {
     /// Never empty. Sign-in with a method not listed is refused for this workspace.
     pub allowed_sign_in_methods: Vec<SignInMethod>,
     pub who_may_invite: InvitePolicy,
-    /// Whether people outside the workspace's members may be given guest (viewer or commenter)
-    /// access to single documents.
+    /// Whether guests (workspace members who are only commenters or viewers) may be added, by direct
+    /// add or by invitation. Members who are already guests keep their access when this is turned off.
     pub guest_access: bool,
     pub share_links: ShareLinkPolicy,
 }
 
 impl Default for WorkspacePolicy {
-    /// Both sign-in methods, team leads may invite, no guests, share links as before this setting
-    /// existed (view and edit).
+    /// Both sign-in methods, team leads may invite, guests allowed, share links as before this
+    /// setting existed (view and edit).
     fn default() -> Self {
         Self {
             allowed_sign_in_methods: vec![SignInMethod::Password, SignInMethod::Oidc],
             who_may_invite: InvitePolicy::TeamLeads,
-            guest_access: false,
+            guest_access: true,
             share_links: ShareLinkPolicy::ViewAndEdit,
         }
     }
 }
 
+/// Who is inviting, for [`WorkspacePolicy::may_invite`].
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub enum Inviter {
+    /// The workspace owner or an administrator.
+    Admin,
+    /// The lead of the team being invited to.
+    TeamLead,
+    /// An editor-level member of the team being invited to (not a commenter or viewer).
+    TeamMember,
+}
+
 impl WorkspacePolicy {
+    /// Whether `inviter` may invite people to a team under this policy.
+    #[must_use]
+    pub const fn may_invite(&self, inviter: Inviter) -> bool {
+        matches!(
+            (self.who_may_invite, inviter),
+            (_, Inviter::Admin) | (InvitePolicy::TeamLeads | InvitePolicy::Members, Inviter::TeamLead) | (InvitePolicy::Members, Inviter::TeamMember)
+        )
+    }
+
+    /// Whether a person may join the workspace with the workspace role `role`: guest roles
+    /// (`commenter`, `viewer`) only when guest access is on.
+    #[must_use]
+    pub const fn permits_new_member(&self, role: Role) -> bool {
+        match role {
+            Role::Commenter | Role::Viewer => self.guest_access,
+            _ => true,
+        }
+    }
+
+    /// Whether a share link with `role` may exist under this policy.
+    #[must_use]
+    pub const fn permits_share_link(&self, editable: bool) -> bool {
+        match self.share_links {
+            ShareLinkPolicy::Disabled => false,
+            ShareLinkPolicy::ViewOnly => !editable,
+            ShareLinkPolicy::ViewAndEdit => true,
+        }
+    }
+
     /// A policy is valid when at least one sign-in method remains and each is listed once.
     #[must_use]
     pub fn is_valid(&self) -> bool {
@@ -147,6 +187,34 @@ mod tests {
         assert!(!lifecycle_transition_allowed(Active, Deleting));
         assert!(lifecycle_transition_allowed(Suspended, Active));
         assert!(lifecycle_transition_allowed(Deleting, Archived));
+    }
+
+    #[test]
+    fn invitations_follow_who_may_invite() {
+        let with = |who_may_invite| WorkspacePolicy { who_may_invite, ..WorkspacePolicy::default() };
+        let (admins, leads, members) = (with(InvitePolicy::AdminsOnly), with(InvitePolicy::TeamLeads), with(InvitePolicy::Members));
+        for policy in [&admins, &leads, &members] {
+            assert!(policy.may_invite(Inviter::Admin), "admins always may");
+        }
+        assert!(!admins.may_invite(Inviter::TeamLead) && !admins.may_invite(Inviter::TeamMember));
+        assert!(leads.may_invite(Inviter::TeamLead) && !leads.may_invite(Inviter::TeamMember));
+        assert!(members.may_invite(Inviter::TeamLead) && members.may_invite(Inviter::TeamMember));
+        assert_eq!(WorkspacePolicy::default().who_may_invite, InvitePolicy::TeamLeads);
+    }
+
+    #[test]
+    fn guests_and_share_links_follow_their_settings() {
+        let mut policy = WorkspacePolicy::default();
+        assert!(policy.permits_new_member(Role::Viewer) && policy.permits_new_member(Role::Commenter));
+        policy.guest_access = false;
+        assert!(!policy.permits_new_member(Role::Viewer) && !policy.permits_new_member(Role::Commenter));
+        assert!(policy.permits_new_member(Role::Editor) && policy.permits_new_member(Role::TenantAdmin));
+        for (setting, view, edit) in
+            [(ShareLinkPolicy::Disabled, false, false), (ShareLinkPolicy::ViewOnly, true, false), (ShareLinkPolicy::ViewAndEdit, true, true)]
+        {
+            policy.share_links = setting;
+            assert_eq!((policy.permits_share_link(false), policy.permits_share_link(true)), (view, edit), "{setting:?}");
+        }
     }
 
     #[test]

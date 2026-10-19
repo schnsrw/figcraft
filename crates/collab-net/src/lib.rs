@@ -13,6 +13,7 @@
 //! tested natively.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod assets;
 #[cfg(any(target_arch = "wasm32", test))]
 mod driver;
 pub mod inbox;
@@ -29,7 +30,11 @@ pub mod host;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod hub;
 #[cfg(not(target_arch = "wasm32"))]
+mod http;
+#[cfg(not(target_arch = "wasm32"))]
 mod link;
+#[cfg(not(target_arch = "wasm32"))]
+mod link_assets;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod links;
 #[cfg(not(target_arch = "wasm32"))]

@@ -36,6 +36,11 @@ impl<T> Sessions<T> {
         self.running.remove(&id).map(|(session, _)| session)
     }
 
+    /// Session `id`'s mailbox, for work that reports to it from other threads.
+    pub(crate) fn inbox_of(&self, id: SessionId) -> Option<Inbox> {
+        self.running.get(&id).map(|(_, inbox)| inbox.clone())
+    }
+
     pub(crate) fn get(&self, id: SessionId) -> Option<&T> {
         self.running.get(&id).map(|(session, _)| session)
     }

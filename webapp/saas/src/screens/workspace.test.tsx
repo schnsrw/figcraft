@@ -1,11 +1,10 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { App } from "../App";
-import { safeEditorUrl } from "../api/workspaces";
-import { setNavigationForTests } from "../platform";
 import { readRecents } from "../recents";
+import { pageLoad } from "../router";
 import {
   DOCUMENT_ID,
   FakeApi,
@@ -16,8 +15,6 @@ import {
   session,
   tenantList,
 } from "../testing";
-
-afterEach(() => setNavigationForTests(null));
 
 const adminCan = {
   create_project: true,
@@ -193,30 +190,30 @@ describe("workspace home", () => {
   });
 });
 
-describe("workspace page", () => {
-  function workspaceApi(
-    options: { can?: object; projectCan?: object; role?: string } = {},
-  ) {
-    const files: unknown[] = [
-      fileRow(),
-      fileRow({
-        id: "88888888-8888-4888-8888-888888888888",
-        name: "Pricing",
-        state: "archived",
-      }),
-    ];
-    const api = base(options.role)
-      .on("GET /workspaces/" + WORKSPACE_ID, {
-        body: { ...workspaceRow(), can: options.can ?? adminCan },
-      })
-      .on("GET /workspaces/" + WORKSPACE_ID + "/projects", page([projectRow()]))
-      .on("GET /projects/" + PROJECT_ID, {
-        body: { ...projectRow(), can: options.projectCan ?? projectCan },
-      })
-      .on("GET /projects/" + PROJECT_ID + "/documents", () => page(files));
-    return { api, files };
-  }
+function workspaceApi(
+  options: { can?: object; projectCan?: object; role?: string } = {},
+) {
+  const files: unknown[] = [
+    fileRow(),
+    fileRow({
+      id: "88888888-8888-4888-8888-888888888888",
+      name: "Pricing",
+      state: "archived",
+    }),
+  ];
+  const api = base(options.role)
+    .on("GET /workspaces/" + WORKSPACE_ID, {
+      body: { ...workspaceRow(), can: options.can ?? adminCan },
+    })
+    .on("GET /workspaces/" + WORKSPACE_ID + "/projects", page([projectRow()]))
+    .on("GET /projects/" + PROJECT_ID, {
+      body: { ...projectRow(), can: options.projectCan ?? projectCan },
+    })
+    .on("GET /projects/" + PROJECT_ID + "/documents", () => page(files));
+  return { api, files };
+}
 
+describe("workspace page", () => {
   it("shows projects and the files of the first one, with actions for an administrator", async () => {
     window.history.replaceState(null, "", `/workspace/${WORKSPACE_ID}`);
     const { api } = workspaceApi();
@@ -235,16 +232,18 @@ describe("workspace page", () => {
         .getAttribute("href"),
     ).toBe(`/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`);
     expect(within(files).queryByText("Pricing")).toBeNull();
+    await userEvent.click(screen.getByLabelText("More actions for Homepage"));
     expect(
       screen.getByRole("button", { name: "Rename Homepage" }),
     ).toBeTruthy();
     expect(
       screen.getByRole("button", { name: "Archive Homepage" }),
     ).toBeTruthy();
+    await userEvent.click(screen.getByLabelText("Workspace actions"));
     expect(
       screen.getByRole("button", { name: "Rename workspace" }),
     ).toBeTruthy();
-    expect(screen.getByLabelText("New file")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "New file" })).toBeTruthy();
   });
 
   it("offers only what the server says the caller can do", async () => {
@@ -256,6 +255,7 @@ describe("workspace page", () => {
     });
     render(<App client={api.client()} />);
     await screen.findByRole("list", { name: "Files" });
+    await userEvent.click(screen.getByLabelText("More actions for Homepage"));
     for (const name of [
       "Rename workspace",
       "Archive workspace",
@@ -277,24 +277,37 @@ describe("workspace page", () => {
   it("creates a file, archives and restores one, and surfaces a refusal", async () => {
     window.history.replaceState(null, "", `/workspace/${WORKSPACE_ID}`);
     const { api, files } = workspaceApi();
+    const createdId = "99999999-9999-4999-8999-999999999999";
     api.on("POST /projects/" + PROJECT_ID + "/documents", (call) => {
-      files.push(
-        fileRow({
-          id: "99999999-9999-4999-8999-999999999999",
-          name: (call.body as { name: string }).name,
-        }),
-      );
-      return { status: 201, body: {} };
+      const created = fileRow({
+        id: createdId,
+        name: (call.body as { name: string }).name,
+      });
+      files.push(created);
+      return { status: 201, body: created };
     });
+    const load = vi.spyOn(pageLoad, "assign").mockImplementation(() => {});
     api.on(
       "POST /documents/" + DOCUMENT_ID + "/archive",
       apiError(409, "resource_inactive", "The resource is not active."),
     );
     render(<App client={api.client()} />);
+    await userEvent.click(
+      await screen.findByRole("button", { name: "New file" }),
+    );
     await userEvent.type(await screen.findByLabelText("New file"), "Logo");
     await userEvent.click(screen.getByRole("button", { name: "Add file" }));
-    expect(await screen.findByRole("link", { name: "Logo" })).toBeTruthy();
+    // The new file opens in the FigCraft editor: a full page load of its URL, remembered first.
+    await waitFor(() =>
+      expect(load).toHaveBeenCalledWith(
+        `/workspace/${WORKSPACE_ID}/file/${createdId}`,
+      ),
+    );
+    load.mockRestore();
+    expect(window.location.pathname).toBe(`/workspace/${WORKSPACE_ID}`);
+    expect(readRecents(TENANT_ID).map((r) => r.name)).toEqual(["Logo"]);
     // A refusal is shown, not swallowed.
+    await userEvent.click(screen.getByLabelText("More actions for Homepage"));
     await userEvent.click(
       screen.getByRole("button", { name: "Archive Homepage" }),
     );
@@ -313,6 +326,7 @@ describe("workspace page", () => {
       },
     );
     await userEvent.click(screen.getByLabelText("Show archived files"));
+    await userEvent.click(screen.getByLabelText("More actions for Pricing"));
     await userEvent.click(
       screen.getByRole("button", { name: "Restore Pricing" }),
     );
@@ -331,6 +345,9 @@ describe("workspace page", () => {
       return { body: {} };
     });
     render(<App client={api.client()} />);
+    await userEvent.click(
+      await screen.findByLabelText("More actions for Homepage"),
+    );
     const trigger = await screen.findByRole("button", {
       name: "Rename Homepage",
     });
@@ -368,6 +385,9 @@ describe("workspace page", () => {
       apiError(403, "forbidden", "This action is not allowed."),
     );
     render(<App client={api.client()} />);
+    await userEvent.click(
+      await screen.findByLabelText("More actions for Homepage"),
+    );
     await userEvent.click(
       await screen.findByRole("button", { name: "Rename Homepage" }),
     );
@@ -449,162 +469,38 @@ describe("workspace page", () => {
   });
 });
 
-describe("file page", () => {
-  const fileUrl = `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`;
-  const editorUrl = `${window.location.origin}/edit/#join=ws%3A%2F%2Fexample%2Fws%2Fv1%2Fcollab%3Ffile%3D${DOCUMENT_ID}%26token%3Dabc`;
-
-  function fileApi(over: object = {}) {
-    return base()
-      .on("GET /documents/" + DOCUMENT_ID, {
-        body: {
-          ...fileRow(),
-          role: "workspace_admin",
-          can_edit: true,
-          ...over,
-        },
-      })
-      .on("GET /workspaces/" + WORKSPACE_ID, {
-        body: { ...workspaceRow(), can: adminCan },
-      });
-  }
-
-  it("shows the file and its role, remembers it, and opens the editor from the collab link", async () => {
-    window.history.replaceState(null, "", fileUrl);
-    const opened = vi.fn();
-    setNavigationForTests(opened);
-    const api = fileApi().on("GET /documents/" + DOCUMENT_ID + "/collab-link", {
-      body: {
-        document_id: DOCUMENT_ID,
-        access: "edit",
-        editor_url: editorUrl,
-        expires_in_secs: 60,
-      },
-    });
+describe("opening files", () => {
+  it("loads a file's editor page in full and remembers it", async () => {
+    window.history.replaceState(null, "", `/workspace/${WORKSPACE_ID}`);
+    const { api } = workspaceApi();
+    const load = vi.spyOn(pageLoad, "assign").mockImplementation(() => {});
     render(<App client={api.client()} />);
-    expect(
-      await screen.findByRole("heading", { name: /Homepage/ }),
-    ).toBeTruthy();
-    expect(screen.getByText("Workspace admin")).toBeTruthy();
-    expect(screen.getByText(/you can edit this file/)).toBeTruthy();
-    await waitFor(() =>
-      expect(readRecents(TENANT_ID).map((r) => r.name)).toEqual(["Homepage"]),
+    const link = await screen.findByRole("link", { name: "Homepage" });
+    expect(link.getAttribute("href")).toBe(
+      `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`,
     );
-    // The ticket is only requested when the person asks to open the file.
-    expect(api.count("GET /documents/" + DOCUMENT_ID + "/collab-link")).toBe(0);
-    await userEvent.click(
-      screen.getByRole("button", { name: "Open in editor" }),
+    await userEvent.click(link);
+    expect(load).toHaveBeenCalledWith(
+      `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`,
     );
-    await waitFor(() => expect(opened).toHaveBeenCalledWith(editorUrl));
+    expect(window.location.pathname).toBe(`/workspace/${WORKSPACE_ID}`);
+    expect(readRecents(TENANT_ID)[0]?.name).toBe("Homepage");
+    load.mockRestore();
   });
 
-  it("refuses to navigate to an editor address that is not this site's and shows it instead", async () => {
-    window.history.replaceState(null, "", fileUrl);
-    const opened = vi.fn();
-    setNavigationForTests(opened);
-    const api = fileApi().on("GET /documents/" + DOCUMENT_ID + "/collab-link", {
-      body: {
-        document_id: DOCUMENT_ID,
-        access: "view",
-        editor_url: "https://evil.example/edit/#join=x",
-        expires_in_secs: 60,
-      },
-    });
-    render(<App client={api.client()} />);
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Open in editor" }),
-    );
-    expect((await screen.findByRole("alert")).textContent).toContain(
-      "isn't this site's",
-    );
-    expect(opened).not.toHaveBeenCalled();
-  });
-
-  it("surfaces a refusal to open and leaves the button usable", async () => {
-    window.history.replaceState(null, "", fileUrl);
-    const api = fileApi().on(
-      "GET /documents/" + DOCUMENT_ID + "/collab-link",
-      apiError(403, "forbidden", "This action is not allowed."),
-    );
-    render(<App client={api.client()} />);
-    await userEvent.click(
-      await screen.findByRole("button", { name: "Open in editor" }),
-    );
-    expect((await screen.findByRole("alert")).textContent).toContain(
-      "This action is not allowed.",
-    );
-    expect(
-      (
-        screen.getByRole("button", {
-          name: "Open in editor",
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(false);
-  });
-
-  it("disables opening an archived file and explains why", async () => {
-    window.history.replaceState(null, "", fileUrl);
-    const api = fileApi({ state: "archived" });
-    render(<App client={api.client()} />);
-    await screen.findByRole("heading", { name: /Homepage/ });
-    expect(
-      (
-        screen.getByRole("button", {
-          name: "Open in editor",
-        }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
-    expect(screen.getByRole("status").textContent).toContain("archived");
-  });
-
-  it("treats a file at the wrong workspace URL, or one that is missing, as not found", async () => {
-    const other = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+  it("says where a file is when this app is asked to show one", async () => {
     window.history.replaceState(
       null,
       "",
-      `/workspace/${other}/file/${DOCUMENT_ID}`,
+      `/workspace/${WORKSPACE_ID}/file/${DOCUMENT_ID}`,
     );
-    const api = fileApi().on(
-      "GET /workspaces/" + other,
-      apiError(404, "not_found", "x"),
-    );
+    const { api } = workspaceApi();
     render(<App client={api.client()} />);
     expect(
-      await screen.findByRole("heading", { name: "File not found" }),
+      await screen.findByRole("heading", { name: "Files open in the editor" }),
     ).toBeTruthy();
-  });
-
-  it("shows file not found for a 404", async () => {
-    window.history.replaceState(null, "", fileUrl);
-    const api = base()
-      .on("GET /documents/" + DOCUMENT_ID, apiError(404, "not_found", "x"))
-      .on("GET /workspaces/" + WORKSPACE_ID, apiError(404, "not_found", "x"));
-    render(<App client={api.client()} />);
     expect(
-      await screen.findByRole("heading", { name: "File not found" }),
-    ).toBeTruthy();
-  });
-});
-
-describe("safeEditorUrl", () => {
-  const origin = "https://figcraft.example";
-  it("accepts only this origin's /edit/ page with a #join fragment", () => {
-    expect(safeEditorUrl(`${origin}/edit/#join=abc`, origin)).toBe(
-      `${origin}/edit/#join=abc`,
-    );
-    expect(safeEditorUrl("/edit/#join=abc", origin)).toBe(
-      `${origin}/edit/#join=abc`,
-    );
-    for (const bad of [
-      "https://evil.example/edit/#join=abc",
-      `${origin}/edit/`,
-      `${origin}/edit/?x=1#join=abc`,
-      `${origin}/other/#join=abc`,
-      `${origin}/edit#join=abc`,
-      "javascript:alert(1)",
-      "data:text/html,x",
-      "",
-    ]) {
-      expect(safeEditorUrl(bad, origin), bad).toBeNull();
-    }
+      screen.getByRole("link", { name: "Back to files" }).getAttribute("href"),
+    ).toBe(`/workspace/${WORKSPACE_ID}`);
   });
 });

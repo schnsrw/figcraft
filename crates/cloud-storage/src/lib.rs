@@ -60,9 +60,11 @@ pub mod teams;
 pub mod tenants;
 pub mod uploads;
 pub mod validation;
+pub mod versions;
 pub mod webhook_delivery;
 pub mod webhook_events;
 pub mod webhooks;
+pub mod workspace_policy;
 
 /// A SQLx transaction bound to one trusted tenant identifier.
 ///
@@ -219,7 +221,7 @@ pub async fn provision_database_roles(admin_url: &str, migrator_password: &str, 
                     'upload_reservations', 'libraries', 'library_team_grants', 'library_versions', 'library_usages',
                     'plugins', 'plugin_versions', 'exports', 'document_thumbnails', 'retention_holds', 'share_links', 'oidc_login_attempts', 'browser_sessions',
                     'tenant_bootstrap', 'service_accounts', 'service_account_credentials', 'team_invitations',
-                    'member_permissions', 'support_access_grants', 'room_leases', 'room_clients', 'host_systems', 'host_system_keys', 'embed_token_uses', 'webhook_endpoints', 'webhook_deliveries', 'webhook_delivery_attempts', 'local_credentials', 'tenant_account_settings', 'password_resets',
+                    'member_permissions', 'support_access_grants', 'room_leases', 'room_clients', 'host_systems', 'host_system_keys', 'embed_token_uses', 'webhook_endpoints', 'webhook_deliveries', 'webhook_delivery_attempts', 'local_credentials', 'tenant_account_settings', 'project_team_grants', 'password_resets', 'document_versions',
                     'platform_admins', 'platform_sessions', 'platform_bootstrap', 'platform_audit_events', 'workspace_owner_invitations'
                 ])
             LOOP

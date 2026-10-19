@@ -198,12 +198,18 @@ multi-region editing and building a foundation model.
 
 ## S6 — Browser, desktop and embedded integration
 
+**Browser delivery amendment (2026-10-18):** [SAAS-ADR-018](wasm-first-browser-decision.md)
+replaces the React-owned workspace/editor composition below with one FigCraft Rust/WASM product.
+The original S1 React foundation remains historical completed work; S6 delivery and estimates
+need rebaselining after the first measured WASM cloud-catalog slice. No S6 gate is newly passed.
+
 ### Deliverables
 
-- React/TypeScript workspace navigation for recents, projects, libraries, search, notifications
-  and settings, isolated under `webapp/`.
+- Rust/WASM workspace navigation for recents, projects, libraries, search, notifications and
+  settings, with browser/cloud integrations isolated at the application edge.
 - Stable workspace/document routes and one cloud document identity across browser and desktop.
-- Typed TypeScript-to-Rust/WASM editor lifecycle and collaboration bridge.
+- Narrow browser/cloud HTTP adapter and host embedding handshake; Rust owns editor lifecycle and
+  collaboration WebSockets.
 - Browser cloud open, edit, reconnect and export flows.
 - Desktop local/cloud repository adapter and workspace browser.
 - Visible saved, saving, offline, conflict and error states.

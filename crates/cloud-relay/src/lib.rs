@@ -23,9 +23,10 @@
 pub mod admission;
 pub mod collab_backend;
 pub mod image_assets;
+pub mod restore;
 
 use figcraft_cloud_domain::{CloudDocumentId, PrincipalId, TenantId, Uuid};
-use figcraft_cloud_storage::document_snapshots::{SnapshotStoreError, restore_latest_snapshot_with};
+use figcraft_cloud_storage::document_snapshots::{SnapshotStoreError, restore_latest_snapshot_with, restore_snapshot_at_or_before_with};
 use figcraft_cloud_storage::events::{
     EventRepositoryError, MAX_REPLAY_BYTES, MAX_REPLAY_EVENTS, SequencerClaim, append_events, claim_sequencer, read_events,
 };
@@ -106,6 +107,46 @@ async fn restore_server(
     .map_err(RoomError::Snapshot)?;
     transaction.rollback().await.map_err(|_| RoomError::Begin)?;
     Ok((restore.restored, !restore.skipped.is_empty()))
+}
+
+/// The document as it was at sequence `target_seq` (S6-041): the newest verified snapshot at or
+/// below it, then the log replayed up to it. Fails (rather than guessing) when no such snapshot
+/// exists, the log has a gap or a batch does not apply, which is also how a named version proves
+/// it is restorable. Reads only; claims and fences nothing.
+pub async fn server_at(
+    pool: &PgPool,
+    store: &ObjectStore,
+    tenant_id: TenantId,
+    document_id: CloudDocumentId,
+    target_seq: i64,
+    limits: Limits,
+) -> Result<Server, RoomError> {
+    let mut transaction = begin_tenant_transaction(pool, tenant_id).await.map_err(|_| RoomError::Begin)?;
+    let restore =
+        restore_snapshot_at_or_before_with(&mut transaction, store, document_id, target_seq, |state| Server::restore(state, "", limits).ok())
+            .await
+            .map_err(RoomError::Snapshot)?;
+    transaction.rollback().await.map_err(|_| RoomError::Begin)?;
+    let Some((record, mut server)) = restore.restored else {
+        return Err(RoomError::Replay);
+    };
+    let mut after = record.seq;
+    while after < target_seq {
+        let mut transaction = begin_tenant_transaction(pool, tenant_id).await.map_err(|_| RoomError::Begin)?;
+        let page = read_events(&mut transaction, document_id, after, MAX_REPLAY_EVENTS, MAX_REPLAY_BYTES).await.map_err(RoomError::Open)?;
+        transaction.rollback().await.map_err(|_| RoomError::Begin)?;
+        if page.events.is_empty() {
+            return Err(RoomError::Replay);
+        }
+        after = page.next_after_seq();
+        for event in page.events.into_iter().take_while(|event| event.seq <= target_seq) {
+            server.replay(Journal::Accepted(event.batch)).map_err(|_| RoomError::Replay)?;
+        }
+    }
+    if i64::try_from(server.seq()).ok() != Some(target_seq) {
+        return Err(RoomError::Replay);
+    }
+    Ok(server)
 }
 
 /// Why a failed open means the durable history cannot be restored, or `None` for a failure that

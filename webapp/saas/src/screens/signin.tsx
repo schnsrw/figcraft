@@ -50,6 +50,10 @@ export function waitText(seconds: number | null): string {
   return `about ${minutes} minute${minutes === 1 ? "" : "s"}`;
 }
 
+/** The server refused the page's address (it was opened at a name the server is not set up for). */
+const WRONG_ADDRESS =
+  "This address isn't the one FigCraft is set up for, so sign-in was refused. Open it at the address your administrator gave you (for a trial on one computer: http://127.0.0.1:8080).";
+
 /** What a refused password sign-in tells the person. Never says which part was wrong. */
 export function loginProblem(error: ApiError): string {
   switch (error.status) {
@@ -58,6 +62,7 @@ export function loginProblem(error: ApiError): string {
     case 429:
       return `Too many attempts. Try again in ${waitText(error.retryAfter)}.`;
     case 403:
+      if (error.reason === "wrong_origin") return WRONG_ADDRESS;
       return "Password sign-in is turned off for this workspace. Use the organisation sign-in instead, or ask an administrator.";
     case 400:
       return "Enter your login and your password.";
@@ -81,6 +86,7 @@ export function passwordProblem(error: ApiError): string {
     case 404:
       return "That link or token isn't valid any more. It may have expired or already been used.";
     case 403:
+      if (error.reason === "wrong_origin") return WRONG_ADDRESS;
       return "Password accounts are turned off for this workspace.";
     case 429:
       return `Too many attempts. Try again in ${waitText(error.retryAfter)}.`;
@@ -192,66 +198,72 @@ export function SignInScreen({
   const any = methods.password || methods.oidc;
 
   return (
-    <section className="panel narrow" aria-labelledby="signin-heading">
-      <h1 id="signin-heading">{heading}</h1>
-      <p className="intro">
-        {deepLink
-          ? "Sign in to open this link. You will come back to it afterwards."
-          : "Sign in to open your files, projects and team."}
-      </p>
-      {reference !== "" && (
-        <p className="muted small" data-testid="signin-workspace-name">
-          Workspace <strong>{reference}</strong>{" "}
-          <button
-            type="button"
-            className="linkbutton"
-            onClick={() => {
-              rememberWorkspace("");
-              setWorkspace("");
+    <div className="auth-layout">
+      <aside className="auth-art" aria-hidden="true">
+        <span className="eyebrow">A space to make things</span>
+        <strong>Good work is made together.</strong>
+        <div className="auth-art-forms">
+          <span className="auth-form-circle" />
+          <span className="auth-form-frame" />
+          <span className="auth-form-chip" />
+        </div>
+        <span className="auth-art-foot">FigCraft / Design workspace</span>
+      </aside>
+      <section className="panel narrow" aria-labelledby="signin-heading">
+        <h1 id="signin-heading">{heading}</h1>
+        <p className="intro">
+          {deepLink
+            ? "Sign in to open this link. You will come back to it afterwards."
+            : "Sign in to open your files, projects and team."}
+        </p>
+        {reference !== "" && (
+          <p className="muted small" data-testid="signin-workspace-name">
+            Workspace <strong>{reference}</strong>{" "}
+            <button
+              type="button"
+              className="linkbutton"
+              onClick={() => {
+                rememberWorkspace("");
+                setWorkspace("");
+              }}
+            >
+              Change
+            </button>
+          </p>
+        )}
+        {methods.bootstrap_required === true && (
+          <p className="notice" role="status" data-testid="signin-first-run">
+            This workspace hasn't been set up yet.{" "}
+            <Link to="/setup">Set up the first administrator</Link>
+          </p>
+        )}
+        {methods.password && (
+          <PasswordForm
+            tenant={reference === "" ? null : reference}
+            onDone={() => {
+              if (reference !== "") rememberWorkspace(reference);
+              void refresh();
             }}
-          >
-            Change
-          </button>
-        </p>
-      )}
-      {methods.bootstrap_required === true && (
-        <p className="notice" role="status" data-testid="signin-first-run">
-          This workspace hasn't been set up yet.{" "}
-          <Link to="/setup">Set up the first administrator</Link>
-        </p>
-      )}
-      {methods.password && (
-        <PasswordForm
-          tenant={reference === "" ? null : reference}
-          onDone={() => {
-            if (reference !== "") rememberWorkspace(reference);
-            void refresh();
-          }}
-        />
-      )}
-      {methods.password && methods.oidc && (
-        <p className="muted small separator">or</p>
-      )}
-      {methods.oidc && (
-        <SignInButton
-          href={signInHref}
-          testId="signin-oidc"
-          label="Sign in with your organisation account"
-        />
-      )}
-      {!any && (
-        <p role="alert" className="notice error">
-          No sign-in method is turned on for this workspace. Ask an
-          administrator to enable one.
-        </p>
-      )}
-      {methods.bootstrap_required !== true && (
-        <p className="muted small" style={{ marginTop: "var(--s-4)" }}>
-          Setting this up for the first time?{" "}
-          <Link to="/setup">Set up the first administrator</Link>
-        </p>
-      )}
-    </section>
+          />
+        )}
+        {methods.password && methods.oidc && (
+          <p className="muted small separator">or</p>
+        )}
+        {methods.oidc && (
+          <SignInButton
+            href={signInHref}
+            testId="signin-oidc"
+            label="Sign in with your organisation account"
+          />
+        )}
+        {!any && (
+          <p role="alert" className="notice error">
+            No sign-in method is turned on for this workspace. Ask an
+            administrator to enable one.
+          </p>
+        )}
+      </section>
+    </div>
   );
 }
 
